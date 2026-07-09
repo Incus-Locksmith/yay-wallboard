@@ -12,9 +12,21 @@ let calls = [];
 
 // Extension-to-agent lookup
 const agents = {
-  "1003": "Agent 1003",
-  "1004": "Agent 1004",
-  "1005": "Agent 1005"
+  const agents = {
+  "1002": "Amel",
+  "1012": "Armin",
+  "1005": "Christian",
+  "1008": "Daniel",
+  "1010": "Dawn",
+  "1004": "Erika",
+  "1009": "Hemen",
+  "1015": "Louay",
+  "1007": "Michele",
+  "1003": "Rachel",
+  "1001": "Rose",
+  "1011": "Selma",
+  "1017": "Semir",
+  "1013": "Sofa"
 };
 
 // Home page / wallboard
