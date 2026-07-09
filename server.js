@@ -1,5 +1,6 @@
 const express = require("express");
 const { Pool } = require("pg");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -189,16 +190,129 @@ function getBestLocation(tech) {
   };
 }
 
+function isFullUkPostcode(postcode) {
+  const value = (postcode || "").trim().toUpperCase();
+  const fullPostcodeRegex = /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i;
+  return fullPostcodeRegex.test(value);
+}
+
 function postcodePrecision(postcode) {
   const value = (postcode || "").trim().toUpperCase();
 
-  // Rough UK full postcode check, good enough for display.
-  const fullPostcodeRegex = /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i;
-
   if (!value) return "Unknown";
-  if (fullPostcodeRegex.test(value)) return "Exact";
+  if (isFullUkPostcode(value)) return "Exact";
 
   return "Approx";
+}
+
+function normalisePostcode(postcode) {
+  return (postcode || "").trim().toUpperCase().replace(/\s+/g, " ");
+}
+
+async function lookupPostcodeLocation(postcode) {
+  const clean = normalisePostcode(postcode);
+
+  if (!clean) {
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "No postcode"
+    };
+  }
+
+  try {
+    if (isFullUkPostcode(clean)) {
+      const url = `https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`;
+      const response = await fetch(url);
+      const json = await response.json();
+
+      if (json.status === 200 && json.result) {
+        return {
+          ok: true,
+          latitude: json.result.latitude,
+          longitude: json.result.longitude,
+          precision: "Exact",
+          error: null
+        };
+      }
+    }
+
+    const outcode = clean.split(" ")[0];
+    const outcodeUrl = `https://api.postcodes.io/outcodes/${encodeURIComponent(outcode)}`;
+    const outcodeResponse = await fetch(outcodeUrl);
+    const outcodeJson = await outcodeResponse.json();
+
+    if (outcodeJson.status === 200 && outcodeJson.result) {
+      return {
+        ok: true,
+        latitude: outcodeJson.result.latitude,
+        longitude: outcodeJson.result.longitude,
+        precision: "Approx",
+        error: null
+      };
+    }
+
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "Postcode not found"
+    };
+  } catch (error) {
+    console.error("Postcode lookup error:", error);
+
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "Lookup failed"
+    };
+  }
+}
+
+function distanceMiles(lat1, lon1, lat2, lon2) {
+  if (
+    lat1 === null ||
+    lon1 === null ||
+    lat2 === null ||
+    lon2 === null ||
+    lat1 === undefined ||
+    lon1 === undefined ||
+    lat2 === undefined ||
+    lon2 === undefined
+  ) {
+    return null;
+  }
+
+  const earthRadiusMiles = 3958.8;
+
+  const toRadians = degrees => degrees * Math.PI / 180;
+
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusMiles * c;
+}
+
+function formatDistance(distance) {
+  if (distance === null || distance === undefined || Number.isNaN(distance)) {
+    return "—";
+  }
+
+  return `${distance.toFixed(1)} miles`;
 }
 
 function sharedStyles() {
@@ -332,6 +446,11 @@ function sharedStyles() {
 
     .warning-text {
       color: #fbbf24;
+      font-weight: bold;
+    }
+
+    .distance {
+      font-size: 22px;
       font-weight: bold;
     }
   `;
@@ -585,6 +704,19 @@ app.get("/dispatch", async (req, res) => {
     const customerPostcode = (req.query.postcode || "").trim().toUpperCase();
     const jobType = (req.query.job_type || "").trim();
 
+    let customerLocation = null;
+    let customerLocationMessage = "";
+
+    if (customerPostcode) {
+      customerLocation = await lookupPostcodeLocation(customerPostcode);
+
+      if (!customerLocation.ok) {
+        customerLocationMessage = `Could not locate customer postcode: ${customerPostcode}`;
+      } else {
+        customerLocationMessage = `Customer postcode located using ${customerLocation.precision.toLowerCase()} postcode data.`;
+      }
+    }
+
     const result = await pool.query(`
       SELECT *
       FROM technicians
@@ -594,23 +726,64 @@ app.get("/dispatch", async (req, res) => {
 
     const technicians = result.rows;
 
-    const candidates = technicians
-      .filter(tech => isUsableForDispatch(tech.status))
-      .sort((a, b) => {
-        const rankDiff = dispatchRank(a.status) - dispatchRank(b.status);
-        if (rankDiff !== 0) return rankDiff;
+    const candidates = technicians.filter(tech => isUsableForDispatch(tech.status));
 
-        return new Date(b.updated_at) - new Date(a.updated_at);
-      });
+    const candidatesWithDistance = await Promise.all(
+      candidates.map(async tech => {
+        const location = getBestLocation(tech);
+        const techLocation = await lookupPostcodeLocation(location.postcode);
 
-    const rows = candidates.map((tech, index) => {
+        let distance = null;
+
+        if (
+          customerLocation &&
+          customerLocation.ok &&
+          techLocation &&
+          techLocation.ok
+        ) {
+          distance = distanceMiles(
+            customerLocation.latitude,
+            customerLocation.longitude,
+            techLocation.latitude,
+            techLocation.longitude
+          );
+        }
+
+        return {
+          tech,
+          location,
+          techLocation,
+          distance
+        };
+      })
+    );
+
+    candidatesWithDistance.sort((a, b) => {
+      const rankDiff = dispatchRank(a.tech.status) - dispatchRank(b.tech.status);
+      if (rankDiff !== 0) return rankDiff;
+
+      if (a.distance !== null && b.distance === null) return -1;
+      if (a.distance === null && b.distance !== null) return 1;
+
+      if (a.distance !== null && b.distance !== null) {
+        return a.distance - b.distance;
+      }
+
+      return new Date(b.tech.updated_at) - new Date(a.tech.updated_at);
+    });
+
+    const rows = candidatesWithDistance.map((item, index) => {
+      const tech = item.tech;
       const statusClass = technicianStatusClass(tech.status);
-      const location = getBestLocation(tech);
-      const precision = postcodePrecision(location.postcode);
+      const precision = item.techLocation.ok ? item.techLocation.precision : postcodePrecision(item.location.postcode);
 
       const precisionText = precision === "Approx"
         ? `<span class="warning-text">Approx</span>`
         : escapeHtml(precision);
+
+      const distanceText = customerPostcode
+        ? formatDistance(item.distance)
+        : "Enter postcode";
 
       return `
         <tr>
@@ -619,10 +792,11 @@ app.get("/dispatch", async (req, res) => {
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
           <td>${escapeHtml(tech.available_from || "Now / check")}</td>
           <td>
-            ${escapeHtml(location.postcode || "No postcode")}
+            ${escapeHtml(item.location.postcode || "No postcode")}
             <br>
-            <span class="muted">${escapeHtml(location.source)} · ${precisionText}</span>
+            <span class="muted">${escapeHtml(item.location.source)} · ${precisionText}</span>
           </td>
+          <td><span class="distance">${distanceText}</span><br><span class="muted">Straight-line estimate</span></td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
           <td>${formatDateTime(tech.updated_at)}</td>
@@ -653,6 +827,14 @@ app.get("/dispatch", async (req, res) => {
             margin-bottom: 25px;
             color: #d1d5db;
           }
+
+          .notice.good {
+            border-left-color: #16a34a;
+          }
+
+          .notice.bad {
+            border-left-color: #dc2626;
+          }
         </style>
       </head>
 
@@ -676,12 +858,14 @@ app.get("/dispatch", async (req, res) => {
 
         ${
           customerPostcode
-            ? `<div class="notice">
-                Showing available / usable locksmiths for <strong>${escapeHtml(customerPostcode)}</strong>.
-                This version does not calculate distance yet. Partial postcodes are marked as approximate.
+            ? `<div class="notice ${customerLocation && customerLocation.ok ? "good" : "bad"}">
+                <strong>${escapeHtml(customerPostcode)}</strong> — ${escapeHtml(customerLocationMessage)}
+                <br>
+                Distances are straight-line estimates, not driving times. Partial postcodes are approximate.
               </div>`
             : `<div class="notice">
-                Enter a customer postcode to help the agent shortlist locksmiths. This version sorts by availability and freshness, not driving distance yet.
+                Enter a customer postcode to sort available locksmiths by approximate distance.
+                Full postcodes are best. Partial postcodes still work, but are approximate.
               </div>`
         }
 
@@ -693,6 +877,7 @@ app.get("/dispatch", async (req, res) => {
               <th>Status</th>
               <th>Available From</th>
               <th>Location</th>
+              <th>Distance</th>
               <th>Skills</th>
               <th>Notes</th>
               <th>Last Updated</th>
@@ -700,7 +885,7 @@ app.get("/dispatch", async (req, res) => {
           </thead>
 
           <tbody>
-            ${rows || `<tr><td colspan="8">No available technicians found</td></tr>`}
+            ${rows || `<tr><td colspan="9">No available technicians found</td></tr>`}
           </tbody>
         </table>
       </body>
