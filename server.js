@@ -33,7 +33,7 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS calls (
       id SERIAL PRIMARY KEY,
-      uuid TEXT,
+      uuid TEXT UNIQUE,
       call_type TEXT,
       from_number TEXT,
       to_number TEXT,
@@ -43,15 +43,28 @@ async function initDb() {
       answered_by TEXT,
       answer_type TEXT,
       raw_json JSONB,
-      received_at TIMESTAMP DEFAULT NOW()
+      received_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE calls
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS calls_uuid_unique
+    ON calls (uuid);
   `);
 }
 
 function formatSeconds(seconds) {
   if (!seconds) return "0s";
+
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
+
   if (mins === 0) return `${secs}s`;
   return `${mins}m ${secs}s`;
 }
@@ -71,35 +84,58 @@ app.get("/", async (req, res) => {
 
   const agentStats = {};
 
+  // Start with every agent, even if they have zero calls
+  Object.entries(agents).forEach(([ext, name]) => {
+    agentStats[ext] = {
+      ext,
+      name,
+      answered: 0,
+      totalDuration: 0,
+      status: "No active call"
+    };
+  });
+
   answeredCalls.forEach(call => {
     const ext = call.answered_by;
     const name = agents[ext] || `Ext ${ext}`;
 
     if (!agentStats[ext]) {
       agentStats[ext] = {
+        ext,
         name,
         answered: 0,
-        totalDuration: 0
+        totalDuration: 0,
+        status: "No active call"
       };
     }
 
     agentStats[ext].answered += 1;
     agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
+
+    // If there is no end time, treat the agent as engaged
+    if (!call.end_time) {
+      agentStats[ext].status = "Engaged";
+    }
   });
 
-  const agentRows = Object.values(agentStats).map(agent => {
-    const avgDuration = agent.answered
-      ? Math.round(agent.totalDuration / agent.answered)
-      : 0;
+  const agentRows = Object.values(agentStats)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(agent => {
+      const avgDuration = agent.answered
+        ? Math.round(agent.totalDuration / agent.answered)
+        : 0;
 
-    return `
-      <tr>
-        <td>${agent.name}</td>
-        <td>${agent.answered}</td>
-        <td>${formatSeconds(avgDuration)}</td>
-      </tr>
-    `;
-  }).join("");
+      const statusClass = agent.status === "Engaged" ? "engaged" : "inactive";
+
+      return `
+        <tr>
+          <td>${agent.name}</td>
+          <td>${agent.answered}</td>
+          <td>${formatSeconds(avgDuration)}</td>
+          <td><span class="status ${statusClass}">${agent.status}</span></td>
+        </tr>
+      `;
+    }).join("");
 
   res.send(`
     <!DOCTYPE html>
@@ -160,6 +196,20 @@ app.get("/", async (req, res) => {
           font-size: 16px;
           text-transform: uppercase;
         }
+        .status {
+          padding: 8px 14px;
+          border-radius: 999px;
+          font-size: 16px;
+          font-weight: bold;
+        }
+        .engaged {
+          background: #dc2626;
+          color: white;
+        }
+        .inactive {
+          background: #374151;
+          color: #d1d5db;
+        }
       </style>
     </head>
     <body>
@@ -191,10 +241,11 @@ app.get("/", async (req, res) => {
             <th>Agent</th>
             <th>Answered</th>
             <th>Avg Duration</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
-          ${agentRows || `<tr><td colspan="3">No answered calls yet</td></tr>`}
+          ${agentRows}
         </tbody>
       </table>
     </body>
@@ -219,9 +270,22 @@ app.post("/webhook/yay", async (req, res) => {
       duration_seconds,
       answered_by,
       answer_type,
-      raw_json
+      raw_json,
+      updated_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+    ON CONFLICT (uuid)
+    DO UPDATE SET
+      call_type = EXCLUDED.call_type,
+      from_number = EXCLUDED.from_number,
+      to_number = EXCLUDED.to_number,
+      start_time = COALESCE(EXCLUDED.start_time, calls.start_time),
+      end_time = COALESCE(EXCLUDED.end_time, calls.end_time),
+      duration_seconds = GREATEST(EXCLUDED.duration_seconds, calls.duration_seconds),
+      answered_by = COALESCE(NULLIF(EXCLUDED.answered_by, ''), calls.answered_by),
+      answer_type = COALESCE(NULLIF(EXCLUDED.answer_type, ''), calls.answer_type),
+      raw_json = EXCLUDED.raw_json,
+      updated_at = NOW()
   `, [
     data.uuid,
     data.call_type,
