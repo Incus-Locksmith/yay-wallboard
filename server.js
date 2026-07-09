@@ -12,7 +12,6 @@ let calls = [];
 
 // Extension-to-agent lookup
 const agents = {
-  const agents = {
   "1002": "Amel",
   "1012": "Armin",
   "1005": "Christian",
