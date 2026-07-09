@@ -85,6 +85,17 @@ async function initDb() {
   `);
 }
 
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function formatSeconds(seconds) {
   if (!seconds) return "0s";
 
@@ -96,6 +107,8 @@ function formatSeconds(seconds) {
 }
 
 function formatDateTime(date) {
+  if (!date) return "—";
+
   return new Date(date).toLocaleString("en-GB", {
     timeZone: "Europe/London",
     day: "2-digit",
@@ -121,9 +134,9 @@ function formatTimeOnly(date) {
 function technicianStatusClass(status) {
   const value = (status || "").toLowerCase();
 
+  if (value.includes("soon")) return "soon";
   if (value.includes("available")) return "available";
   if (value.includes("job")) return "onjob";
-  if (value.includes("soon")) return "soon";
   if (value.includes("holiday")) return "off";
   if (value.includes("sick")) return "off";
   if (value.includes("vehicle")) return "bad";
@@ -131,6 +144,197 @@ function technicianStatusClass(status) {
   if (value.includes("off")) return "off";
 
   return "neutral";
+}
+
+function dispatchRank(status) {
+  const value = (status || "").toLowerCase();
+
+  if (value.includes("available") && !value.includes("soon")) return 1;
+  if (value.includes("soon")) return 2;
+  if (value.includes("job")) return 3;
+  return 4;
+}
+
+function isUsableForDispatch(status) {
+  const value = (status || "").toLowerCase();
+
+  return (
+    value.includes("available") ||
+    value.includes("soon") ||
+    value.includes("job")
+  );
+}
+
+function getBestLocation(tech) {
+  const current = (tech.current_postcode || "").trim();
+  const base = (tech.base_postcode || "").trim();
+
+  if (current) {
+    return {
+      postcode: current,
+      source: "Current"
+    };
+  }
+
+  if (base) {
+    return {
+      postcode: base,
+      source: "Base"
+    };
+  }
+
+  return {
+    postcode: "",
+    source: "Unknown"
+  };
+}
+
+function postcodePrecision(postcode) {
+  const value = (postcode || "").trim().toUpperCase();
+
+  // Rough UK full postcode check, good enough for display.
+  const fullPostcodeRegex = /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i;
+
+  if (!value) return "Unknown";
+  if (fullPostcodeRegex.test(value)) return "Exact";
+
+  return "Approx";
+}
+
+function sharedStyles() {
+  return `
+    body {
+      font-family: Arial, sans-serif;
+      background: #111827;
+      color: white;
+      padding: 40px;
+    }
+
+    a {
+      color: #93c5fd;
+      text-decoration: none;
+      margin-right: 18px;
+    }
+
+    h1 {
+      font-size: 42px;
+      margin-bottom: 5px;
+    }
+
+    h2 {
+      margin-top: 0;
+    }
+
+    .subtitle {
+      color: #9ca3af;
+      margin-bottom: 30px;
+    }
+
+    .nav {
+      margin-bottom: 25px;
+    }
+
+    .panel {
+      background: #1f2937;
+      border-radius: 14px;
+      padding: 25px;
+      margin-bottom: 35px;
+    }
+
+    input, select, textarea, button {
+      font-size: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #374151;
+    }
+
+    input, select, textarea {
+      background: #111827;
+      color: white;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #1f2937;
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 14px;
+      border-bottom: 1px solid #374151;
+      font-size: 16px;
+      vertical-align: top;
+    }
+
+    th {
+      color: #9ca3af;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    .pill, .status {
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+
+    .available {
+      background: #16a34a;
+      color: white;
+    }
+
+    .soon {
+      background: #f59e0b;
+      color: black;
+    }
+
+    .onjob {
+      background: #2563eb;
+      color: white;
+    }
+
+    .off {
+      background: #6b7280;
+      color: white;
+    }
+
+    .bad {
+      background: #dc2626;
+      color: white;
+    }
+
+    .neutral, .inactive {
+      background: #374151;
+      color: #d1d5db;
+    }
+
+    .engaged {
+      background: #dc2626;
+      color: white;
+    }
+
+    .muted {
+      color: #9ca3af;
+    }
+
+    .warning-text {
+      color: #fbbf24;
+      font-weight: bold;
+    }
+  `;
 }
 
 // Call wallboard page
@@ -163,7 +367,7 @@ app.get("/", async (req, res) => {
     } else if (missedRate >= 20) {
       missedRateClass = "bad";
     } else if (missedRate >= 10) {
-      missedRateClass = "warning";
+      missedRateClass = "soon";
     }
 
     const lastReceived = latestResult.rows[0].last_received;
@@ -230,7 +434,7 @@ app.get("/", async (req, res) => {
 
         return `
           <tr>
-            <td>${agent.name}</td>
+            <td>${escapeHtml(agent.name)}</td>
             <td>${agent.answered}</td>
             <td>${formatSeconds(avgDuration)}</td>
             <td>${formatTimeOnly(agent.lastCallTime)}</td>
@@ -247,37 +451,12 @@ app.get("/", async (req, res) => {
         <title>Keys247 Call Wallboard (Incus)</title>
         <meta http-equiv="refresh" content="5">
         <style>
-          body {
-            font-family: Arial, sans-serif;
-            background: #111827;
-            color: white;
-            padding: 40px;
-          }
-
-          a {
-            color: #93c5fd;
-            text-decoration: none;
-            margin-right: 18px;
-          }
-
-          h1 {
-            font-size: 42px;
-            margin-bottom: 5px;
-          }
-
-          .subtitle {
-            color: #9ca3af;
-            margin-bottom: 8px;
-          }
+          ${sharedStyles()}
 
           .updated {
             color: #d1d5db;
             font-size: 16px;
             margin-bottom: 30px;
-          }
-
-          .nav {
-            margin-bottom: 25px;
           }
 
           .cards {
@@ -298,7 +477,7 @@ app.get("/", async (req, res) => {
             border-color: #16a34a;
           }
 
-          .card.warning {
+          .card.soon {
             border-color: #f59e0b;
           }
 
@@ -325,7 +504,7 @@ app.get("/", async (req, res) => {
             color: #22c55e;
           }
 
-          .value.warning {
+          .value.soon {
             color: #fbbf24;
           }
 
@@ -336,44 +515,6 @@ app.get("/", async (req, res) => {
           .value.neutral {
             color: white;
           }
-
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            background: #1f2937;
-            border-radius: 14px;
-            overflow: hidden;
-          }
-
-          th, td {
-            text-align: left;
-            padding: 18px;
-            border-bottom: 1px solid #374151;
-            font-size: 22px;
-          }
-
-          th {
-            color: #9ca3af;
-            font-size: 16px;
-            text-transform: uppercase;
-          }
-
-          .status {
-            padding: 8px 14px;
-            border-radius: 999px;
-            font-size: 16px;
-            font-weight: bold;
-          }
-
-          .engaged {
-            background: #dc2626;
-            color: white;
-          }
-
-          .inactive {
-            background: #374151;
-            color: #d1d5db;
-          }
         </style>
       </head>
 
@@ -381,6 +522,7 @@ app.get("/", async (req, res) => {
         <div class="nav">
           <a href="/">Call Wallboard</a>
           <a href="/technicians">Technicians</a>
+          <a href="/dispatch">Dispatch</a>
         </div>
 
         <h1>Keys247 Call Wallboard (Incus)</h1>
@@ -437,6 +579,139 @@ app.get("/", async (req, res) => {
   }
 });
 
+// Dispatch page
+app.get("/dispatch", async (req, res) => {
+  try {
+    const customerPostcode = (req.query.postcode || "").trim().toUpperCase();
+    const jobType = (req.query.job_type || "").trim();
+
+    const result = await pool.query(`
+      SELECT *
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY updated_at DESC
+    `);
+
+    const technicians = result.rows;
+
+    const candidates = technicians
+      .filter(tech => isUsableForDispatch(tech.status))
+      .sort((a, b) => {
+        const rankDiff = dispatchRank(a.status) - dispatchRank(b.status);
+        if (rankDiff !== 0) return rankDiff;
+
+        return new Date(b.updated_at) - new Date(a.updated_at);
+      });
+
+    const rows = candidates.map((tech, index) => {
+      const statusClass = technicianStatusClass(tech.status);
+      const location = getBestLocation(tech);
+      const precision = postcodePrecision(location.postcode);
+
+      const precisionText = precision === "Approx"
+        ? `<span class="warning-text">Approx</span>`
+        : escapeHtml(precision);
+
+      return `
+        <tr>
+          <td>${index + 1}</td>
+          <td><strong>${escapeHtml(tech.name)}</strong><br><span class="muted">${escapeHtml(tech.phone)}</span></td>
+          <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
+          <td>${escapeHtml(tech.available_from || "Now / check")}</td>
+          <td>
+            ${escapeHtml(location.postcode || "No postcode")}
+            <br>
+            <span class="muted">${escapeHtml(location.source)} · ${precisionText}</span>
+          </td>
+          <td>${escapeHtml(tech.skills)}</td>
+          <td>${escapeHtml(tech.notes)}</td>
+          <td>${formatDateTime(tech.updated_at)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Dispatch</title>
+        <meta http-equiv="refresh" content="60">
+        <style>
+          ${sharedStyles()}
+
+          form.search {
+            display: grid;
+            grid-template-columns: 2fr 2fr 1fr;
+            gap: 15px;
+          }
+
+          .notice {
+            background: #1f2937;
+            border-left: 5px solid #f59e0b;
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 25px;
+            color: #d1d5db;
+          }
+        </style>
+      </head>
+
+      <body>
+        <div class="nav">
+          <a href="/">Call Wallboard</a>
+          <a href="/technicians">Technicians</a>
+          <a href="/dispatch">Dispatch</a>
+        </div>
+
+        <h1>Dispatch</h1>
+        <div class="subtitle">Find a suitable available locksmith quickly</div>
+
+        <div class="panel">
+          <form class="search" method="GET" action="/dispatch">
+            <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. CR0 5JH">
+            <input name="job_type" value="${escapeHtml(jobType)}" placeholder="Job type e.g. lockout, uPVC">
+            <button type="submit">Find Locksmith</button>
+          </form>
+        </div>
+
+        ${
+          customerPostcode
+            ? `<div class="notice">
+                Showing available / usable locksmiths for <strong>${escapeHtml(customerPostcode)}</strong>.
+                This version does not calculate distance yet. Partial postcodes are marked as approximate.
+              </div>`
+            : `<div class="notice">
+                Enter a customer postcode to help the agent shortlist locksmiths. This version sorts by availability and freshness, not driving distance yet.
+              </div>`
+        }
+
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Technician</th>
+              <th>Status</th>
+              <th>Available From</th>
+              <th>Location</th>
+              <th>Skills</th>
+              <th>Notes</th>
+              <th>Last Updated</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            ${rows || `<tr><td colspan="8">No available technicians found</td></tr>`}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Dispatch page error:", error);
+    res.status(500).send("Dispatch page error. Check Render logs.");
+  }
+});
+
 // Technician availability board
 app.get("/technicians", async (req, res) => {
   try {
@@ -461,14 +736,14 @@ app.get("/technicians", async (req, res) => {
 
       return `
         <tr>
-          <td>${tech.name || ""}</td>
-          <td>${tech.phone || ""}</td>
-          <td>${tech.base_postcode || ""}</td>
-          <td>${tech.current_postcode || ""}</td>
-          <td><span class="pill ${statusClass}">${tech.status || ""}</span></td>
-          <td>${tech.available_from || ""}</td>
-          <td>${tech.skills || ""}</td>
-          <td>${tech.notes || ""}</td>
+          <td>${escapeHtml(tech.name)}</td>
+          <td>${escapeHtml(tech.phone)}</td>
+          <td>${escapeHtml(tech.base_postcode)}</td>
+          <td>${escapeHtml(tech.current_postcode)}</td>
+          <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
+          <td>${escapeHtml(tech.available_from)}</td>
+          <td>${escapeHtml(tech.skills)}</td>
+          <td>${escapeHtml(tech.notes)}</td>
           <td>${formatDateTime(tech.updated_at)}</td>
           <td>
             <form method="GET" action="/technicians/edit" style="display:inline;">
@@ -487,39 +762,7 @@ app.get("/technicians", async (req, res) => {
         <title>Technician Availability</title>
         <meta http-equiv="refresh" content="30">
         <style>
-          body {
-            font-family: Arial, sans-serif;
-            background: #111827;
-            color: white;
-            padding: 40px;
-          }
-
-          a {
-            color: #93c5fd;
-            text-decoration: none;
-            margin-right: 18px;
-          }
-
-          h1 {
-            font-size: 42px;
-            margin-bottom: 5px;
-          }
-
-          .subtitle {
-            color: #9ca3af;
-            margin-bottom: 30px;
-          }
-
-          .nav {
-            margin-bottom: 25px;
-          }
-
-          .panel {
-            background: #1f2937;
-            border-radius: 14px;
-            padding: 25px;
-            margin-bottom: 35px;
-          }
+          ${sharedStyles()}
 
           form.grid {
             display: grid;
@@ -527,89 +770,9 @@ app.get("/technicians", async (req, res) => {
             gap: 15px;
           }
 
-          input, select, textarea, button {
-            font-size: 16px;
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #374151;
-          }
-
-          input, select, textarea {
-            background: #111827;
-            color: white;
-          }
-
           textarea {
             grid-column: span 4;
             min-height: 70px;
-          }
-
-          button {
-            background: #2563eb;
-            color: white;
-            border: none;
-            cursor: pointer;
-            font-weight: bold;
-          }
-
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            background: #1f2937;
-            border-radius: 14px;
-            overflow: hidden;
-          }
-
-          th, td {
-            text-align: left;
-            padding: 14px;
-            border-bottom: 1px solid #374151;
-            font-size: 16px;
-            vertical-align: top;
-          }
-
-          th {
-            color: #9ca3af;
-            font-size: 13px;
-            text-transform: uppercase;
-          }
-
-          .pill {
-            padding: 7px 12px;
-            border-radius: 999px;
-            font-size: 13px;
-            font-weight: bold;
-            white-space: nowrap;
-          }
-
-          .available {
-            background: #16a34a;
-            color: white;
-          }
-
-          .soon {
-            background: #f59e0b;
-            color: black;
-          }
-
-          .onjob {
-            background: #2563eb;
-            color: white;
-          }
-
-          .off {
-            background: #6b7280;
-            color: white;
-          }
-
-          .bad {
-            background: #dc2626;
-            color: white;
-          }
-
-          .neutral {
-            background: #374151;
-            color: #d1d5db;
           }
         </style>
       </head>
@@ -618,6 +781,7 @@ app.get("/technicians", async (req, res) => {
         <div class="nav">
           <a href="/">Call Wallboard</a>
           <a href="/technicians">Technicians</a>
+          <a href="/dispatch">Dispatch</a>
         </div>
 
         <h1>Technician Availability</h1>
@@ -719,55 +883,21 @@ app.get("/technicians/edit", async (req, res) => {
       <head>
         <title>Edit Technician</title>
         <style>
-          body {
-            font-family: Arial, sans-serif;
-            background: #111827;
-            color: white;
-            padding: 40px;
-          }
-
-          a {
-            color: #93c5fd;
-            text-decoration: none;
-            margin-right: 18px;
-          }
+          ${sharedStyles()}
 
           .panel {
-            background: #1f2937;
-            border-radius: 14px;
-            padding: 25px;
             max-width: 900px;
           }
 
-          form {
+          form.edit {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 15px;
           }
 
-          input, select, textarea, button {
-            font-size: 16px;
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #374151;
-          }
-
-          input, select, textarea {
-            background: #111827;
-            color: white;
-          }
-
           textarea {
             grid-column: span 2;
             min-height: 100px;
-          }
-
-          button {
-            background: #2563eb;
-            color: white;
-            border: none;
-            cursor: pointer;
-            font-weight: bold;
           }
 
           .danger {
@@ -782,23 +912,23 @@ app.get("/technicians/edit", async (req, res) => {
         <h1>Edit Technician</h1>
 
         <div class="panel">
-          <form method="POST" action="/technicians/save">
+          <form class="edit" method="POST" action="/technicians/save">
             <input type="hidden" name="id" value="${tech.id}">
 
-            <input name="name" value="${tech.name || ""}" placeholder="Name" required>
-            <input name="phone" value="${tech.phone || ""}" placeholder="Phone">
-            <input name="base_postcode" value="${tech.base_postcode || ""}" placeholder="Base postcode">
-            <input name="current_postcode" value="${tech.current_postcode || ""}" placeholder="Current postcode">
+            <input name="name" value="${escapeHtml(tech.name)}" placeholder="Name" required>
+            <input name="phone" value="${escapeHtml(tech.phone)}" placeholder="Phone">
+            <input name="base_postcode" value="${escapeHtml(tech.base_postcode)}" placeholder="Base postcode">
+            <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
 
             <select name="status">
               ${statusOptions}
             </select>
 
-            <input name="available_from" value="${tech.available_from || ""}" placeholder="Available from">
-            <input name="skills" value="${tech.skills || ""}" placeholder="Skills">
+            <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
+            <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
 
-            <textarea name="notes" placeholder="Notes">${tech.notes || ""}</textarea>
+            <textarea name="notes" placeholder="Notes">${escapeHtml(tech.notes)}</textarea>
           </form>
 
           <form method="POST" action="/technicians/delete" style="margin-top:20px;">
