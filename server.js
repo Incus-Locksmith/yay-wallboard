@@ -66,7 +66,7 @@ app.get("/", (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Ford Call Wallboard</title>
+      <title>Keys247 Call Wallboard (Incus)</title>
       <meta http-equiv="refresh" content="5">
       <style>
         body {
@@ -124,7 +124,7 @@ app.get("/", (req, res) => {
       </style>
     </head>
     <body>
-      <h1>Ford Call Wallboard</h1>
+      <h1>Keys247 Call Wallboard (Incus)</h1>
       <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
 
       <div class="cards">
