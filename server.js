@@ -1,14 +1,15 @@
 const express = require("express");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Temporary in-memory storage.
-// This is enough to prove the wallboard works.
-// Later we can move this to a proper database.
-let calls = [];
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
 // Extension-to-agent lookup
 const agents = {
@@ -28,16 +29,43 @@ const agents = {
   "1013": "Sofa"
 };
 
-// Home page / wallboard
-app.get("/", (req, res) => {
-  const now = new Date();
-  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS calls (
+      id SERIAL PRIMARY KEY,
+      uuid TEXT,
+      call_type TEXT,
+      from_number TEXT,
+      to_number TEXT,
+      start_time TIMESTAMP,
+      end_time TIMESTAMP,
+      duration_seconds INTEGER DEFAULT 0,
+      answered_by TEXT,
+      answer_type TEXT,
+      raw_json JSONB,
+      received_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+}
 
-  const recentCalls = calls.filter(call => {
-    const start = new Date(call.start_time);
-    return start >= since;
-  });
+function formatSeconds(seconds) {
+  if (!seconds) return "0s";
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins === 0) return `${secs}s`;
+  return `${mins}m ${secs}s`;
+}
 
+// Wallboard page
+app.get("/", async (req, res) => {
+  const result = await pool.query(`
+    SELECT *
+    FROM calls
+    WHERE start_time >= NOW() - INTERVAL '24 hours'
+    ORDER BY start_time DESC
+  `);
+
+  const recentCalls = result.rows;
   const answeredCalls = recentCalls.filter(call => call.answered_by);
   const missedCalls = recentCalls.filter(call => !call.answered_by);
 
@@ -175,43 +203,60 @@ app.get("/", (req, res) => {
 });
 
 // Yay webhook endpoint
-app.post("/webhook/yay", (req, res) => {
+app.post("/webhook/yay", async (req, res) => {
   const data = req.body;
 
   console.log("Received Yay webhook:", data);
 
-  calls.push({
-    uuid: data.uuid,
-    call_type: data.call_type,
-    from_number: data.from,
-    to_number: data.to,
-    start_time: data.start,
-    end_time: data.end || null,
-    duration_seconds: data.duration || 0,
-    answered_by: data.answered_by || "",
-    answer_type: data.answer_type || "",
-    raw_json: data,
-    received_at: new Date().toISOString()
-  });
+  await pool.query(`
+    INSERT INTO calls (
+      uuid,
+      call_type,
+      from_number,
+      to_number,
+      start_time,
+      end_time,
+      duration_seconds,
+      answered_by,
+      answer_type,
+      raw_json
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  `, [
+    data.uuid,
+    data.call_type,
+    data.from,
+    data.to,
+    data.start || null,
+    data.end || null,
+    data.duration || 0,
+    data.answered_by || "",
+    data.answer_type || "",
+    data
+  ]);
 
   res.status(200).send("OK");
 });
 
-// Debug page so you can see raw calls
-app.get("/debug", (req, res) => {
-  res.json(calls);
+// Debug page
+app.get("/debug", async (req, res) => {
+  const result = await pool.query(`
+    SELECT *
+    FROM calls
+    ORDER BY received_at DESC
+    LIMIT 50
+  `);
+
+  res.json(result.rows);
 });
 
-function formatSeconds(seconds) {
-  if (!seconds) return "0s";
-
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-
-  if (mins === 0) return `${secs}s`;
-  return `${mins}m ${secs}s`;
-}
-
-app.listen(PORT, () => {
-  console.log(`Yay wallboard running on port ${PORT}`);
-});
+initDb()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Yay wallboard running on port ${PORT}`);
+    });
+  })
+  .catch(error => {
+    console.error("Database failed to start:", error);
+    process.exit(1);
+  });
