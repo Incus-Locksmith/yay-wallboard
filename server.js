@@ -53,8 +53,6 @@ async function initDb() {
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
   `);
 
-  // Remove duplicate UUID rows before creating the unique index.
-  // This keeps the oldest row and removes later duplicates.
   await pool.query(`
     DELETE FROM calls a
     USING calls b
@@ -79,6 +77,29 @@ function formatSeconds(seconds) {
   return `${mins}m ${secs}s`;
 }
 
+function formatDateTime(date) {
+  return new Date(date).toLocaleString("en-GB", {
+    timeZone: "Europe/London",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+function formatTimeOnly(date) {
+  if (!date) return "—";
+
+  return new Date(date).toLocaleTimeString("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 // Wallboard page
 app.get("/", async (req, res) => {
   try {
@@ -89,19 +110,46 @@ app.get("/", async (req, res) => {
       ORDER BY start_time DESC
     `);
 
+    const latestResult = await pool.query(`
+      SELECT MAX(received_at) AS last_received
+      FROM calls
+    `);
+
     const recentCalls = result.rows;
     const answeredCalls = recentCalls.filter(call => call.answered_by);
     const missedCalls = recentCalls.filter(call => !call.answered_by);
 
+    const missedRate = recentCalls.length
+      ? Math.round((missedCalls.length / recentCalls.length) * 100)
+      : 0;
+
+    let missedRateClass = "good";
+
+    if (recentCalls.length === 0) {
+      missedRateClass = "neutral";
+    } else if (missedRate >= 20) {
+      missedRateClass = "bad";
+    } else if (missedRate >= 10) {
+      missedRateClass = "warning";
+    }
+
+    const lastReceived = latestResult.rows[0].last_received;
+
+    const lastUpdatedText = lastReceived
+      ? `Last call received: ${formatDateTime(lastReceived)}`
+      : "No calls received yet";
+
+    const pageUpdatedText = `Page refreshed: ${formatDateTime(new Date())}`;
+
     const agentStats = {};
 
-    // Show every agent, even if they have zero calls
     Object.entries(agents).forEach(([ext, name]) => {
       agentStats[ext] = {
         ext,
         name,
         answered: 0,
         totalDuration: 0,
+        lastCallTime: null,
         status: "No active call"
       };
     });
@@ -116,6 +164,7 @@ app.get("/", async (req, res) => {
           name,
           answered: 0,
           totalDuration: 0,
+          lastCallTime: null,
           status: "No active call"
         };
       }
@@ -123,7 +172,15 @@ app.get("/", async (req, res) => {
       agentStats[ext].answered += 1;
       agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
 
-      // If there is no end time, treat the agent as engaged
+      const callTime = call.start_time || call.received_at;
+
+      if (
+        !agentStats[ext].lastCallTime ||
+        new Date(callTime) > new Date(agentStats[ext].lastCallTime)
+      ) {
+        agentStats[ext].lastCallTime = callTime;
+      }
+
       if (!call.end_time) {
         agentStats[ext].status = "Engaged";
       }
@@ -143,6 +200,7 @@ app.get("/", async (req, res) => {
             <td>${agent.name}</td>
             <td>${agent.answered}</td>
             <td>${formatSeconds(avgDuration)}</td>
+            <td>${formatTimeOnly(agent.lastCallTime)}</td>
             <td><span class="status ${statusClass}">${agent.status}</span></td>
           </tr>
         `;
@@ -170,6 +228,12 @@ app.get("/", async (req, res) => {
 
           .subtitle {
             color: #9ca3af;
+            margin-bottom: 8px;
+          }
+
+          .updated {
+            color: #d1d5db;
+            font-size: 16px;
             margin-bottom: 30px;
           }
 
@@ -184,6 +248,23 @@ app.get("/", async (req, res) => {
             background: #1f2937;
             border-radius: 14px;
             padding: 25px;
+            border: 2px solid transparent;
+          }
+
+          .card.good {
+            border-color: #16a34a;
+          }
+
+          .card.warning {
+            border-color: #f59e0b;
+          }
+
+          .card.bad {
+            border-color: #dc2626;
+          }
+
+          .card.neutral {
+            border-color: #374151;
           }
 
           .label {
@@ -195,6 +276,22 @@ app.get("/", async (req, res) => {
             font-size: 42px;
             font-weight: bold;
             margin-top: 10px;
+          }
+
+          .value.good {
+            color: #22c55e;
+          }
+
+          .value.warning {
+            color: #fbbf24;
+          }
+
+          .value.bad {
+            color: #ef4444;
+          }
+
+          .value.neutral {
+            color: white;
           }
 
           table {
@@ -236,9 +333,15 @@ app.get("/", async (req, res) => {
           }
         </style>
       </head>
+
       <body>
         <h1>Keys247 Call Wallboard (Incus)</h1>
+
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
+
+        <div class="updated">
+          ${lastUpdatedText} · ${pageUpdatedText}
+        </div>
 
         <div class="cards">
           <div class="card">
@@ -256,9 +359,9 @@ app.get("/", async (req, res) => {
             <div class="value">${missedCalls.length}</div>
           </div>
 
-          <div class="card">
+          <div class="card ${missedRateClass}">
             <div class="label">Miss Rate</div>
-            <div class="value">${recentCalls.length ? Math.round((missedCalls.length / recentCalls.length) * 100) : 0}%</div>
+            <div class="value ${missedRateClass}">${missedRate}%</div>
           </div>
         </div>
 
@@ -268,9 +371,11 @@ app.get("/", async (req, res) => {
               <th>Agent</th>
               <th>Answered</th>
               <th>Avg Duration</th>
+              <th>Last Call</th>
               <th>Status</th>
             </tr>
           </thead>
+
           <tbody>
             ${agentRows}
           </tbody>
