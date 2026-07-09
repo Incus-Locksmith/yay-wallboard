@@ -1,0 +1,12 @@
+{
+  "name": "yay-wallboard",
+  "version": "1.0.0",
+  "description": "Yay.com webhook wallboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
