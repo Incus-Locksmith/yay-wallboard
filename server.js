@@ -5,6 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -65,6 +66,23 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS calls_uuid_unique
     ON calls (uuid);
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS technicians (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      phone TEXT,
+      base_postcode TEXT,
+      current_postcode TEXT,
+      status TEXT DEFAULT 'Available',
+      available_from TEXT,
+      skills TEXT,
+      notes TEXT,
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 }
 
 function formatSeconds(seconds) {
@@ -100,7 +118,22 @@ function formatTimeOnly(date) {
   });
 }
 
-// Wallboard page
+function technicianStatusClass(status) {
+  const value = (status || "").toLowerCase();
+
+  if (value.includes("available")) return "available";
+  if (value.includes("job")) return "onjob";
+  if (value.includes("soon")) return "soon";
+  if (value.includes("holiday")) return "off";
+  if (value.includes("sick")) return "off";
+  if (value.includes("vehicle")) return "bad";
+  if (value.includes("do not")) return "bad";
+  if (value.includes("off")) return "off";
+
+  return "neutral";
+}
+
+// Call wallboard page
 app.get("/", async (req, res) => {
   try {
     const result = await pool.query(`
@@ -221,6 +254,12 @@ app.get("/", async (req, res) => {
             padding: 40px;
           }
 
+          a {
+            color: #93c5fd;
+            text-decoration: none;
+            margin-right: 18px;
+          }
+
           h1 {
             font-size: 42px;
             margin-bottom: 5px;
@@ -235,6 +274,10 @@ app.get("/", async (req, res) => {
             color: #d1d5db;
             font-size: 16px;
             margin-bottom: 30px;
+          }
+
+          .nav {
+            margin-bottom: 25px;
           }
 
           .cards {
@@ -335,6 +378,11 @@ app.get("/", async (req, res) => {
       </head>
 
       <body>
+        <div class="nav">
+          <a href="/">Call Wallboard</a>
+          <a href="/technicians">Technicians</a>
+        </div>
+
         <h1>Keys247 Call Wallboard (Incus)</h1>
 
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
@@ -386,6 +434,473 @@ app.get("/", async (req, res) => {
   } catch (error) {
     console.error("Wallboard error:", error);
     res.status(500).send("Wallboard error. Check Render logs.");
+  }
+});
+
+// Technician availability board
+app.get("/technicians", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY
+        CASE
+          WHEN LOWER(status) LIKE '%available%' THEN 1
+          WHEN LOWER(status) LIKE '%soon%' THEN 2
+          WHEN LOWER(status) LIKE '%job%' THEN 3
+          ELSE 4
+        END,
+        name ASC
+    `);
+
+    const technicians = result.rows;
+
+    const rows = technicians.map(tech => {
+      const statusClass = technicianStatusClass(tech.status);
+
+      return `
+        <tr>
+          <td>${tech.name || ""}</td>
+          <td>${tech.phone || ""}</td>
+          <td>${tech.base_postcode || ""}</td>
+          <td>${tech.current_postcode || ""}</td>
+          <td><span class="pill ${statusClass}">${tech.status || ""}</span></td>
+          <td>${tech.available_from || ""}</td>
+          <td>${tech.skills || ""}</td>
+          <td>${tech.notes || ""}</td>
+          <td>${formatDateTime(tech.updated_at)}</td>
+          <td>
+            <form method="GET" action="/technicians/edit" style="display:inline;">
+              <input type="hidden" name="id" value="${tech.id}">
+              <button type="submit">Edit</button>
+            </form>
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Technician Availability</title>
+        <meta http-equiv="refresh" content="30">
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #111827;
+            color: white;
+            padding: 40px;
+          }
+
+          a {
+            color: #93c5fd;
+            text-decoration: none;
+            margin-right: 18px;
+          }
+
+          h1 {
+            font-size: 42px;
+            margin-bottom: 5px;
+          }
+
+          .subtitle {
+            color: #9ca3af;
+            margin-bottom: 30px;
+          }
+
+          .nav {
+            margin-bottom: 25px;
+          }
+
+          .panel {
+            background: #1f2937;
+            border-radius: 14px;
+            padding: 25px;
+            margin-bottom: 35px;
+          }
+
+          form.grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+          }
+
+          input, select, textarea, button {
+            font-size: 16px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #374151;
+          }
+
+          input, select, textarea {
+            background: #111827;
+            color: white;
+          }
+
+          textarea {
+            grid-column: span 4;
+            min-height: 70px;
+          }
+
+          button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #1f2937;
+            border-radius: 14px;
+            overflow: hidden;
+          }
+
+          th, td {
+            text-align: left;
+            padding: 14px;
+            border-bottom: 1px solid #374151;
+            font-size: 16px;
+            vertical-align: top;
+          }
+
+          th {
+            color: #9ca3af;
+            font-size: 13px;
+            text-transform: uppercase;
+          }
+
+          .pill {
+            padding: 7px 12px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+          }
+
+          .available {
+            background: #16a34a;
+            color: white;
+          }
+
+          .soon {
+            background: #f59e0b;
+            color: black;
+          }
+
+          .onjob {
+            background: #2563eb;
+            color: white;
+          }
+
+          .off {
+            background: #6b7280;
+            color: white;
+          }
+
+          .bad {
+            background: #dc2626;
+            color: white;
+          }
+
+          .neutral {
+            background: #374151;
+            color: #d1d5db;
+          }
+        </style>
+      </head>
+
+      <body>
+        <div class="nav">
+          <a href="/">Call Wallboard</a>
+          <a href="/technicians">Technicians</a>
+        </div>
+
+        <h1>Technician Availability</h1>
+        <div class="subtitle">Live locksmith availability board · Auto-refreshes every 30 seconds</div>
+
+        <div class="panel">
+          <h2>Add Technician</h2>
+
+          <form class="grid" method="POST" action="/technicians/save">
+            <input name="name" placeholder="Name" required>
+            <input name="phone" placeholder="Phone">
+            <input name="base_postcode" placeholder="Base postcode">
+            <input name="current_postcode" placeholder="Current postcode">
+
+            <select name="status">
+              <option>Available</option>
+              <option>On job</option>
+              <option>Available soon</option>
+              <option>Off today</option>
+              <option>Holiday</option>
+              <option>Sick</option>
+              <option>Vehicle issue</option>
+              <option>Do not use</option>
+            </select>
+
+            <input name="available_from" placeholder="Available from e.g. 15:30">
+            <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
+            <button type="submit">Save Technician</button>
+
+            <textarea name="notes" placeholder="Notes"></textarea>
+          </form>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Base</th>
+              <th>Current</th>
+              <th>Status</th>
+              <th>Available From</th>
+              <th>Skills</th>
+              <th>Notes</th>
+              <th>Last Updated</th>
+              <th>Edit</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            ${rows || `<tr><td colspan="10">No technicians added yet</td></tr>`}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Technicians page error:", error);
+    res.status(500).send("Technicians page error. Check Render logs.");
+  }
+});
+
+// Edit technician page
+app.get("/technicians/edit", async (req, res) => {
+  try {
+    const id = req.query.id;
+
+    const result = await pool.query(`
+      SELECT *
+      FROM technicians
+      WHERE id = $1
+    `, [id]);
+
+    const tech = result.rows[0];
+
+    if (!tech) {
+      return res.status(404).send("Technician not found");
+    }
+
+    const statuses = [
+      "Available",
+      "On job",
+      "Available soon",
+      "Off today",
+      "Holiday",
+      "Sick",
+      "Vehicle issue",
+      "Do not use"
+    ];
+
+    const statusOptions = statuses.map(status => {
+      const selected = status === tech.status ? "selected" : "";
+      return `<option ${selected}>${status}</option>`;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Edit Technician</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #111827;
+            color: white;
+            padding: 40px;
+          }
+
+          a {
+            color: #93c5fd;
+            text-decoration: none;
+            margin-right: 18px;
+          }
+
+          .panel {
+            background: #1f2937;
+            border-radius: 14px;
+            padding: 25px;
+            max-width: 900px;
+          }
+
+          form {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+          }
+
+          input, select, textarea, button {
+            font-size: 16px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #374151;
+          }
+
+          input, select, textarea {
+            background: #111827;
+            color: white;
+          }
+
+          textarea {
+            grid-column: span 2;
+            min-height: 100px;
+          }
+
+          button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+          }
+
+          .danger {
+            background: #dc2626;
+          }
+        </style>
+      </head>
+
+      <body>
+        <a href="/technicians">← Back to Technicians</a>
+
+        <h1>Edit Technician</h1>
+
+        <div class="panel">
+          <form method="POST" action="/technicians/save">
+            <input type="hidden" name="id" value="${tech.id}">
+
+            <input name="name" value="${tech.name || ""}" placeholder="Name" required>
+            <input name="phone" value="${tech.phone || ""}" placeholder="Phone">
+            <input name="base_postcode" value="${tech.base_postcode || ""}" placeholder="Base postcode">
+            <input name="current_postcode" value="${tech.current_postcode || ""}" placeholder="Current postcode">
+
+            <select name="status">
+              ${statusOptions}
+            </select>
+
+            <input name="available_from" value="${tech.available_from || ""}" placeholder="Available from">
+            <input name="skills" value="${tech.skills || ""}" placeholder="Skills">
+            <button type="submit">Save Changes</button>
+
+            <textarea name="notes" placeholder="Notes">${tech.notes || ""}</textarea>
+          </form>
+
+          <form method="POST" action="/technicians/delete" style="margin-top:20px;">
+            <input type="hidden" name="id" value="${tech.id}">
+            <button class="danger" type="submit">Remove Technician</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit technician error:", error);
+    res.status(500).send("Edit technician error. Check Render logs.");
+  }
+});
+
+// Save technician
+app.post("/technicians/save", async (req, res) => {
+  try {
+    const {
+      id,
+      name,
+      phone,
+      base_postcode,
+      current_postcode,
+      status,
+      available_from,
+      skills,
+      notes
+    } = req.body;
+
+    if (id) {
+      await pool.query(`
+        UPDATE technicians
+        SET
+          name = $1,
+          phone = $2,
+          base_postcode = $3,
+          current_postcode = $4,
+          status = $5,
+          available_from = $6,
+          skills = $7,
+          notes = $8,
+          updated_at = NOW()
+        WHERE id = $9
+      `, [
+        name,
+        phone,
+        base_postcode,
+        current_postcode,
+        status,
+        available_from,
+        skills,
+        notes,
+        id
+      ]);
+    } else {
+      await pool.query(`
+        INSERT INTO technicians (
+          name,
+          phone,
+          base_postcode,
+          current_postcode,
+          status,
+          available_from,
+          skills,
+          notes,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      `, [
+        name,
+        phone,
+        base_postcode,
+        current_postcode,
+        status,
+        available_from,
+        skills,
+        notes
+      ]);
+    }
+
+    res.redirect("/technicians");
+  } catch (error) {
+    console.error("Save technician error:", error);
+    res.status(500).send("Save technician error. Check Render logs.");
+  }
+});
+
+// Soft-delete technician
+app.post("/technicians/delete", async (req, res) => {
+  try {
+    await pool.query(`
+      UPDATE technicians
+      SET active = FALSE, updated_at = NOW()
+      WHERE id = $1
+    `, [req.body.id]);
+
+    res.redirect("/technicians");
+  } catch (error) {
+    console.error("Delete technician error:", error);
+    res.status(500).send("Delete technician error. Check Render logs.");
   }
 });
 
@@ -466,7 +981,7 @@ app.get("/debug", async (req, res) => {
 initDb()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`Yay wallboard running on port ${PORT}`);
+      console.log(`Keys247 app running on port ${PORT}`);
     });
   })
   .catch(error => {
