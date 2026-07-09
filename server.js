@@ -54,9 +54,16 @@ async function initDb() {
   `);
 
   await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS calls_uuid_unique
-    ON calls (uuid);
-  `);
+  DELETE FROM calls a
+  USING calls b
+  WHERE a.id > b.id
+  AND a.uuid = b.uuid;
+`);
+
+await pool.query(`
+  CREATE UNIQUE INDEX IF NOT EXISTS calls_uuid_unique
+  ON calls (uuid);
+`);
 }
 
 function formatSeconds(seconds) {
