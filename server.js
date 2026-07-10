@@ -445,8 +445,17 @@ app.get("/", async (req, res) => {
     const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
 
     const recentCalls = result.rows;
-    const answeredCalls = recentCalls.filter(call => call.answered_by);
-    const missedCalls = recentCalls.filter(call => !call.answered_by);
+
+    // IMPORTANT:
+    // Only known agent extension numbers are counted as answered calls.
+    // This prevents incoming phone numbers like +447... appearing as fake agents.
+    const answeredCalls = recentCalls.filter(call =>
+      call.answered_by && agents[call.answered_by]
+    );
+
+    const missedCalls = recentCalls.filter(call =>
+      !call.answered_by || !agents[call.answered_by]
+    );
 
     const missedRate = recentCalls.length
       ? Math.round((missedCalls.length / recentCalls.length) * 100)
@@ -479,17 +488,11 @@ app.get("/", async (req, res) => {
 
     answeredCalls.forEach(call => {
       const ext = call.answered_by;
-      const name = agents[ext] || `Ext ${ext}`;
+      const name = agents[ext];
 
-      if (!agentStats[ext]) {
-        agentStats[ext] = {
-          ext,
-          name,
-          answered: 0,
-          totalDuration: 0,
-          lastCallTime: null,
-          status: "No active call"
-        };
+      // Safety check: ignore anything that is not a known agent extension.
+      if (!name) {
+        return;
       }
 
       agentStats[ext].answered += 1;
@@ -637,6 +640,7 @@ app.get("/invoices", async (req, res) => {
         <tr>
           <td>${escapeHtml(invoice.invoice_number)}</td>
           <td>${escapeHtml(invoice.customer_name)}</td>
+          <td>${escapeHtml(invoice.customer_postcode)}</td>
           <td>${escapeHtml(company.name)}</td>
           <td>${escapeHtml(invoice.payment_method)}</td>
           <td>${escapeHtml(invoice.invoice_date)}</td>
@@ -670,6 +674,7 @@ app.get("/invoices", async (req, res) => {
             <tr>
               <th>Invoice / Job No.</th>
               <th>Customer</th>
+              <th>Postcode</th>
               <th>Company</th>
               <th>Payment</th>
               <th>Date</th>
@@ -678,7 +683,7 @@ app.get("/invoices", async (req, res) => {
               <th>PDF</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="8">No invoices yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="9">No invoices yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
