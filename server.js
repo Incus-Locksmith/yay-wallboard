@@ -506,6 +506,23 @@ function sharedStyles() {
       grid-template-columns: repeat(4, 1fr);
       gap: 15px;
     }
+
+    .stage-form {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stage-form select {
+      font-size: 13px;
+      padding: 8px;
+      min-width: 210px;
+    }
+
+    .stage-form button {
+      font-size: 13px;
+      padding: 8px 12px;
+    }
   `;
 }
 
@@ -730,7 +747,19 @@ app.get("/invoices", async (req, res) => {
         <tr>
           <td>${escapeHtml(invoice.invoice_number)}</td>
           <td>${escapeHtml(invoice.dispatcher_name)}</td>
-          <td><span class="pill ${stageClass}">${escapeHtml(stage)}</span></td>
+          <td>
+            <div style="margin-bottom:8px;">
+              <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
+            </div>
+
+            <form class="stage-form" method="POST" action="/invoices/stage">
+              <input type="hidden" name="id" value="${invoice.id}">
+              <select name="invoice_stage">
+                ${invoiceStageOptions(stage)}
+              </select>
+              <button type="submit">Save</button>
+            </form>
+          </td>
           <td>${escapeHtml(invoice.customer_name)}</td>
           <td>${escapeHtml(invoice.customer_postcode)}</td>
           <td>${escapeHtml(company.name)}</td>
@@ -754,7 +783,7 @@ app.get("/invoices", async (req, res) => {
       <body>
         ${nav()}
         <h1>Invoices</h1>
-        <div class="subtitle">Recent invoices · Internal invoice stage is shown here</div>
+        <div class="subtitle">Recent invoices · Change internal stage here</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
@@ -783,6 +812,26 @@ app.get("/invoices", async (req, res) => {
   } catch (error) {
     console.error("Invoices list error:", error);
     res.status(500).send("Invoices list error. Check Render logs.");
+  }
+});
+
+// Update invoice stage only
+app.post("/invoices/stage", async (req, res) => {
+  try {
+    const id = req.body.id;
+    const invoiceStage = req.body.invoice_stage || "Draft only";
+
+    await pool.query(`
+      UPDATE invoices
+      SET invoice_stage = $1,
+          updated_at = NOW()
+      WHERE id = $2
+    `, [invoiceStage, id]);
+
+    res.redirect("/invoices");
+  } catch (error) {
+    console.error("Update invoice stage error:", error);
+    res.status(500).send("Update invoice stage error. Check Render logs.");
   }
 });
 
