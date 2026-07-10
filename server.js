@@ -121,6 +121,7 @@ async function initDb() {
       invoice_number TEXT NOT NULL,
       company_key TEXT NOT NULL,
       payment_method TEXT NOT NULL,
+      dispatcher_name TEXT,
       customer_name TEXT,
       customer_address TEXT,
       customer_postcode TEXT,
@@ -137,6 +138,8 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
 }
 
 function escapeHtml(value) {
@@ -328,6 +331,18 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
 function formatDistance(distance) {
   if (distance === null || distance === undefined || Number.isNaN(distance)) return "—";
   return `${distance.toFixed(1)} miles`;
+}
+
+function dispatcherOptions(selectedName = "") {
+  const names = Object.values(agents).sort((a, b) => a.localeCompare(b));
+
+  return [
+    `<option value="">Dispatcher / Created by</option>`,
+    ...names.map(name => {
+      const selected = name === selectedName ? "selected" : "";
+      return `<option ${selected}>${escapeHtml(name)}</option>`;
+    })
+  ].join("");
 }
 
 function sharedStyles() {
@@ -675,6 +690,7 @@ app.get("/invoices", async (req, res) => {
       return `
         <tr>
           <td>${escapeHtml(invoice.invoice_number)}</td>
+          <td>${escapeHtml(invoice.dispatcher_name)}</td>
           <td>${escapeHtml(invoice.customer_name)}</td>
           <td>${escapeHtml(invoice.customer_postcode)}</td>
           <td>${escapeHtml(company.name)}</td>
@@ -709,6 +725,7 @@ app.get("/invoices", async (req, res) => {
           <thead>
             <tr>
               <th>Invoice / Job No.</th>
+              <th>Dispatcher</th>
               <th>Customer</th>
               <th>Postcode</th>
               <th>Company</th>
@@ -719,7 +736,7 @@ app.get("/invoices", async (req, res) => {
               <th>PDF</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="9">No invoices yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="10">No invoices yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -798,11 +815,21 @@ app.get("/invoices/new", (req, res) => {
           <br>
 
           <div class="grid-3">
+            <select name="dispatcher_name" required>
+              ${dispatcherOptions()}
+            </select>
+
             <input name="locksmith_name" placeholder="Locksmith name">
+
             <select name="paid_status">
               <option>Unpaid</option>
               <option>Paid with thanks</option>
             </select>
+          </div>
+
+          <br>
+
+          <div class="grid-3">
             <input name="customer_email" placeholder="Customer email">
           </div>
         </div>
@@ -887,6 +914,7 @@ app.post("/invoices/create", async (req, res) => {
         invoice_number,
         company_key,
         payment_method,
+        dispatcher_name,
         customer_name,
         customer_address,
         customer_postcode,
@@ -901,12 +929,13 @@ app.post("/invoices/create", async (req, res) => {
         notes,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
       RETURNING id
     `, [
       req.body.invoice_number,
       companyKey,
       paymentMethod,
+      req.body.dispatcher_name,
       req.body.customer_name,
       req.body.customer_address,
       req.body.customer_postcode,
@@ -955,27 +984,29 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       .text(company.postcode, 50, 106)
       .text(`Tel: ${company.tel}`, 50, 120);
 
-    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 70);
+    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 65);
     doc.fontSize(10).font("Helvetica")
-      .text(`Invoice No: ${invoice.invoice_number}`, 390, 105)
-      .text(`Date: ${invoice.invoice_date || ""}`, 390, 120)
-      .text(`Locksmith: ${invoice.locksmith_name || ""}`, 390, 135);
+      .text(`Invoice No: ${invoice.invoice_number}`, 390, 100)
+      .text(`Date: ${invoice.invoice_date || ""}`, 390, 115)
+      .text(`Locksmith: ${invoice.locksmith_name || ""}`, 390, 130)
+      .text(`Created by: ${invoice.dispatcher_name || ""}`, 390, 145);
 
-    doc.moveTo(50, 155).lineTo(545, 155).stroke();
+    doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
-    doc.roundedRect(50, 175, 290, 85, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Customer", 65, 185);
+    doc.roundedRect(50, 185, 290, 85, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Customer", 65, 195);
     doc.font("Helvetica").fontSize(10)
-      .text(invoice.customer_name || "", 65, 205)
-      .text(invoice.customer_address || "", 65, 220, { width: 220 })
-      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 245);
+      .text(invoice.customer_name || "", 65, 215)
+      .text(invoice.customer_address || "", 65, 230, { width: 220 })
+      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 255);
 
-    doc.roundedRect(360, 175, 185, 85, 8).stroke();
+    doc.roundedRect(360, 185, 185, 85, 8).stroke();
     doc.fontSize(10)
-      .text(`Payment: ${invoice.payment_method}`, 375, 195)
-      .text(`Status: ${invoice.paid_status}`, 375, 215);
+      .text(`Payment: ${invoice.payment_method}`, 375, 205)
+      .text(`Status: ${invoice.paid_status}`, 375, 225)
+      .text(`Dispatcher: ${invoice.dispatcher_name || ""}`, 375, 245);
 
-    const tableTop = 285;
+    const tableTop = 295;
     doc.font("Helvetica-Bold").fontSize(10);
     doc.text("Qty", 55, tableTop);
     doc.text("Description", 105, tableTop);
@@ -1002,7 +1033,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       doc.font("Helvetica-Bold").text("Paid with thanks", 105, y + 35);
     }
 
-    const totalsY = 500;
+    const totalsY = 505;
     doc.font("Helvetica").fontSize(10);
     doc.text("Subtotal", 380, totalsY);
     doc.text(money(invoice.subtotal), 480, totalsY);
@@ -1012,15 +1043,15 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.text("TOTAL", 380, totalsY + 40);
     doc.text(money(invoice.total), 480, totalsY + 40);
 
-    doc.roundedRect(50, 520, 260, 95, 8).stroke();
-    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 535);
-    doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 552);
-    doc.font("Helvetica-Bold").text(company.name, 70, 575);
-    doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 592);
-    doc.text(`AC: ${company.account}`, 70, 607);
+    doc.roundedRect(50, 525, 260, 95, 8).stroke();
+    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 540);
+    doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 557);
+    doc.font("Helvetica-Bold").text(company.name, 70, 580);
+    doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 597);
+    doc.text(`AC: ${company.account}`, 70, 612);
 
-    doc.rect(360, 570, 185, 45).stroke();
-    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 585, {
+    doc.rect(360, 575, 185, 45).stroke();
+    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 590, {
       width: 170
     });
 
