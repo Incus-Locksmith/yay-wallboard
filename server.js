@@ -446,23 +446,28 @@ app.get("/", async (req, res) => {
 
     const recentCalls = result.rows;
 
-    // IMPORTANT:
-    // Only known agent extension numbers are counted as answered calls.
-    // This prevents incoming phone numbers like +447... appearing as fake agents.
+    // Known agent extension = answered.
     const answeredCalls = recentCalls.filter(call =>
       call.answered_by && agents[call.answered_by]
     );
 
+    // Blank answered_by = true missed call.
     const missedCalls = recentCalls.filter(call =>
-      !call.answered_by || !agents[call.answered_by]
+      !call.answered_by
     );
 
-    const missedRate = recentCalls.length
-      ? Math.round((missedCalls.length / recentCalls.length) * 100)
+    // Unknown answered_by values, such as +447..., are ignored for wallboard stats.
+    const reportableCalls = [
+      ...answeredCalls,
+      ...missedCalls
+    ];
+
+    const missedRate = reportableCalls.length
+      ? Math.round((missedCalls.length / reportableCalls.length) * 100)
       : 0;
 
     let missedRateClass = "good";
-    if (recentCalls.length === 0) missedRateClass = "neutral";
+    if (reportableCalls.length === 0) missedRateClass = "neutral";
     else if (missedRate >= 20) missedRateClass = "bad";
     else if (missedRate >= 10) missedRateClass = "soon";
 
@@ -490,7 +495,6 @@ app.get("/", async (req, res) => {
       const ext = call.answered_by;
       const name = agents[ext];
 
-      // Safety check: ignore anything that is not a known agent extension.
       if (!name) {
         return;
       }
@@ -586,7 +590,7 @@ app.get("/", async (req, res) => {
         <div class="cards">
           <div class="card">
             <div class="label">Total Calls</div>
-            <div class="value">${recentCalls.length}</div>
+            <div class="value">${reportableCalls.length}</div>
           </div>
           <div class="card">
             <div class="label">Answered</div>
