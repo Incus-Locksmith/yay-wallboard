@@ -877,7 +877,6 @@ app.get("/invoices", async (req, res) => {
   }
 });
 
-// Update invoice stage only
 app.post("/invoices/stage", async (req, res) => {
   try {
     const id = req.body.id;
@@ -897,7 +896,6 @@ app.post("/invoices/stage", async (req, res) => {
   }
 });
 
-// New invoice form
 app.get("/invoices/new", (req, res) => {
   const today = new Date().toLocaleDateString("en-GB", {
     timeZone: "Europe/London",
@@ -1111,7 +1109,6 @@ app.get("/invoices/new", (req, res) => {
   `);
 });
 
-// Create invoice
 app.post("/invoices/create", async (req, res) => {
   try {
     const companyKey = req.body.company_key;
@@ -1251,7 +1248,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const logoPath = path.join(__dirname, company.logo);
 
     try {
-      doc.image(logoPath, 50, 35, { width: 160 });
+      doc.image(logoPath, 50, 22, { width: 160 });
     } catch (error) {
       console.error("Logo load error:", error);
       doc.fontSize(20).font("Helvetica-Bold").text(company.displayName, 50, 48);
@@ -1267,8 +1264,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.fontSize(10).font("Helvetica")
       .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
       .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
-      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120)
-      .text(`Created by: ${pdfText(invoice.dispatcher_name)}`, 390, 135);
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120);
 
     doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
