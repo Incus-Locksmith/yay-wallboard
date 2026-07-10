@@ -60,8 +60,28 @@ const companies = {
   }
 };
 
-function companyForPayment(paymentMethod) {
-  return paymentMethod === "Cash" ? "locksmiths" : "online";
+function isPaymentAllowedForCompany(companyKey, paymentMethod) {
+  if (companyKey === "locksmiths") {
+    return paymentMethod === "Bank transfer" || paymentMethod === "Cash";
+  }
+
+  if (companyKey === "online") {
+    return paymentMethod === "Card" || paymentMethod === "Cash";
+  }
+
+  return false;
+}
+
+function paymentRuleMessage(companyKey) {
+  if (companyKey === "locksmiths") {
+    return "24H Locksmiths Ltd can only use Bank transfer or Cash.";
+  }
+
+  if (companyKey === "online") {
+    return "24H Online Services Ltd can only use Card or Cash.";
+  }
+
+  return "Invalid company selected.";
 }
 
 async function initDb() {
@@ -871,18 +891,42 @@ app.get("/invoices/new", (req, res) => {
           margin-bottom: 25px;
           color: #d1d5db;
         }
+
+        .rule-box {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 15px;
+          margin-top: 15px;
+        }
+
+        .rule {
+          background: #111827;
+          border-radius: 10px;
+          padding: 15px;
+          border: 1px solid #374151;
+        }
       </style>
     </head>
     <body>
       ${nav()}
 
       <h1>New Invoice</h1>
-      <div class="subtitle">Payment method chooses the correct company automatically</div>
+      <div class="subtitle">Choose the company first, then the correct payment method</div>
 
       <div class="notice">
-        <strong>Template rule:</strong>
-        Cash uses <strong>24H Locksmiths Ltd</strong>.
-        Card and bank transfer use <strong>24H Online Services Ltd</strong>.
+        <strong>Invoice rules:</strong>
+
+        <div class="rule-box">
+          <div class="rule">
+            <strong>24H Locksmiths Ltd</strong><br>
+            Bank transfer or Cash only
+          </div>
+
+          <div class="rule">
+            <strong>24H Online Services Ltd</strong><br>
+            Card or Cash only
+          </div>
+        </div>
       </div>
 
       <form method="POST" action="/invoices/create">
@@ -890,19 +934,25 @@ app.get("/invoices/new", (req, res) => {
           <h2>Invoice Details</h2>
 
           <div class="grid-3">
+            <select name="company_key" required>
+              <option value="locksmiths">24H Locksmiths Ltd</option>
+              <option value="online">24H Online Services Ltd</option>
+            </select>
+
             <select name="payment_method" required>
-              <option>Card</option>
               <option>Bank transfer</option>
               <option>Cash</option>
+              <option>Card</option>
             </select>
 
             <input name="invoice_number" placeholder="Invoice / Job No." required>
-            <input name="invoice_date" value="${today}" placeholder="Date">
           </div>
 
           <br>
 
           <div class="grid-3">
+            <input name="invoice_date" value="${today}" placeholder="Date">
+
             <select name="dispatcher_name" required>
               ${dispatcherOptions()}
             </select>
@@ -910,13 +960,13 @@ app.get("/invoices/new", (req, res) => {
             <select name="invoice_stage" required>
               ${invoiceStageOptions("Draft only")}
             </select>
-
-            <input name="locksmith_name" placeholder="Locksmith name">
           </div>
 
           <br>
 
           <div class="grid-3">
+            <input name="locksmith_name" placeholder="Locksmith name">
+
             <select name="paid_status">
               <option>Unpaid</option>
               <option>Paid with thanks</option>
@@ -976,8 +1026,25 @@ app.get("/invoices/new", (req, res) => {
 // Create invoice
 app.post("/invoices/create", async (req, res) => {
   try {
+    const companyKey = req.body.company_key;
     const paymentMethod = req.body.payment_method;
-    const companyKey = companyForPayment(paymentMethod);
+
+    if (!companies[companyKey]) {
+      return res.status(400).send("Invalid company selected.");
+    }
+
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(`
+        <html>
+          <body style="font-family: Arial; padding: 40px;">
+            <h1>Payment method not allowed</h1>
+            <p>${escapeHtml(paymentRuleMessage(companyKey))}</p>
+            <p>You selected: <strong>${escapeHtml(paymentMethod)}</strong></p>
+            <p><a href="/invoices/new">Go back and create invoice again</a></p>
+          </body>
+        </html>
+      `);
+    }
 
     const lineItems = [
       {
@@ -1139,10 +1206,23 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.roundedRect(50, 525, 260, 95, 8).stroke();
     doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 540);
-    doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 557);
-    doc.font("Helvetica-Bold").text(company.name, 70, 580);
-    doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 597);
-    doc.text(`AC: ${company.account}`, 70, 612);
+
+    if (invoice.payment_method === "Bank transfer") {
+      doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 557);
+      doc.font("Helvetica-Bold").text(company.name, 70, 580);
+      doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 597);
+      doc.text(`AC: ${company.account}`, 70, 612);
+    } else if (invoice.payment_method === "Card") {
+      doc.font("Helvetica").text("Payment method: Card", 70, 557);
+      doc.text("Please use the card payment link provided separately.", 70, 580, {
+        width: 210
+      });
+    } else {
+      doc.font("Helvetica").text("Payment method: Cash", 70, 557);
+      doc.text("Cash payment to be collected/confirmed by the office.", 70, 580, {
+        width: 210
+      });
+    }
 
     doc.rect(360, 575, 185, 45).stroke();
     doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 590, {
