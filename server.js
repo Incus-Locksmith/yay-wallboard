@@ -103,6 +103,7 @@ async function initDb() {
       base_postcode TEXT,
       current_postcode TEXT,
       status TEXT DEFAULT 'Available',
+      priority TEXT DEFAULT 'Normal',
       available_from TEXT,
       skills TEXT,
       notes TEXT,
@@ -111,6 +112,8 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoices (
@@ -194,24 +197,53 @@ function technicianStatusClass(status) {
   return "neutral";
 }
 
+function priorityClass(priority) {
+  const value = (priority || "").toLowerCase();
+
+  if (value.includes("high")) return "priority-high";
+  if (value.includes("push")) return "priority-push";
+  if (value.includes("do not")) return "priority-low";
+
+  return "priority-normal";
+}
+
+function priorityRank(priority) {
+  const value = (priority || "").toLowerCase();
+
+  if (value.includes("high")) return 1;
+  if (value.includes("push")) return 2;
+  if (value.includes("do not")) return 9;
+
+  return 3;
+}
+
 function dispatchRank(status) {
   const value = (status || "").toLowerCase();
+
   if (value.includes("available") && !value.includes("soon")) return 1;
   if (value.includes("soon")) return 2;
   if (value.includes("job")) return 3;
+
   return 4;
 }
 
 function isUsableForDispatch(status) {
   const value = (status || "").toLowerCase();
-  return value.includes("available") || value.includes("soon") || value.includes("job");
+
+  return (
+    value.includes("available") ||
+    value.includes("soon") ||
+    value.includes("job")
+  );
 }
 
 function getBestLocation(tech) {
   const current = (tech.current_postcode || "").trim();
   const base = (tech.base_postcode || "").trim();
+
   if (current) return { postcode: current, source: "Current" };
   if (base) return { postcode: base, source: "Base" };
+
   return { postcode: "", source: "Unknown" };
 }
 
@@ -396,6 +428,11 @@ function sharedStyles() {
     .neutral, .inactive { background: #374151; color: #d1d5db; }
     .engaged { background: #dc2626; color: white; }
 
+    .priority-high { background: #dc2626; color: white; }
+    .priority-push { background: #f59e0b; color: black; }
+    .priority-normal { background: #374151; color: #d1d5db; }
+    .priority-low { background: #6b7280; color: white; }
+
     .muted { color: #9ca3af; }
     .warning-text { color: #fbbf24; font-weight: bold; }
     .distance { font-size: 22px; font-weight: bold; }
@@ -446,17 +483,14 @@ app.get("/", async (req, res) => {
 
     const recentCalls = result.rows;
 
-    // Known agent extension = answered.
     const answeredCalls = recentCalls.filter(call =>
       call.answered_by && agents[call.answered_by]
     );
 
-    // Blank answered_by = true missed call.
     const missedCalls = recentCalls.filter(call =>
       !call.answered_by
     );
 
-    // Unknown answered_by values, such as +447..., are ignored for wallboard stats.
     const reportableCalls = [
       ...answeredCalls,
       ...missedCalls
@@ -495,9 +529,7 @@ app.get("/", async (req, res) => {
       const ext = call.answered_by;
       const name = agents[ext];
 
-      if (!name) {
-        return;
-      }
+      if (!name) return;
 
       agentStats[ext].answered += 1;
       agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
@@ -1056,8 +1088,11 @@ app.get("/dispatch", async (req, res) => {
     );
 
     candidatesWithDistance.sort((a, b) => {
-      const rankDiff = dispatchRank(a.tech.status) - dispatchRank(b.tech.status);
-      if (rankDiff !== 0) return rankDiff;
+      const statusDiff = dispatchRank(a.tech.status) - dispatchRank(b.tech.status);
+      if (statusDiff !== 0) return statusDiff;
+
+      const priorityDiff = priorityRank(a.tech.priority) - priorityRank(b.tech.priority);
+      if (priorityDiff !== 0) return priorityDiff;
 
       if (a.distance !== null && b.distance === null) return -1;
       if (a.distance === null && b.distance !== null) return 1;
@@ -1069,6 +1104,8 @@ app.get("/dispatch", async (req, res) => {
     const rows = candidatesWithDistance.map((item, index) => {
       const tech = item.tech;
       const statusClass = technicianStatusClass(tech.status);
+      const priority = tech.priority || "Normal";
+      const priorityBadgeClass = priorityClass(priority);
       const precision = item.techLocation.ok ? item.techLocation.precision : postcodePrecision(item.location.postcode);
 
       const precisionText = precision === "Approx"
@@ -1082,6 +1119,7 @@ app.get("/dispatch", async (req, res) => {
           <td>${index + 1}</td>
           <td><strong>${escapeHtml(tech.name)}</strong><br><span class="muted">${escapeHtml(tech.phone)}</span></td>
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
+          <td><span class="pill ${priorityBadgeClass}">${escapeHtml(priority)}</span></td>
           <td>${escapeHtml(tech.available_from || "Now / check")}</td>
           <td>
             ${escapeHtml(item.location.postcode || "No postcode")}
@@ -1147,7 +1185,7 @@ app.get("/dispatch", async (req, res) => {
               </div>`
             : `<div class="notice">
                 Enter a customer postcode to sort available locksmiths by approximate distance.
-                Full postcodes are best. Partial postcodes still work, but are approximate.
+                Priority technicians are ranked higher when availability is equal.
               </div>`
         }
 
@@ -1157,6 +1195,7 @@ app.get("/dispatch", async (req, res) => {
               <th>Rank</th>
               <th>Technician</th>
               <th>Status</th>
+              <th>Priority</th>
               <th>Available From</th>
               <th>Location</th>
               <th>Distance</th>
@@ -1165,7 +1204,7 @@ app.get("/dispatch", async (req, res) => {
               <th>Last Updated</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="9">No available technicians found</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -1190,11 +1229,19 @@ app.get("/technicians", async (req, res) => {
           WHEN LOWER(status) LIKE '%job%' THEN 3
           ELSE 4
         END,
+        CASE
+          WHEN LOWER(priority) LIKE '%high%' THEN 1
+          WHEN LOWER(priority) LIKE '%push%' THEN 2
+          WHEN LOWER(priority) LIKE '%do not%' THEN 9
+          ELSE 3
+        END,
         name ASC
     `);
 
     const rows = result.rows.map(tech => {
       const statusClass = technicianStatusClass(tech.status);
+      const priority = tech.priority || "Normal";
+      const priorityBadgeClass = priorityClass(priority);
 
       return `
         <tr>
@@ -1203,6 +1250,7 @@ app.get("/technicians", async (req, res) => {
           <td>${escapeHtml(tech.base_postcode)}</td>
           <td>${escapeHtml(tech.current_postcode)}</td>
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
+          <td><span class="pill ${priorityBadgeClass}">${escapeHtml(priority)}</span></td>
           <td>${escapeHtml(tech.available_from)}</td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
@@ -1264,6 +1312,13 @@ app.get("/technicians", async (req, res) => {
               <option>Do not use</option>
             </select>
 
+            <select name="priority">
+              <option>Normal</option>
+              <option>Push</option>
+              <option>High priority</option>
+              <option>Do not prioritise</option>
+            </select>
+
             <input name="available_from" placeholder="Available from e.g. 15:30">
             <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
             <button type="submit">Save Technician</button>
@@ -1280,6 +1335,7 @@ app.get("/technicians", async (req, res) => {
               <th>Base</th>
               <th>Current</th>
               <th>Status</th>
+              <th>Priority</th>
               <th>Available From</th>
               <th>Skills</th>
               <th>Notes</th>
@@ -1287,7 +1343,7 @@ app.get("/technicians", async (req, res) => {
               <th>Edit</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="10">No technicians added yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -1318,9 +1374,21 @@ app.get("/technicians/edit", async (req, res) => {
       "Do not use"
     ];
 
+    const priorities = [
+      "Normal",
+      "Push",
+      "High priority",
+      "Do not prioritise"
+    ];
+
     const statusOptions = statuses.map(status => {
       const selected = status === tech.status ? "selected" : "";
       return `<option ${selected}>${status}</option>`;
+    }).join("");
+
+    const priorityOptions = priorities.map(priority => {
+      const selected = priority === (tech.priority || "Normal") ? "selected" : "";
+      return `<option ${selected}>${priority}</option>`;
     }).join("");
 
     res.send(`
@@ -1363,6 +1431,7 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="base_postcode" value="${escapeHtml(tech.base_postcode)}" placeholder="Base postcode">
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
             <select name="status">${statusOptions}</select>
+            <select name="priority">${priorityOptions}</select>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
@@ -1392,6 +1461,7 @@ app.post("/technicians/save", async (req, res) => {
       base_postcode,
       current_postcode,
       status,
+      priority,
       available_from,
       skills,
       notes
@@ -1400,18 +1470,55 @@ app.post("/technicians/save", async (req, res) => {
     if (id) {
       await pool.query(`
         UPDATE technicians
-        SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
-            status = $5, available_from = $6, skills = $7, notes = $8, updated_at = NOW()
-        WHERE id = $9
-      `, [name, phone, base_postcode, current_postcode, status, available_from, skills, notes, id]);
+        SET name = $1,
+            phone = $2,
+            base_postcode = $3,
+            current_postcode = $4,
+            status = $5,
+            priority = $6,
+            available_from = $7,
+            skills = $8,
+            notes = $9,
+            updated_at = NOW()
+        WHERE id = $10
+      `, [
+        name,
+        phone,
+        base_postcode,
+        current_postcode,
+        status,
+        priority || "Normal",
+        available_from,
+        skills,
+        notes,
+        id
+      ]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
-          name, phone, base_postcode, current_postcode, status,
-          available_from, skills, notes, updated_at
+          name,
+          phone,
+          base_postcode,
+          current_postcode,
+          status,
+          priority,
+          available_from,
+          skills,
+          notes,
+          updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-      `, [name, phone, base_postcode, current_postcode, status, available_from, skills, notes]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      `, [
+        name,
+        phone,
+        base_postcode,
+        current_postcode,
+        status,
+        priority || "Normal",
+        available_from,
+        skills,
+        notes
+      ]);
     }
 
     res.redirect("/technicians");
