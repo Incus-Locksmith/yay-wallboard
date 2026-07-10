@@ -122,6 +122,7 @@ async function initDb() {
       company_key TEXT NOT NULL,
       payment_method TEXT NOT NULL,
       dispatcher_name TEXT,
+      invoice_stage TEXT DEFAULT 'Draft only',
       customer_name TEXT,
       customer_address TEXT,
       customer_postcode TEXT,
@@ -140,6 +141,7 @@ async function initDb() {
   `);
 
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_stage TEXT DEFAULT 'Draft only';`);
 }
 
 function escapeHtml(value) {
@@ -218,6 +220,18 @@ function priorityRank(priority) {
   if (value.includes("do not")) return 9;
 
   return 3;
+}
+
+function invoiceStageClass(stage) {
+  const value = (stage || "").toLowerCase();
+
+  if (value.includes("manager")) return "stage-approval";
+  if (value.includes("emailed") && value.includes("photos")) return "stage-emailed-photos";
+  if (value.includes("emailed")) return "stage-emailed";
+  if (value.includes("approved")) return "stage-approved";
+  if (value.includes("cancelled")) return "stage-cancelled";
+
+  return "stage-draft";
 }
 
 function dispatchRank(status) {
@@ -345,6 +359,22 @@ function dispatcherOptions(selectedName = "") {
   ].join("");
 }
 
+function invoiceStageOptions(selectedStage = "Draft only") {
+  const stages = [
+    "Draft only",
+    "Awaiting manager approval",
+    "Approved",
+    "Emailed to client",
+    "Emailed to client with photos",
+    "Cancelled / do not send"
+  ];
+
+  return stages.map(stage => {
+    const selected = stage === selectedStage ? "selected" : "";
+    return `<option ${selected}>${escapeHtml(stage)}</option>`;
+  }).join("");
+}
+
 function sharedStyles() {
   return `
     body {
@@ -447,6 +477,13 @@ function sharedStyles() {
     .priority-push { background: #f59e0b; color: black; }
     .priority-normal { background: #374151; color: #d1d5db; }
     .priority-low { background: #6b7280; color: white; }
+
+    .stage-draft { background: #374151; color: #d1d5db; }
+    .stage-approval { background: #f59e0b; color: black; }
+    .stage-approved { background: #2563eb; color: white; }
+    .stage-emailed { background: #16a34a; color: white; }
+    .stage-emailed-photos { background: #22c55e; color: black; }
+    .stage-cancelled { background: #dc2626; color: white; }
 
     .muted { color: #9ca3af; }
     .warning-text { color: #fbbf24; font-weight: bold; }
@@ -686,18 +723,20 @@ app.get("/invoices", async (req, res) => {
 
     const rows = result.rows.map(invoice => {
       const company = companies[invoice.company_key] || companies.online;
+      const stage = invoice.invoice_stage || "Draft only";
+      const stageClass = invoiceStageClass(stage);
 
       return `
         <tr>
           <td>${escapeHtml(invoice.invoice_number)}</td>
           <td>${escapeHtml(invoice.dispatcher_name)}</td>
+          <td><span class="pill ${stageClass}">${escapeHtml(stage)}</span></td>
           <td>${escapeHtml(invoice.customer_name)}</td>
           <td>${escapeHtml(invoice.customer_postcode)}</td>
           <td>${escapeHtml(company.name)}</td>
           <td>${escapeHtml(invoice.payment_method)}</td>
           <td>${escapeHtml(invoice.invoice_date)}</td>
           <td>${money(invoice.total)}</td>
-          <td>${escapeHtml(invoice.paid_status)}</td>
           <td>
             <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
           </td>
@@ -715,7 +754,7 @@ app.get("/invoices", async (req, res) => {
       <body>
         ${nav()}
         <h1>Invoices</h1>
-        <div class="subtitle">Recent invoices</div>
+        <div class="subtitle">Recent invoices · Internal invoice stage is shown here</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
@@ -726,13 +765,13 @@ app.get("/invoices", async (req, res) => {
             <tr>
               <th>Invoice / Job No.</th>
               <th>Dispatcher</th>
+              <th>Stage</th>
               <th>Customer</th>
               <th>Postcode</th>
               <th>Company</th>
               <th>Payment</th>
               <th>Date</th>
               <th>Total</th>
-              <th>Status</th>
               <th>PDF</th>
             </tr>
           </thead>
@@ -819,17 +858,21 @@ app.get("/invoices/new", (req, res) => {
               ${dispatcherOptions()}
             </select>
 
-            <input name="locksmith_name" placeholder="Locksmith name">
-
-            <select name="paid_status">
-              <option>Unpaid</option>
-              <option>Paid with thanks</option>
+            <select name="invoice_stage" required>
+              ${invoiceStageOptions("Draft only")}
             </select>
+
+            <input name="locksmith_name" placeholder="Locksmith name">
           </div>
 
           <br>
 
           <div class="grid-3">
+            <select name="paid_status">
+              <option>Unpaid</option>
+              <option>Paid with thanks</option>
+            </select>
+
             <input name="customer_email" placeholder="Customer email">
           </div>
         </div>
@@ -915,6 +958,7 @@ app.post("/invoices/create", async (req, res) => {
         company_key,
         payment_method,
         dispatcher_name,
+        invoice_stage,
         customer_name,
         customer_address,
         customer_postcode,
@@ -929,13 +973,14 @@ app.post("/invoices/create", async (req, res) => {
         notes,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
       RETURNING id
     `, [
       req.body.invoice_number,
       companyKey,
       paymentMethod,
       req.body.dispatcher_name,
+      req.body.invoice_stage || "Draft only",
       req.body.customer_name,
       req.body.customer_address,
       req.body.customer_postcode,
