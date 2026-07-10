@@ -1263,7 +1263,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       .text(company.postcode, 50, 128)
       .text(`Tel: ${company.tel}`, 50, 141);
 
-    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 55);
+    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 390, 55);
     doc.fontSize(10).font("Helvetica")
       .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
       .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
@@ -1368,21 +1368,21 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       height: 55
     });
 
-    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 705, {
+    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 718, {
       align: "center",
       width: 495
     });
 
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 720, { align: "center", width: 495 })
-      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 735, {
+      .text(company.footer, 50, 733, { align: "center", width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, {
         align: "center",
         width: 495
       });
 
-    doc.moveTo(50, 755).lineTo(545, 755).stroke();
+    doc.moveTo(50, 768).lineTo(545, 768).stroke();
 
-    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 768, {
+    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 780, {
       align: "center",
       width: 495
     });
