@@ -146,6 +146,9 @@ async function initDb() {
       customer_name TEXT,
       customer_address TEXT,
       customer_postcode TEXT,
+      site_same_as_invoice BOOLEAN DEFAULT TRUE,
+      site_address TEXT,
+      site_postcode TEXT,
       customer_email TEXT,
       invoice_date TEXT,
       locksmith_name TEXT,
@@ -162,6 +165,9 @@ async function initDb() {
 
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_stage TEXT DEFAULT 'Draft only';`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
 }
 
 function escapeHtml(value) {
@@ -543,6 +549,26 @@ function sharedStyles() {
       font-size: 13px;
       padding: 8px 12px;
     }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 16px 0;
+      color: #d1d5db;
+      font-size: 16px;
+    }
+
+    .checkbox-row input {
+      width: 18px;
+      height: 18px;
+    }
+
+    .help {
+      color: #9ca3af;
+      font-size: 14px;
+      margin-top: 8px;
+    }
   `;
 }
 
@@ -762,6 +788,9 @@ app.get("/invoices", async (req, res) => {
       const company = companies[invoice.company_key] || companies.online;
       const stage = invoice.invoice_stage || "Draft only";
       const stageClass = invoiceStageClass(stage);
+      const sitePostcode = invoice.site_same_as_invoice
+        ? invoice.customer_postcode
+        : invoice.site_postcode;
 
       return `
         <tr>
@@ -781,7 +810,7 @@ app.get("/invoices", async (req, res) => {
             </form>
           </td>
           <td>${escapeHtml(invoice.customer_name)}</td>
-          <td>${escapeHtml(invoice.customer_postcode)}</td>
+          <td>${escapeHtml(sitePostcode)}</td>
           <td>${escapeHtml(company.name)}</td>
           <td>${escapeHtml(invoice.payment_method)}</td>
           <td>${escapeHtml(invoice.invoice_date)}</td>
@@ -803,7 +832,7 @@ app.get("/invoices", async (req, res) => {
       <body>
         ${nav()}
         <h1>Invoices</h1>
-        <div class="subtitle">Recent invoices · Change internal stage here</div>
+        <div class="subtitle">Recent invoices · Site postcode shown for operational use</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
@@ -816,7 +845,7 @@ app.get("/invoices", async (req, res) => {
               <th>Dispatcher</th>
               <th>Stage</th>
               <th>Customer</th>
-              <th>Postcode</th>
+              <th>Site Postcode</th>
               <th>Company</th>
               <th>Payment</th>
               <th>Date</th>
@@ -905,7 +934,26 @@ app.get("/invoices/new", (req, res) => {
           padding: 15px;
           border: 1px solid #374151;
         }
+
+        #site-fields {
+          margin-top: 18px;
+        }
       </style>
+
+      <script>
+        function toggleSiteAddress() {
+          const checkbox = document.getElementById("site_same_as_invoice");
+          const siteFields = document.getElementById("site-fields");
+
+          if (checkbox.checked) {
+            siteFields.style.display = "none";
+          } else {
+            siteFields.style.display = "block";
+          }
+        }
+
+        window.addEventListener("DOMContentLoaded", toggleSiteAddress);
+      </script>
     </head>
     <body>
       ${nav()}
@@ -977,16 +1025,43 @@ app.get("/invoices/new", (req, res) => {
         </div>
 
         <div class="panel">
-          <h2>Customer</h2>
+          <h2>Customer / Invoice Address</h2>
 
           <div class="grid-2">
             <input name="customer_name" placeholder="Customer name" required>
-            <input name="customer_postcode" placeholder="Postcode">
+            <input name="customer_postcode" placeholder="Invoice postcode">
           </div>
 
           <br>
 
-          <textarea name="customer_address" placeholder="Customer address"></textarea>
+          <textarea name="customer_address" placeholder="Invoice address"></textarea>
+
+          <label class="checkbox-row">
+            <input
+              id="site_same_as_invoice"
+              name="site_same_as_invoice"
+              type="checkbox"
+              value="yes"
+              checked
+              onchange="toggleSiteAddress()"
+            >
+            Site address same as invoice address
+          </label>
+
+          <div id="site-fields">
+            <h2>Site Address</h2>
+            <div class="help">Use this only if the job location is different from the invoice address.</div>
+            <br>
+
+            <div class="grid-2">
+              <input name="site_postcode" placeholder="Site postcode">
+              <input name="site_address_line" placeholder="Quick site address line">
+            </div>
+
+            <br>
+
+            <textarea name="site_address" placeholder="Full site address"></textarea>
+          </div>
         </div>
 
         <div class="panel">
@@ -1046,6 +1121,16 @@ app.post("/invoices/create", async (req, res) => {
       `);
     }
 
+    const siteSameAsInvoice = req.body.site_same_as_invoice === "yes";
+
+    const finalSiteAddress = siteSameAsInvoice
+      ? req.body.customer_address
+      : (req.body.site_address || req.body.site_address_line || "");
+
+    const finalSitePostcode = siteSameAsInvoice
+      ? req.body.customer_postcode
+      : req.body.site_postcode;
+
     const lineItems = [
       {
         description: req.body.line1_description,
@@ -1078,6 +1163,9 @@ app.post("/invoices/create", async (req, res) => {
         customer_name,
         customer_address,
         customer_postcode,
+        site_same_as_invoice,
+        site_address,
+        site_postcode,
         customer_email,
         invoice_date,
         locksmith_name,
@@ -1089,7 +1177,7 @@ app.post("/invoices/create", async (req, res) => {
         notes,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW())
       RETURNING id
     `, [
       req.body.invoice_number,
@@ -1100,6 +1188,9 @@ app.post("/invoices/create", async (req, res) => {
       req.body.customer_name,
       req.body.customer_address,
       req.body.customer_postcode,
+      siteSameAsInvoice,
+      finalSiteAddress,
+      finalSitePostcode,
       req.body.customer_email,
       req.body.invoice_date,
       req.body.locksmith_name,
@@ -1129,6 +1220,15 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const company = companies[invoice.company_key] || companies.online;
     const lineItems = Array.isArray(invoice.line_items) ? invoice.line_items : JSON.parse(invoice.line_items || "[]");
 
+    const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
+    const siteAddress = siteSameAsInvoice
+      ? invoice.customer_address
+      : invoice.site_address;
+
+    const sitePostcode = siteSameAsInvoice
+      ? invoice.customer_postcode
+      : invoice.site_postcode;
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -1154,20 +1254,26 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
-    doc.roundedRect(50, 185, 290, 85, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Customer", 65, 195);
+    doc.roundedRect(50, 185, 240, 105, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 195);
     doc.font("Helvetica").fontSize(10)
       .text(invoice.customer_name || "", 65, 215)
-      .text(invoice.customer_address || "", 65, 230, { width: 220 })
-      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 255);
+      .text(invoice.customer_address || "", 65, 230, { width: 190 })
+      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 270);
 
-    doc.roundedRect(360, 185, 185, 85, 8).stroke();
+    doc.roundedRect(305, 185, 240, 105, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 195);
+    doc.font("Helvetica").fontSize(10)
+      .text(siteSameAsInvoice ? "Same as invoice address" : (siteAddress || ""), 320, 215, { width: 190 })
+      .text(`Postcode: ${sitePostcode || ""}`, 320, 270);
+
+    doc.roundedRect(360, 305, 185, 75, 8).stroke();
     doc.fontSize(10)
-      .text(`Payment: ${invoice.payment_method}`, 375, 205)
-      .text(`Status: ${invoice.paid_status}`, 375, 225)
-      .text(`Dispatcher: ${invoice.dispatcher_name || ""}`, 375, 245);
+      .text(`Payment: ${invoice.payment_method}`, 375, 320)
+      .text(`Status: ${invoice.paid_status}`, 375, 340)
+      .text(`Dispatcher: ${invoice.dispatcher_name || ""}`, 375, 360);
 
-    const tableTop = 295;
+    const tableTop = 405;
     doc.font("Helvetica-Bold").fontSize(10);
     doc.text("Qty", 55, tableTop);
     doc.text("Description", 105, tableTop);
@@ -1194,7 +1300,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       doc.font("Helvetica-Bold").text("Paid with thanks", 105, y + 35);
     }
 
-    const totalsY = 505;
+    const totalsY = 545;
     doc.font("Helvetica").fontSize(10);
     doc.text("Subtotal", 380, totalsY);
     doc.text(money(invoice.subtotal), 480, totalsY);
@@ -1204,28 +1310,28 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.text("TOTAL", 380, totalsY + 40);
     doc.text(money(invoice.total), 480, totalsY + 40);
 
-    doc.roundedRect(50, 525, 260, 95, 8).stroke();
-    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 540);
+    doc.roundedRect(50, 545, 260, 95, 8).stroke();
+    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 560);
 
     if (invoice.payment_method === "Bank transfer") {
-      doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 557);
-      doc.font("Helvetica-Bold").text(company.name, 70, 580);
-      doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 597);
-      doc.text(`AC: ${company.account}`, 70, 612);
+      doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 577);
+      doc.font("Helvetica-Bold").text(company.name, 70, 600);
+      doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 617);
+      doc.text(`AC: ${company.account}`, 70, 632);
     } else if (invoice.payment_method === "Card") {
-      doc.font("Helvetica").text("Payment method: Card", 70, 557);
-      doc.text("Please use the card payment link provided separately.", 70, 580, {
+      doc.font("Helvetica").text("Payment method: Card", 70, 577);
+      doc.text("Please use the card payment link provided separately.", 70, 600, {
         width: 210
       });
     } else {
-      doc.font("Helvetica").text("Payment method: Cash", 70, 557);
-      doc.text("Cash payment to be collected/confirmed by the office.", 70, 580, {
+      doc.font("Helvetica").text("Payment method: Cash", 70, 577);
+      doc.text("Cash payment to be collected/confirmed by the office.", 70, 600, {
         width: 210
       });
     }
 
-    doc.rect(360, 575, 185, 45).stroke();
-    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 590, {
+    doc.rect(360, 615, 185, 45).stroke();
+    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 630, {
       width: 170
     });
 
