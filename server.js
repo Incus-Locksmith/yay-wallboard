@@ -2,6 +2,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
 const PDFDocument = require("pdfkit");
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,6 +36,7 @@ const companies = {
   locksmiths: {
     name: "24H Locksmiths Ltd",
     displayName: "24H LOCKSMITHS",
+    logo: "logo-locksmiths.png",
     address1: "158 Uxbridge Road",
     address2: "London",
     postcode: "W13 8SB",
@@ -48,6 +50,7 @@ const companies = {
   online: {
     name: "24H Online Services Ltd",
     displayName: "24H ONLINE SERVICES",
+    logo: "logo-online.png",
     address1: "128 City Road",
     address2: "London",
     postcode: "EC1V 2NX",
@@ -595,7 +598,6 @@ app.get("/", async (req, res) => {
     `);
 
     const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
-
     const recentCalls = result.rows;
 
     const answeredCalls = recentCalls.filter(call =>
@@ -1238,12 +1240,20 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     doc.pipe(res);
 
-    doc.fontSize(20).font("Helvetica-Bold").text(company.displayName, 50, 50);
+    const logoPath = path.join(__dirname, company.logo);
+
+    try {
+      doc.image(logoPath, 50, 42, { width: 170 });
+    } catch (error) {
+      console.error("Logo load error:", error);
+      doc.fontSize(20).font("Helvetica-Bold").text(company.displayName, 50, 50);
+    }
+
     doc.fontSize(10).font("Helvetica")
-      .text(company.address1, 50, 78)
-      .text(company.address2, 50, 92)
-      .text(company.postcode, 50, 106)
-      .text(`Tel: ${company.tel}`, 50, 120);
+      .text(company.address1, 50, 112)
+      .text(company.address2, 50, 126)
+      .text(company.postcode, 50, 140)
+      .text(`Tel: ${company.tel}`, 50, 154);
 
     doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 65);
     doc.fontSize(10).font("Helvetica")
@@ -1252,28 +1262,28 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       .text(`Locksmith: ${invoice.locksmith_name || ""}`, 390, 130)
       .text(`Created by: ${invoice.dispatcher_name || ""}`, 390, 145);
 
-    doc.moveTo(50, 165).lineTo(545, 165).stroke();
+    doc.moveTo(50, 175).lineTo(545, 175).stroke();
 
-    doc.roundedRect(50, 185, 240, 105, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 195);
+    doc.roundedRect(50, 195, 240, 105, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 205);
     doc.font("Helvetica").fontSize(10)
-      .text(invoice.customer_name || "", 65, 215)
-      .text(invoice.customer_address || "", 65, 230, { width: 190 })
-      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 270);
+      .text(invoice.customer_name || "", 65, 225)
+      .text(invoice.customer_address || "", 65, 240, { width: 190 })
+      .text(`Postcode: ${invoice.customer_postcode || ""}`, 65, 280);
 
-    doc.roundedRect(305, 185, 240, 105, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 195);
+    doc.roundedRect(305, 195, 240, 105, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 205);
     doc.font("Helvetica").fontSize(10)
-      .text(siteSameAsInvoice ? "Same as invoice address" : (siteAddress || ""), 320, 215, { width: 190 })
-      .text(`Postcode: ${sitePostcode || ""}`, 320, 270);
+      .text(siteSameAsInvoice ? "Same as invoice address" : (siteAddress || ""), 320, 225, { width: 190 })
+      .text(`Postcode: ${sitePostcode || ""}`, 320, 280);
 
-    doc.roundedRect(360, 305, 185, 75, 8).stroke();
+    doc.roundedRect(360, 315, 185, 75, 8).stroke();
     doc.fontSize(10)
-      .text(`Payment: ${invoice.payment_method}`, 375, 320)
-      .text(`Status: ${invoice.paid_status}`, 375, 340)
-      .text(`Dispatcher: ${invoice.dispatcher_name || ""}`, 375, 360);
+      .text(`Payment: ${invoice.payment_method}`, 375, 330)
+      .text(`Status: ${invoice.paid_status}`, 375, 350)
+      .text(`Dispatcher: ${invoice.dispatcher_name || ""}`, 375, 370);
 
-    const tableTop = 405;
+    const tableTop = 415;
     doc.font("Helvetica-Bold").fontSize(10);
     doc.text("Qty", 55, tableTop);
     doc.text("Description", 105, tableTop);
@@ -1300,7 +1310,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       doc.font("Helvetica-Bold").text("Paid with thanks", 105, y + 35);
     }
 
-    const totalsY = 545;
+    const totalsY = 550;
     doc.font("Helvetica").fontSize(10);
     doc.text("Subtotal", 380, totalsY);
     doc.text(money(invoice.subtotal), 480, totalsY);
@@ -1310,35 +1320,35 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.text("TOTAL", 380, totalsY + 40);
     doc.text(money(invoice.total), 480, totalsY + 40);
 
-    doc.roundedRect(50, 545, 260, 95, 8).stroke();
-    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 560);
+    doc.roundedRect(50, 550, 260, 95, 8).stroke();
+    doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, 565);
 
     if (invoice.payment_method === "Bank transfer") {
-      doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 577);
-      doc.font("Helvetica-Bold").text(company.name, 70, 600);
-      doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 617);
-      doc.text(`AC: ${company.account}`, 70, 632);
+      doc.font("Helvetica").text("Please pay via BACS transfer to:", 70, 582);
+      doc.font("Helvetica-Bold").text(company.name, 70, 605);
+      doc.font("Helvetica").text(`SC: ${company.sortCode}`, 70, 622);
+      doc.text(`AC: ${company.account}`, 70, 637);
     } else if (invoice.payment_method === "Card") {
-      doc.font("Helvetica").text("Payment method: Card", 70, 577);
-      doc.text("Please use the card payment link provided separately.", 70, 600, {
+      doc.font("Helvetica").text("Payment method: Card", 70, 582);
+      doc.text("Please use the card payment link provided separately.", 70, 605, {
         width: 210
       });
     } else {
-      doc.font("Helvetica").text("Payment method: Cash", 70, 577);
-      doc.text("Cash payment to be collected/confirmed by the office.", 70, 600, {
+      doc.font("Helvetica").text("Payment method: Cash", 70, 582);
+      doc.text("Cash payment to be collected/confirmed by the office.", 70, 605, {
         width: 210
       });
     }
 
-    doc.rect(360, 615, 185, 45).stroke();
-    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 630, {
+    doc.rect(360, 620, 185, 45).stroke();
+    doc.font("Helvetica").fontSize(9).text(invoice.notes || "6 months warranty on parts fitted", 368, 635, {
       width: 170
     });
 
-    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 685, { align: "center", width: 495 });
+    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 690, { align: "center", width: 495 });
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 700, { align: "center", width: 495 })
-      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 715, { align: "center", width: 495 });
+      .text(company.footer, 50, 705, { align: "center", width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 720, { align: "center", width: 495 });
 
     doc.moveTo(50, 745).lineTo(545, 745).stroke();
     doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 760, {
