@@ -1251,62 +1251,51 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const logoPath = path.join(__dirname, company.logo);
 
     try {
-      doc.image(logoPath, 50, 38, { width: 165 });
+      doc.image(logoPath, 50, 35, { width: 160 });
     } catch (error) {
       console.error("Logo load error:", error);
-      doc.fontSize(20).font("Helvetica-Bold").text(company.displayName, 50, 50);
+      doc.fontSize(20).font("Helvetica-Bold").text(company.displayName, 50, 48);
     }
 
     doc.fontSize(9).font("Helvetica")
-      .text(company.address1, 50, 108)
-      .text(company.address2, 50, 121)
-      .text(company.postcode, 50, 134)
-      .text(`Tel: ${company.tel}`, 50, 147);
+      .text(company.address1, 50, 102)
+      .text(company.address2, 50, 115)
+      .text(company.postcode, 50, 128)
+      .text(`Tel: ${company.tel}`, 50, 141);
 
-    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 58);
+    doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 430, 55);
     doc.fontSize(10).font("Helvetica")
-      .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 94)
-      .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 109)
-      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 124)
-      .text(`Created by: ${pdfText(invoice.dispatcher_name)}`, 390, 139);
+      .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
+      .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120)
+      .text(`Created by: ${pdfText(invoice.dispatcher_name)}`, 390, 135);
 
-    doc.moveTo(50, 170).lineTo(545, 170).stroke();
+    doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
-    doc.roundedRect(50, 190, 240, 115, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 202);
+    doc.roundedRect(50, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 197);
     doc.font("Helvetica").fontSize(9.5)
-      .text(pdfText(invoice.customer_name), 65, 222, { width: 190 })
-      .text(pdfText(invoice.customer_address), 65, 238, { width: 190, height: 42 })
-      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 283, { width: 190 });
+      .text(pdfText(invoice.customer_name), 65, 217, { width: 190 })
+      .text(pdfText(invoice.customer_address), 65, 233, { width: 190, height: 40 })
+      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, { width: 190 });
 
-    doc.roundedRect(305, 190, 240, 115, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 202);
+    doc.roundedRect(305, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 197);
     doc.font("Helvetica").fontSize(9.5)
-      .text(siteSameAsInvoice ? "Same as invoice address" : pdfText(siteAddress), 320, 222, {
+      .text(siteSameAsInvoice ? "Same as invoice address" : pdfText(siteAddress), 320, 217, {
         width: 190,
-        height: 58
+        height: 56
       })
-      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 283, { width: 190 });
+      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, { width: 190 });
 
-    doc.roundedRect(50, 320, 240, 75, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Status", 65, 332);
+    doc.roundedRect(50, 310, 495, 52, 8).stroke();
+    doc.fontSize(11).font("Helvetica-Bold").text("Invoice Details", 65, 322);
     doc.font("Helvetica").fontSize(10)
-      .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 352)
-      .text(`Status: ${pdfText(invoice.paid_status)}`, 65, 368)
-      .text(`Dispatcher: ${pdfText(invoice.dispatcher_name)}`, 65, 384);
+      .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 210, 342)
+      .text(`Dispatcher: ${pdfText(invoice.dispatcher_name)}`, 375, 342);
 
-    doc.roundedRect(360, 320, 185, 75, 8).stroke();
-    doc.fontSize(11).font("Helvetica-Bold").text("Totals", 375, 332);
-    doc.font("Helvetica").fontSize(10)
-      .text("Subtotal", 375, 352)
-      .text(money(invoice.subtotal), 480, 352)
-      .text("VAT", 375, 368)
-      .text(money(invoice.vat_amount), 480, 368);
-    doc.font("Helvetica-Bold")
-      .text("TOTAL", 375, 384)
-      .text(money(invoice.total), 480, 384);
-
-    const tableTop = 425;
+    const tableTop = 390;
 
     doc.font("Helvetica-Bold").fontSize(10);
     doc.text("Qty", 55, tableTop);
@@ -1333,7 +1322,21 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       y += 22 + extraHeight;
     });
 
-    const paymentBoxY = Math.max(540, y + 25);
+    doc.moveTo(50, y + 4).lineTo(545, y + 4).stroke();
+
+    const totalsY = y + 18;
+
+    doc.font("Helvetica").fontSize(10);
+    doc.text("Subtotal", 380, totalsY);
+    doc.text(money(invoice.subtotal), 480, totalsY);
+    doc.text("VAT", 380, totalsY + 18);
+    doc.text(money(invoice.vat_amount), 480, totalsY + 18);
+
+    doc.font("Helvetica-Bold");
+    doc.text("TOTAL", 380, totalsY + 38);
+    doc.text(money(invoice.total), 480, totalsY + 38);
+
+    const paymentBoxY = totalsY + 78;
 
     doc.roundedRect(50, paymentBoxY, 260, 105, 8).stroke();
     doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, paymentBoxY + 15);
@@ -1365,21 +1368,21 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       height: 55
     });
 
-    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 690, {
+    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 705, {
       align: "center",
       width: 495
     });
 
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 705, { align: "center", width: 495 })
-      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 720, {
+      .text(company.footer, 50, 720, { align: "center", width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 735, {
         align: "center",
         width: 495
       });
 
-    doc.moveTo(50, 745).lineTo(545, 745).stroke();
+    doc.moveTo(50, 755).lineTo(545, 755).stroke();
 
-    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 760, {
+    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 768, {
       align: "center",
       width: 495
     });
