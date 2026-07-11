@@ -3,6 +3,7 @@ const { Pool } = require("pg");
 const fetch = require("node-fetch");
 const PDFDocument = require("pdfkit");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,6 +32,8 @@ const agents = {
   "1017": "Semir",
   "1013": "Sofa"
 };
+
+const agentNames = Object.values(agents).sort((a, b) => a.localeCompare(b));
 
 const companies = {
   locksmiths: {
@@ -63,6 +66,187 @@ const companies = {
   }
 };
 
+function authSecret() {
+  return process.env.DASHBOARD_PASSWORD || "change-me-now";
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  const cookies = {};
+
+  header.split(";").forEach(part => {
+    const index = part.indexOf("=");
+    if (index === -1) return;
+
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+
+    cookies[key] = decodeURIComponent(value);
+  });
+
+  return cookies;
+}
+
+function signValue(value) {
+  return crypto
+    .createHmac("sha256", authSecret())
+    .update(value)
+    .digest("hex");
+}
+
+function makeSessionCookie(agentName) {
+  const payload = Buffer.from(
+    JSON.stringify({
+      agentName,
+      createdAt: Date.now()
+    })
+  ).toString("base64url");
+
+  const signature = signValue(payload);
+
+  return `${payload}.${signature}`;
+}
+
+function readSession(req) {
+  const cookies = parseCookies(req);
+  const raw = cookies.dashboard_session;
+
+  if (!raw || !raw.includes(".")) return null;
+
+  const [payload, signature] = raw.split(".");
+  const expected = signValue(payload);
+
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+      return null;
+    }
+  } catch (error) {
+    return null;
+  }
+
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    );
+
+    if (!decoded.agentName || !agentNames.includes(decoded.agentName)) {
+      return null;
+    }
+
+    const maxAgeMs = 1000 * 60 * 60 * 24 * 7;
+
+    if (!decoded.createdAt || Date.now() - decoded.createdAt > maxAgeMs) {
+      return null;
+    }
+
+    return decoded;
+  } catch (error) {
+    return null;
+  }
+}
+
+function setSessionCookie(res, agentName) {
+  const cookieValue = makeSessionCookie(agentName);
+
+  res.setHeader(
+    "Set-Cookie",
+    `dashboard_session=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=${60 * 60 * 24 * 7}`
+  );
+}
+
+function clearSessionCookie(res) {
+  res.setHeader(
+    "Set-Cookie",
+    "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0"
+  );
+}
+
+function requireLogin(req, res, next) {
+  const openPaths = ["/login", "/logout", "/webhook/yay"];
+
+  if (openPaths.includes(req.path)) {
+    return next();
+  }
+
+  const session = readSession(req);
+
+  if (!session) {
+    return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
+  }
+
+  req.currentAgent = session.agentName;
+  next();
+}
+
+app.use(requireLogin);
+
+function currentAgentName(req) {
+  return req.currentAgent || "";
+}
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function pdfText(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u00D0/g, "")
+    .replace(/\uFFFD/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+function money(value) {
+  return `£${Number(value || 0).toFixed(2)}`;
+}
+
+function formatSeconds(seconds) {
+  if (!seconds) return "0s";
+
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+
+  if (mins === 0) return `${secs}s`;
+
+  return `${mins}m ${secs}s`;
+}
+
+function formatDateTime(date) {
+  if (!date) return "—";
+
+  return new Date(date).toLocaleString("en-GB", {
+    timeZone: "Europe/London",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+function formatTimeOnly(date) {
+  if (!date) return "—";
+
+  return new Date(date).toLocaleTimeString("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 function isPaymentAllowedForCompany(companyKey, paymentMethod) {
   if (companyKey === "locksmiths") {
     return paymentMethod === "Bank transfer" || paymentMethod === "Cash";
@@ -87,9 +271,469 @@ function paymentRuleMessage(companyKey) {
   return "Invalid company selected.";
 }
 
-function isHistoricInvoice(stage) {
+function technicianStatusClass(status) {
+  const value = (status || "").toLowerCase();
+
+  if (value.includes("soon")) return "soon";
+  if (value.includes("available")) return "available";
+  if (value.includes("job")) return "onjob";
+  if (value.includes("holiday")) return "off";
+  if (value.includes("sick")) return "off";
+  if (value.includes("vehicle")) return "bad";
+  if (value.includes("do not")) return "bad";
+  if (value.includes("off")) return "off";
+
+  return "neutral";
+}
+
+function priorityClass(priority) {
+  const value = (priority || "").toLowerCase();
+
+  if (value.includes("high")) return "priority-high";
+  if (value.includes("push")) return "priority-push";
+  if (value.includes("do not")) return "priority-low";
+
+  return "priority-normal";
+}
+
+function priorityRank(priority) {
+  const value = (priority || "").toLowerCase();
+
+  if (value.includes("high")) return 1;
+  if (value.includes("push")) return 2;
+  if (value.includes("do not")) return 9;
+
+  return 3;
+}
+
+function invoiceStageClass(stage) {
   const value = (stage || "").toLowerCase();
-  return value.includes("emailed");
+
+  if (value.includes("manager")) return "stage-approval";
+  if (value.includes("emailed") && value.includes("photos")) return "stage-emailed-photos";
+  if (value.includes("emailed")) return "stage-emailed";
+  if (value.includes("approved")) return "stage-approved";
+  if (value.includes("cancelled")) return "stage-cancelled";
+
+  return "stage-draft";
+}
+
+function invoiceStageOptions(selectedStage = "Draft only") {
+  const stages = [
+    "Draft only",
+    "Awaiting manager approval",
+    "Approved",
+    "Emailed to client",
+    "Emailed to client with photos",
+    "Cancelled / do not send"
+  ];
+
+  return stages.map(stage => {
+    const selected = stage === selectedStage ? "selected" : "";
+    return `<option ${selected}>${escapeHtml(stage)}</option>`;
+  }).join("");
+}
+
+function dispatchRank(status) {
+  const value = (status || "").toLowerCase();
+
+  if (value.includes("available") && !value.includes("soon")) return 1;
+  if (value.includes("soon")) return 2;
+  if (value.includes("job")) return 3;
+
+  return 4;
+}
+
+function isUsableForDispatch(status) {
+  const value = (status || "").toLowerCase();
+
+  return (
+    value.includes("available") ||
+    value.includes("soon") ||
+    value.includes("job")
+  );
+}
+
+function getBestLocation(tech) {
+  const current = (tech.current_postcode || "").trim();
+  const base = (tech.base_postcode || "").trim();
+
+  if (current) return { postcode: current, source: "Current" };
+  if (base) return { postcode: base, source: "Base" };
+
+  return { postcode: "", source: "Unknown" };
+}
+
+function isFullUkPostcode(postcode) {
+  const value = (postcode || "").trim().toUpperCase();
+
+  return /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(value);
+}
+
+function postcodePrecision(postcode) {
+  const value = (postcode || "").trim().toUpperCase();
+
+  if (!value) return "Unknown";
+  if (isFullUkPostcode(value)) return "Exact";
+
+  return "Approx";
+}
+
+function normalisePostcode(postcode) {
+  return (postcode || "").trim().toUpperCase().replace(/\s+/g, " ");
+}
+
+async function lookupPostcodeLocation(postcode) {
+  const clean = normalisePostcode(postcode);
+
+  if (!clean) {
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "No postcode"
+    };
+  }
+
+  try {
+    if (isFullUkPostcode(clean)) {
+      const response = await fetch(
+        `https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`
+      );
+
+      const json = await response.json();
+
+      if (json.status === 200 && json.result) {
+        return {
+          ok: true,
+          latitude: json.result.latitude,
+          longitude: json.result.longitude,
+          precision: "Exact",
+          error: null
+        };
+      }
+    }
+
+    const outcode = clean.split(" ")[0];
+
+    const outcodeResponse = await fetch(
+      `https://api.postcodes.io/outcodes/${encodeURIComponent(outcode)}`
+    );
+
+    const outcodeJson = await outcodeResponse.json();
+
+    if (outcodeJson.status === 200 && outcodeJson.result) {
+      return {
+        ok: true,
+        latitude: outcodeJson.result.latitude,
+        longitude: outcodeJson.result.longitude,
+        precision: "Approx",
+        error: null
+      };
+    }
+
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "Postcode not found"
+    };
+  } catch (error) {
+    console.error("Postcode lookup error:", error);
+
+    return {
+      ok: false,
+      latitude: null,
+      longitude: null,
+      precision: "Unknown",
+      error: "Lookup failed"
+    };
+  }
+}
+
+function distanceMiles(lat1, lon1, lat2, lon2) {
+  if ([lat1, lon1, lat2, lon2].some(v => v === null || v === undefined)) {
+    return null;
+  }
+
+  const earthRadiusMiles = 3958.8;
+  const toRadians = degrees => degrees * Math.PI / 180;
+
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+
+  return earthRadiusMiles * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function formatDistance(distance) {
+  if (distance === null || distance === undefined || Number.isNaN(distance)) {
+    return "—";
+  }
+
+  return `${distance.toFixed(1)} miles`;
+}
+
+function sharedStyles() {
+  return `
+    body {
+      font-family: Arial, sans-serif;
+      background: #111827;
+      color: white;
+      padding: 40px;
+    }
+
+    a {
+      color: #93c5fd;
+      text-decoration: none;
+      margin-right: 18px;
+    }
+
+    h1 {
+      font-size: 42px;
+      margin-bottom: 5px;
+    }
+
+    h2 {
+      margin-top: 0;
+    }
+
+    .subtitle {
+      color: #9ca3af;
+      margin-bottom: 30px;
+    }
+
+    .nav {
+      margin-bottom: 25px;
+    }
+
+    .login-bar {
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 12px;
+      padding: 12px 16px;
+      margin-bottom: 20px;
+      color: #d1d5db;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .panel {
+      background: #1f2937;
+      border-radius: 14px;
+      padding: 25px;
+      margin-bottom: 35px;
+    }
+
+    input, select, textarea, button {
+      font-size: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #374151;
+    }
+
+    input, select, textarea {
+      background: #111827;
+      color: white;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #1f2937;
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 14px;
+      border-bottom: 1px solid #374151;
+      font-size: 16px;
+      vertical-align: top;
+    }
+
+    th {
+      color: #9ca3af;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    .pill, .status {
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+
+    .available { background: #16a34a; color: white; }
+    .soon { background: #f59e0b; color: black; }
+    .onjob { background: #2563eb; color: white; }
+    .off { background: #6b7280; color: white; }
+    .bad { background: #dc2626; color: white; }
+    .neutral, .inactive { background: #374151; color: #d1d5db; }
+    .engaged { background: #dc2626; color: white; }
+
+    .priority-high { background: #dc2626; color: white; }
+    .priority-push { background: #f59e0b; color: black; }
+    .priority-normal { background: #374151; color: #d1d5db; }
+    .priority-low { background: #6b7280; color: white; }
+
+    .stage-draft { background: #374151; color: #d1d5db; }
+    .stage-approval { background: #f59e0b; color: black; }
+    .stage-approved { background: #2563eb; color: white; }
+    .stage-emailed { background: #16a34a; color: white; }
+    .stage-emailed-photos { background: #22c55e; color: black; }
+    .stage-cancelled { background: #dc2626; color: white; }
+
+    .muted {
+      color: #9ca3af;
+    }
+
+    .warning-text {
+      color: #fbbf24;
+      font-weight: bold;
+    }
+
+    .distance {
+      font-size: 22px;
+      font-weight: bold;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+    }
+
+    .stage-form {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stage-form select {
+      font-size: 13px;
+      padding: 8px;
+      min-width: 210px;
+    }
+
+    .stage-form button {
+      font-size: 13px;
+      padding: 8px 12px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 16px 0;
+      color: #d1d5db;
+      font-size: 16px;
+    }
+
+    .checkbox-row input {
+      width: 18px;
+      height: 18px;
+    }
+
+    .help {
+      color: #9ca3af;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+
+    .search-form {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 15px;
+      align-items: center;
+    }
+  `;
+}
+
+function nav(req) {
+  const name = currentAgentName(req);
+
+  return `
+    <div class="login-bar">
+      <div>Logged in as <strong>${escapeHtml(name)}</strong></div>
+      <div><a href="/logout">Logout</a></div>
+    </div>
+
+    <div class="nav">
+      <a href="/">Call Wallboard</a>
+      <a href="/technicians">Technicians</a>
+      <a href="/dispatch">Dispatch</a>
+      <a href="/invoices">Invoices</a>
+      <a href="/invoices/historic">Historic Invoices</a>
+      <a href="/invoices/new">New Invoice</a>
+    </div>
+  `;
+}
+
+function invoiceRows(invoices) {
+  return invoices.map(invoice => {
+    const company = companies[invoice.company_key] || companies.online;
+    const stage = invoice.invoice_stage || "Draft only";
+    const stageClass = invoiceStageClass(stage);
+
+    const sitePostcode = invoice.site_same_as_invoice
+      ? invoice.customer_postcode
+      : invoice.site_postcode;
+
+    return `
+      <tr>
+        <td>${escapeHtml(invoice.invoice_number)}</td>
+        <td>${escapeHtml(invoice.dispatcher_name)}</td>
+        <td>
+          <div style="margin-bottom:8px;">
+            <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
+          </div>
+
+          <form class="stage-form" method="POST" action="/invoices/stage">
+            <input type="hidden" name="id" value="${invoice.id}">
+            <select name="invoice_stage">
+              ${invoiceStageOptions(stage)}
+            </select>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+        <td>${escapeHtml(invoice.customer_name)}</td>
+        <td>${escapeHtml(sitePostcode)}</td>
+        <td>${escapeHtml(company.name)}</td>
+        <td>${escapeHtml(invoice.payment_method)}</td>
+        <td>${escapeHtml(invoice.invoice_date)}</td>
+        <td>${money(invoice.total)}</td>
+        <td>
+          <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
+        </td>
+      </tr>
+    `;
+  }).join("");
 }
 
 async function initDb() {
@@ -178,477 +822,120 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
 }
 
-function escapeHtml(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+app.get("/login", (req, res) => {
+  const next = req.query.next || "/";
+  const error = req.query.error === "1";
 
-function pdfText(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u00D0/g, "")
-    .replace(/\uFFFD/g, "")
-    .replace(/[ \t]+/g, " ")
-    .trim();
-}
+  const options = agentNames.map(name => {
+    return `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+  }).join("");
 
-function money(value) {
-  return `£${Number(value || 0).toFixed(2)}`;
-}
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Dashboard Login</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          background: #111827;
+          color: white;
+          padding: 40px;
+        }
 
-function formatSeconds(seconds) {
-  if (!seconds) return "0s";
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  if (mins === 0) return `${secs}s`;
-  return `${mins}m ${secs}s`;
-}
+        .login-box {
+          max-width: 440px;
+          margin: 80px auto;
+          background: #1f2937;
+          border-radius: 16px;
+          padding: 30px;
+          border: 1px solid #374151;
+        }
 
-function formatDateTime(date) {
-  if (!date) return "—";
-  return new Date(date).toLocaleString("en-GB", {
-    timeZone: "Europe/London",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
-}
+        h1 {
+          margin-top: 0;
+          font-size: 36px;
+        }
 
-function formatTimeOnly(date) {
-  if (!date) return "—";
-  return new Date(date).toLocaleTimeString("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
-}
+        .subtitle {
+          color: #9ca3af;
+          margin-bottom: 25px;
+        }
 
-function technicianStatusClass(status) {
-  const value = (status || "").toLowerCase();
-  if (value.includes("soon")) return "soon";
-  if (value.includes("available")) return "available";
-  if (value.includes("job")) return "onjob";
-  if (value.includes("holiday")) return "off";
-  if (value.includes("sick")) return "off";
-  if (value.includes("vehicle")) return "bad";
-  if (value.includes("do not")) return "bad";
-  if (value.includes("off")) return "off";
-  return "neutral";
-}
+        select, input, button {
+          width: 100%;
+          box-sizing: border-box;
+          font-size: 17px;
+          padding: 14px;
+          border-radius: 8px;
+          border: 1px solid #374151;
+          margin-bottom: 14px;
+        }
 
-function priorityClass(priority) {
-  const value = (priority || "").toLowerCase();
+        select, input {
+          background: #111827;
+          color: white;
+        }
 
-  if (value.includes("high")) return "priority-high";
-  if (value.includes("push")) return "priority-push";
-  if (value.includes("do not")) return "priority-low";
+        button {
+          background: #2563eb;
+          color: white;
+          border: none;
+          font-weight: bold;
+          cursor: pointer;
+        }
 
-  return "priority-normal";
-}
+        .error {
+          background: #dc2626;
+          color: white;
+          border-radius: 8px;
+          padding: 12px;
+          margin-bottom: 14px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="login-box">
+        <h1>Dashboard Login</h1>
+        <div class="subtitle">Choose your name and enter the shared password.</div>
 
-function priorityRank(priority) {
-  const value = (priority || "").toLowerCase();
+        ${error ? `<div class="error">Wrong agent or password. Try again.</div>` : ""}
 
-  if (value.includes("high")) return 1;
-  if (value.includes("push")) return 2;
-  if (value.includes("do not")) return 9;
+        <form method="POST" action="/login">
+          <input type="hidden" name="next" value="${escapeHtml(next)}">
 
-  return 3;
-}
+          <select name="agent_name" required>
+            <option value="">Choose your name</option>
+            ${options}
+          </select>
 
-function invoiceStageClass(stage) {
-  const value = (stage || "").toLowerCase();
+          <input name="password" type="password" placeholder="Password" required>
 
-  if (value.includes("manager")) return "stage-approval";
-  if (value.includes("emailed") && value.includes("photos")) return "stage-emailed-photos";
-  if (value.includes("emailed")) return "stage-emailed";
-  if (value.includes("approved")) return "stage-approved";
-  if (value.includes("cancelled")) return "stage-cancelled";
+          <button type="submit">Log in</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
+});
 
-  return "stage-draft";
-}
+app.post("/login", (req, res) => {
+  const agentName = req.body.agent_name || "";
+  const password = req.body.password || "";
+  const next = req.body.next || "/";
 
-function dispatchRank(status) {
-  const value = (status || "").toLowerCase();
-
-  if (value.includes("available") && !value.includes("soon")) return 1;
-  if (value.includes("soon")) return 2;
-  if (value.includes("job")) return 3;
-
-  return 4;
-}
-
-function isUsableForDispatch(status) {
-  const value = (status || "").toLowerCase();
-
-  return (
-    value.includes("available") ||
-    value.includes("soon") ||
-    value.includes("job")
-  );
-}
-
-function getBestLocation(tech) {
-  const current = (tech.current_postcode || "").trim();
-  const base = (tech.base_postcode || "").trim();
-
-  if (current) return { postcode: current, source: "Current" };
-  if (base) return { postcode: base, source: "Base" };
-
-  return { postcode: "", source: "Unknown" };
-}
-
-function isFullUkPostcode(postcode) {
-  const value = (postcode || "").trim().toUpperCase();
-  return /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(value);
-}
-
-function postcodePrecision(postcode) {
-  const value = (postcode || "").trim().toUpperCase();
-  if (!value) return "Unknown";
-  if (isFullUkPostcode(value)) return "Exact";
-  return "Approx";
-}
-
-function normalisePostcode(postcode) {
-  return (postcode || "").trim().toUpperCase().replace(/\s+/g, " ");
-}
-
-async function lookupPostcodeLocation(postcode) {
-  const clean = normalisePostcode(postcode);
-
-  if (!clean) {
-    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "No postcode" };
+  if (!agentNames.includes(agentName) || password !== authSecret()) {
+    return res.redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
   }
 
-  try {
-    if (isFullUkPostcode(clean)) {
-      const response = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`);
-      const json = await response.json();
+  setSessionCookie(res, agentName);
+  res.redirect(next);
+});
 
-      if (json.status === 200 && json.result) {
-        return {
-          ok: true,
-          latitude: json.result.latitude,
-          longitude: json.result.longitude,
-          precision: "Exact",
-          error: null
-        };
-      }
-    }
-
-    const outcode = clean.split(" ")[0];
-    const outcodeResponse = await fetch(`https://api.postcodes.io/outcodes/${encodeURIComponent(outcode)}`);
-    const outcodeJson = await outcodeResponse.json();
-
-    if (outcodeJson.status === 200 && outcodeJson.result) {
-      return {
-        ok: true,
-        latitude: outcodeJson.result.latitude,
-        longitude: outcodeJson.result.longitude,
-        precision: "Approx",
-        error: null
-      };
-    }
-
-    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "Postcode not found" };
-  } catch (error) {
-    console.error("Postcode lookup error:", error);
-    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "Lookup failed" };
-  }
-}
-
-function distanceMiles(lat1, lon1, lat2, lon2) {
-  if ([lat1, lon1, lat2, lon2].some(v => v === null || v === undefined)) return null;
-
-  const earthRadiusMiles = 3958.8;
-  const toRadians = degrees => degrees * Math.PI / 180;
-
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
-
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLon / 2) ** 2;
-
-  return earthRadiusMiles * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
-
-function formatDistance(distance) {
-  if (distance === null || distance === undefined || Number.isNaN(distance)) return "—";
-  return `${distance.toFixed(1)} miles`;
-}
-
-function dispatcherOptions(selectedName = "") {
-  const names = Object.values(agents).sort((a, b) => a.localeCompare(b));
-
-  return [
-    `<option value="">Dispatcher / Created by</option>`,
-    ...names.map(name => {
-      const selected = name === selectedName ? "selected" : "";
-      return `<option ${selected}>${escapeHtml(name)}</option>`;
-    })
-  ].join("");
-}
-
-function invoiceStageOptions(selectedStage = "Draft only") {
-  const stages = [
-    "Draft only",
-    "Awaiting manager approval",
-    "Approved",
-    "Emailed to client",
-    "Emailed to client with photos",
-    "Cancelled / do not send"
-  ];
-
-  return stages.map(stage => {
-    const selected = stage === selectedStage ? "selected" : "";
-    return `<option ${selected}>${escapeHtml(stage)}</option>`;
-  }).join("");
-}
-
-function sharedStyles() {
-  return `
-    body {
-      font-family: Arial, sans-serif;
-      background: #111827;
-      color: white;
-      padding: 40px;
-    }
-
-    a {
-      color: #93c5fd;
-      text-decoration: none;
-      margin-right: 18px;
-    }
-
-    h1 {
-      font-size: 42px;
-      margin-bottom: 5px;
-    }
-
-    h2 {
-      margin-top: 0;
-    }
-
-    .subtitle {
-      color: #9ca3af;
-      margin-bottom: 30px;
-    }
-
-    .nav {
-      margin-bottom: 25px;
-    }
-
-    .panel {
-      background: #1f2937;
-      border-radius: 14px;
-      padding: 25px;
-      margin-bottom: 35px;
-    }
-
-    input, select, textarea, button {
-      font-size: 16px;
-      padding: 12px;
-      border-radius: 8px;
-      border: 1px solid #374151;
-    }
-
-    input, select, textarea {
-      background: #111827;
-      color: white;
-    }
-
-    button {
-      background: #2563eb;
-      color: white;
-      border: none;
-      cursor: pointer;
-      font-weight: bold;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #1f2937;
-      border-radius: 14px;
-      overflow: hidden;
-    }
-
-    th, td {
-      text-align: left;
-      padding: 14px;
-      border-bottom: 1px solid #374151;
-      font-size: 16px;
-      vertical-align: top;
-    }
-
-    th {
-      color: #9ca3af;
-      font-size: 13px;
-      text-transform: uppercase;
-    }
-
-    .pill, .status {
-      padding: 7px 12px;
-      border-radius: 999px;
-      font-size: 13px;
-      font-weight: bold;
-      white-space: nowrap;
-    }
-
-    .available { background: #16a34a; color: white; }
-    .soon { background: #f59e0b; color: black; }
-    .onjob { background: #2563eb; color: white; }
-    .off { background: #6b7280; color: white; }
-    .bad { background: #dc2626; color: white; }
-    .neutral, .inactive { background: #374151; color: #d1d5db; }
-    .engaged { background: #dc2626; color: white; }
-
-    .priority-high { background: #dc2626; color: white; }
-    .priority-push { background: #f59e0b; color: black; }
-    .priority-normal { background: #374151; color: #d1d5db; }
-    .priority-low { background: #6b7280; color: white; }
-
-    .stage-draft { background: #374151; color: #d1d5db; }
-    .stage-approval { background: #f59e0b; color: black; }
-    .stage-approved { background: #2563eb; color: white; }
-    .stage-emailed { background: #16a34a; color: white; }
-    .stage-emailed-photos { background: #22c55e; color: black; }
-    .stage-cancelled { background: #dc2626; color: white; }
-
-    .muted { color: #9ca3af; }
-    .warning-text { color: #fbbf24; font-weight: bold; }
-    .distance { font-size: 22px; font-weight: bold; }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 15px;
-    }
-
-    .grid-3 {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 15px;
-    }
-
-    .stage-form {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-
-    .stage-form select {
-      font-size: 13px;
-      padding: 8px;
-      min-width: 210px;
-    }
-
-    .stage-form button {
-      font-size: 13px;
-      padding: 8px 12px;
-    }
-
-    .checkbox-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin: 16px 0;
-      color: #d1d5db;
-      font-size: 16px;
-    }
-
-    .checkbox-row input {
-      width: 18px;
-      height: 18px;
-    }
-
-    .help {
-      color: #9ca3af;
-      font-size: 14px;
-      margin-top: 8px;
-    }
-
-    .search-form {
-      display: grid;
-      grid-template-columns: 2fr 1fr;
-      gap: 15px;
-      align-items: center;
-    }
-
-    .small-link {
-      font-size: 14px;
-      color: #93c5fd;
-    }
-  `;
-}
-
-function nav() {
-  return `
-    <div class="nav">
-      <a href="/">Call Wallboard</a>
-      <a href="/technicians">Technicians</a>
-      <a href="/dispatch">Dispatch</a>
-      <a href="/invoices">Invoices</a>
-      <a href="/invoices/historic">Historic Invoices</a>
-      <a href="/invoices/new">New Invoice</a>
-    </div>
-  `;
-}
-
-function invoiceRows(invoices) {
-  return invoices.map(invoice => {
-    const company = companies[invoice.company_key] || companies.online;
-    const stage = invoice.invoice_stage || "Draft only";
-    const stageClass = invoiceStageClass(stage);
-    const sitePostcode = invoice.site_same_as_invoice
-      ? invoice.customer_postcode
-      : invoice.site_postcode;
-
-    return `
-      <tr>
-        <td>${escapeHtml(invoice.invoice_number)}</td>
-        <td>${escapeHtml(invoice.dispatcher_name)}</td>
-        <td>
-          <div style="margin-bottom:8px;">
-            <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
-          </div>
-
-          <form class="stage-form" method="POST" action="/invoices/stage">
-            <input type="hidden" name="id" value="${invoice.id}">
-            <select name="invoice_stage">
-              ${invoiceStageOptions(stage)}
-            </select>
-            <button type="submit">Save</button>
-          </form>
-        </td>
-        <td>${escapeHtml(invoice.customer_name)}</td>
-        <td>${escapeHtml(sitePostcode)}</td>
-        <td>${escapeHtml(company.name)}</td>
-        <td>${escapeHtml(invoice.payment_method)}</td>
-        <td>${escapeHtml(invoice.invoice_date)}</td>
-        <td>${money(invoice.total)}</td>
-        <td>
-          <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
-        </td>
-      </tr>
-    `;
-  }).join("");
-}
+app.get("/logout", (req, res) => {
+  clearSessionCookie(res);
+  res.redirect("/login");
+});
 
 app.get("/", async (req, res) => {
   try {
@@ -666,9 +953,7 @@ app.get("/", async (req, res) => {
       call.answered_by && agents[call.answered_by]
     );
 
-    const missedCalls = recentCalls.filter(call =>
-      !call.answered_by
-    );
+    const missedCalls = recentCalls.filter(call => !call.answered_by);
 
     const reportableCalls = [
       ...answeredCalls,
@@ -680,11 +965,13 @@ app.get("/", async (req, res) => {
       : 0;
 
     let missedRateClass = "good";
+
     if (reportableCalls.length === 0) missedRateClass = "neutral";
     else if (missedRate >= 20) missedRateClass = "bad";
     else if (missedRate >= 10) missedRateClass = "soon";
 
     const lastReceived = latestResult.rows[0].last_received;
+
     const lastUpdatedText = lastReceived
       ? `Last call received: ${formatDateTime(lastReceived)}`
       : "No calls received yet";
@@ -715,17 +1002,25 @@ app.get("/", async (req, res) => {
 
       const callTime = call.start_time || call.received_at;
 
-      if (!agentStats[ext].lastCallTime || new Date(callTime) > new Date(agentStats[ext].lastCallTime)) {
+      if (
+        !agentStats[ext].lastCallTime ||
+        new Date(callTime) > new Date(agentStats[ext].lastCallTime)
+      ) {
         agentStats[ext].lastCallTime = callTime;
       }
 
-      if (!call.end_time) agentStats[ext].status = "Engaged";
+      if (!call.end_time) {
+        agentStats[ext].status = "Engaged";
+      }
     });
 
     const agentRows = Object.values(agentStats)
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(agent => {
-        const avgDuration = agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0;
+        const avgDuration = agent.answered
+          ? Math.round(agent.totalDuration / agent.answered)
+          : 0;
+
         const statusClass = agent.status === "Engaged" ? "engaged" : "inactive";
 
         return `
@@ -744,7 +1039,7 @@ app.get("/", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Keys247 Call Wallboard (Incus)</title>
+        <title>Keys247 Call Wallboard</title>
         <meta http-equiv="refresh" content="5">
         <style>
           ${sharedStyles()}
@@ -792,9 +1087,9 @@ app.get("/", async (req, res) => {
         </style>
       </head>
       <body>
-        ${nav()}
+        ${nav(req)}
 
-        <h1>Keys247 Call Wallboard (Incus)</h1>
+        <h1>Keys247 Call Wallboard</h1>
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
         <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
 
@@ -803,14 +1098,17 @@ app.get("/", async (req, res) => {
             <div class="label">Total Calls</div>
             <div class="value">${reportableCalls.length}</div>
           </div>
+
           <div class="card">
             <div class="label">Answered</div>
             <div class="value">${answeredCalls.length}</div>
           </div>
+
           <div class="card">
             <div class="label">Missed</div>
             <div class="value">${missedCalls.length}</div>
           </div>
+
           <div class="card ${missedRateClass}">
             <div class="label">Miss Rate</div>
             <div class="value ${missedRateClass}">${missedRate}%</div>
@@ -858,9 +1156,10 @@ app.get("/invoices", async (req, res) => {
         <style>${sharedStyles()}</style>
       </head>
       <body>
-        ${nav()}
+        ${nav(req)}
+
         <h1>Invoices</h1>
-        <div class="subtitle">Only invoices that have not been emailed are shown here</div>
+        <div class="subtitle">Only invoices that have not been emailed are shown here.</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
@@ -882,7 +1181,10 @@ app.get("/invoices", async (req, res) => {
               <th>PDF</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="10">No active invoices waiting to be sent</td></tr>`}</tbody>
+
+          <tbody>
+            ${rows || `<tr><td colspan="10">No active invoices waiting to be sent</td></tr>`}
+          </tbody>
         </table>
       </body>
       </html>
@@ -931,7 +1233,8 @@ app.get("/invoices/historic", async (req, res) => {
         <style>${sharedStyles()}</style>
       </head>
       <body>
-        ${nav()}
+        ${nav(req)}
+
         <h1>Historic Invoices</h1>
         <div class="subtitle">Invoices marked as emailed are filed here. Search by invoice or site postcode.</div>
 
@@ -940,7 +1243,9 @@ app.get("/invoices/historic", async (req, res) => {
             <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Search historic invoices by postcode">
             <button type="submit">Search</button>
           </form>
+
           <br>
+
           <a href="/invoices/historic">Clear search</a>
           <a href="/invoices">Back to active invoices</a>
         </div>
@@ -960,7 +1265,10 @@ app.get("/invoices/historic", async (req, res) => {
               <th>PDF</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="10">No historic invoices found</td></tr>`}</tbody>
+
+          <tbody>
+            ${rows || `<tr><td colspan="10">No historic invoices found</td></tr>`}
+          </tbody>
         </table>
       </body>
       </html>
@@ -998,6 +1306,8 @@ app.get("/invoices/new", (req, res) => {
     month: "2-digit",
     year: "numeric"
   });
+
+  const agentName = currentAgentName(req);
 
   res.send(`
     <!DOCTYPE html>
@@ -1061,11 +1371,12 @@ app.get("/invoices/new", (req, res) => {
         window.addEventListener("DOMContentLoaded", toggleSiteAddress);
       </script>
     </head>
+
     <body>
-      ${nav()}
+      ${nav(req)}
 
       <h1>New Invoice</h1>
-      <div class="subtitle">Choose the company first, then the correct payment method</div>
+      <div class="subtitle">Created by ${escapeHtml(agentName)}</div>
 
       <div class="notice">
         <strong>Invoice rules:</strong>
@@ -1107,9 +1418,7 @@ app.get("/invoices/new", (req, res) => {
           <div class="grid-3">
             <input name="invoice_date" value="${today}" placeholder="Date">
 
-            <select name="dispatcher_name" required>
-              ${dispatcherOptions()}
-            </select>
+            <input value="Created by ${escapeHtml(agentName)}" disabled>
 
             <select name="invoice_stage" required>
               ${invoiceStageOptions("Draft only")}
@@ -1157,6 +1466,7 @@ app.get("/invoices/new", (req, res) => {
           <div id="site-fields">
             <h2>Site Address</h2>
             <div class="help">Use this only if the job location is different from the invoice address.</div>
+
             <br>
 
             <div class="grid-2">
@@ -1208,6 +1518,7 @@ app.post("/invoices/create", async (req, res) => {
   try {
     const companyKey = req.body.company_key;
     const paymentMethod = req.body.payment_method;
+    const dispatcherName = currentAgentName(req);
 
     if (!companies[companyKey]) {
       return res.status(400).send("Invalid company selected.");
@@ -1254,7 +1565,10 @@ app.post("/invoices/create", async (req, res) => {
       }
     ].filter(item => item.description && item.qty > 0);
 
-    const subtotal = lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+    const subtotal = lineItems.reduce((sum, item) => {
+      return sum + item.qty * item.unitPrice;
+    }, 0);
+
     const vatAmount = subtotal * 0.2;
     const total = subtotal + vatAmount;
 
@@ -1288,7 +1602,7 @@ app.post("/invoices/create", async (req, res) => {
       req.body.invoice_number,
       companyKey,
       paymentMethod,
-      req.body.dispatcher_name,
+      dispatcherName,
       req.body.invoice_stage || "Draft only",
       req.body.customer_name,
       req.body.customer_address,
@@ -1316,19 +1630,31 @@ app.post("/invoices/create", async (req, res) => {
 
 app.get("/invoices/:id/pdf", async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [
+      req.params.id
+    ]);
+
     const invoice = result.rows[0];
 
-    if (!invoice) return res.status(404).send("Invoice not found");
+    if (!invoice) {
+      return res.status(404).send("Invoice not found");
+    }
 
     const company = companies[invoice.company_key] || companies.online;
+
     const lineItems = Array.isArray(invoice.line_items)
       ? invoice.line_items
       : JSON.parse(invoice.line_items || "[]");
 
     const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
-    const siteAddress = siteSameAsInvoice ? invoice.customer_address : invoice.site_address;
-    const sitePostcode = siteSameAsInvoice ? invoice.customer_postcode : invoice.site_postcode;
+
+    const siteAddress = siteSameAsInvoice
+      ? invoice.customer_address
+      : invoice.site_address;
+
+    const sitePostcode = siteSameAsInvoice
+      ? invoice.customer_postcode
+      : invoice.site_postcode;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -1336,7 +1662,11 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       `inline; filename="invoice-${invoice.invoice_number}.pdf"`
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 50
+    });
+
     doc.pipe(res);
 
     const logoPath = path.join(__dirname, company.logo);
@@ -1355,6 +1685,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       .text(`Tel: ${company.tel}`, 50, 141);
 
     doc.fontSize(20).font("Helvetica-Bold").text("INVOICE", 390, 55);
+
     doc.fontSize(10).font("Helvetica")
       .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
       .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
@@ -1364,22 +1695,32 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.roundedRect(50, 185, 240, 110, 8).stroke();
     doc.fontSize(11).font("Helvetica-Bold").text("Invoice Address", 65, 197);
+
     doc.font("Helvetica").fontSize(9.5)
       .text(pdfText(invoice.customer_name), 65, 217, { width: 190 })
-      .text(pdfText(invoice.customer_address), 65, 233, { width: 190, height: 40 })
-      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, { width: 190 });
+      .text(pdfText(invoice.customer_address), 65, 233, {
+        width: 190,
+        height: 40
+      })
+      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, {
+        width: 190
+      });
 
     doc.roundedRect(305, 185, 240, 110, 8).stroke();
     doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 197);
+
     doc.font("Helvetica").fontSize(9.5)
       .text(siteSameAsInvoice ? "Same as invoice address" : pdfText(siteAddress), 320, 217, {
         width: 190,
         height: 56
       })
-      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, { width: 190 });
+      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, {
+        width: 190
+      });
 
     doc.roundedRect(50, 310, 495, 52, 8).stroke();
     doc.fontSize(11).font("Helvetica-Bold").text("Invoice Details", 65, 322);
+
     doc.font("Helvetica").fontSize(10)
       .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
       .text(`Status: ${pdfText(invoice.paid_status)}`, 210, 342)
@@ -1432,8 +1773,12 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, paymentBoxY + 15);
 
     if (invoice.payment_method === "Bank transfer") {
-      doc.font("Helvetica").fontSize(10).text("Please pay via BACS transfer to:", 70, paymentBoxY + 34);
-      doc.font("Helvetica-Bold").text(company.name, 70, paymentBoxY + 55, { width: 220 });
+      doc.font("Helvetica").fontSize(10)
+        .text("Please pay via BACS transfer to:", 70, paymentBoxY + 34);
+
+      doc.font("Helvetica-Bold")
+        .text(company.name, 70, paymentBoxY + 55, { width: 220 });
+
       doc.font("Helvetica")
         .text(`Sort code: ${company.sortCode}`, 70, paymentBoxY + 73)
         .text(`Account: ${company.account}`, 70, paymentBoxY + 88);
@@ -1453,10 +1798,16 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.roundedRect(330, paymentBoxY, 215, 105, 8).stroke();
     doc.font("Helvetica-Bold").fontSize(10).text("Notes", 350, paymentBoxY + 15);
-    doc.font("Helvetica").fontSize(9.5).text(pdfText(invoice.notes || "6 months warranty on parts fitted"), 350, paymentBoxY + 35, {
-      width: 175,
-      height: 55
-    });
+
+    doc.font("Helvetica").fontSize(9.5).text(
+      pdfText(invoice.notes || "6 months warranty on parts fitted"),
+      350,
+      paymentBoxY + 35,
+      {
+        width: 175,
+        height: 55
+      }
+    );
 
     doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 718, {
       align: "center",
@@ -1464,7 +1815,10 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     });
 
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 733, { align: "center", width: 495 })
+      .text(company.footer, 50, 733, {
+        align: "center",
+        width: 495
+      })
       .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, {
         align: "center",
         width: 495
@@ -1472,10 +1826,15 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.moveTo(50, 768).lineTo(545, 768).stroke();
 
-    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 780, {
-      align: "center",
-      width: 495
-    });
+    doc.fontSize(9).font("Helvetica-Oblique").text(
+      "Thank you for using our services",
+      50,
+      780,
+      {
+        align: "center",
+        width: 495
+      }
+    );
 
     doc.end();
   } catch (error) {
@@ -1494,6 +1853,7 @@ app.get("/dispatch", async (req, res) => {
 
     if (customerPostcode) {
       customerLocation = await lookupPostcodeLocation(customerPostcode);
+
       customerLocationMessage = customerLocation.ok
         ? `Customer postcode located using ${customerLocation.precision.toLowerCase()} postcode data.`
         : `Could not locate customer postcode: ${customerPostcode}`;
@@ -1524,7 +1884,12 @@ app.get("/dispatch", async (req, res) => {
           );
         }
 
-        return { tech, location, techLocation, distance };
+        return {
+          tech,
+          location,
+          techLocation,
+          distance
+        };
       })
     );
 
@@ -1547,18 +1912,26 @@ app.get("/dispatch", async (req, res) => {
       const statusClass = technicianStatusClass(tech.status);
       const priority = tech.priority || "Normal";
       const priorityBadgeClass = priorityClass(priority);
-      const precision = item.techLocation.ok ? item.techLocation.precision : postcodePrecision(item.location.postcode);
+
+      const precision = item.techLocation.ok
+        ? item.techLocation.precision
+        : postcodePrecision(item.location.postcode);
 
       const precisionText = precision === "Approx"
         ? `<span class="warning-text">Approx</span>`
         : escapeHtml(precision);
 
-      const distanceText = customerPostcode ? formatDistance(item.distance) : "Enter postcode";
+      const distanceText = customerPostcode
+        ? formatDistance(item.distance)
+        : "Enter postcode";
 
       return `
         <tr>
           <td>${index + 1}</td>
-          <td><strong>${escapeHtml(tech.name)}</strong><br><span class="muted">${escapeHtml(tech.phone)}</span></td>
+          <td>
+            <strong>${escapeHtml(tech.name)}</strong><br>
+            <span class="muted">${escapeHtml(tech.phone)}</span>
+          </td>
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
           <td><span class="pill ${priorityBadgeClass}">${escapeHtml(priority)}</span></td>
           <td>${escapeHtml(tech.available_from || "Now / check")}</td>
@@ -1567,7 +1940,10 @@ app.get("/dispatch", async (req, res) => {
             <br>
             <span class="muted">${escapeHtml(item.location.source)} · ${precisionText}</span>
           </td>
-          <td><span class="distance">${distanceText}</span><br><span class="muted">Straight-line estimate</span></td>
+          <td>
+            <span class="distance">${distanceText}</span><br>
+            <span class="muted">Straight-line estimate</span>
+          </td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
           <td>${formatDateTime(tech.updated_at)}</td>
@@ -1599,12 +1975,18 @@ app.get("/dispatch", async (req, res) => {
             color: #d1d5db;
           }
 
-          .notice.good { border-left-color: #16a34a; }
-          .notice.bad { border-left-color: #dc2626; }
+          .notice.good {
+            border-left-color: #16a34a;
+          }
+
+          .notice.bad {
+            border-left-color: #dc2626;
+          }
         </style>
       </head>
+
       <body>
-        ${nav()}
+        ${nav(req)}
 
         <h1>Dispatch</h1>
         <div class="subtitle">Find a suitable available locksmith quickly</div>
@@ -1645,7 +2027,10 @@ app.get("/dispatch", async (req, res) => {
               <th>Last Updated</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}</tbody>
+
+          <tbody>
+            ${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}
+          </tbody>
         </table>
       </body>
       </html>
@@ -1726,8 +2111,9 @@ app.get("/technicians", async (req, res) => {
           }
         </style>
       </head>
+
       <body>
-        ${nav()}
+        ${nav(req)}
 
         <h1>Technician Availability</h1>
         <div class="subtitle">Live locksmith availability board · Auto-refreshes every 30 seconds</div>
@@ -1783,7 +2169,10 @@ app.get("/technicians", async (req, res) => {
               <th>Edit</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}</tbody>
+
+          <tbody>
+            ${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}
+          </tbody>
         </table>
       </body>
       </html>
@@ -1801,7 +2190,9 @@ app.get("/technicians/edit", async (req, res) => {
     const result = await pool.query(`SELECT * FROM technicians WHERE id = $1`, [id]);
     const tech = result.rows[0];
 
-    if (!tech) return res.status(404).send("Technician not found");
+    if (!tech) {
+      return res.status(404).send("Technician not found");
+    }
 
     const statuses = [
       "Available",
@@ -1823,12 +2214,12 @@ app.get("/technicians/edit", async (req, res) => {
 
     const statusOptions = statuses.map(status => {
       const selected = status === tech.status ? "selected" : "";
-      return `<option ${selected}>${status}</option>`;
+      return `<option ${selected}>${escapeHtml(status)}</option>`;
     }).join("");
 
     const priorityOptions = priorities.map(priority => {
       const selected = priority === (tech.priority || "Normal") ? "selected" : "";
-      return `<option ${selected}>${priority}</option>`;
+      return `<option ${selected}>${escapeHtml(priority)}</option>`;
     }).join("");
 
     res.send(`
@@ -1859,8 +2250,10 @@ app.get("/technicians/edit", async (req, res) => {
           }
         </style>
       </head>
+
       <body>
-        <a href="/technicians">← Back to Technicians</a>
+        ${nav(req)}
+
         <h1>Edit Technician</h1>
 
         <div class="panel">
@@ -1870,11 +2263,20 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="phone" value="${escapeHtml(tech.phone)}" placeholder="Phone">
             <input name="base_postcode" value="${escapeHtml(tech.base_postcode)}" placeholder="Base postcode">
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
-            <select name="status">${statusOptions}</select>
-            <select name="priority">${priorityOptions}</select>
+
+            <select name="status">
+              ${statusOptions}
+            </select>
+
+            <select name="priority">
+              ${priorityOptions}
+            </select>
+
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
+
             <button type="submit">Save Changes</button>
+
             <textarea name="notes" placeholder="Notes">${escapeHtml(tech.notes)}</textarea>
           </form>
 
@@ -1972,7 +2374,8 @@ app.post("/technicians/delete", async (req, res) => {
   try {
     await pool.query(`
       UPDATE technicians
-      SET active = FALSE, updated_at = NOW()
+      SET active = FALSE,
+          updated_at = NOW()
       WHERE id = $1
     `, [req.body.id]);
 
@@ -1992,8 +2395,17 @@ app.post("/webhook/yay", async (req, res) => {
     await pool.query(
       `
       INSERT INTO calls (
-        uuid, call_type, from_number, to_number, start_time, end_time,
-        duration_seconds, answered_by, answer_type, raw_json, updated_at
+        uuid,
+        call_type,
+        from_number,
+        to_number,
+        start_time,
+        end_time,
+        duration_seconds,
+        answered_by,
+        answer_type,
+        raw_json,
+        updated_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
       ON CONFLICT (uuid)
