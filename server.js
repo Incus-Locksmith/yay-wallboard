@@ -220,6 +220,19 @@ function formatDateTime(date) {
     month: "2-digit",
     year: "numeric",
     hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function formatDateTimeWithSeconds(date) {
+  if (!date) return "—";
+
+  return new Date(date).toLocaleString("en-GB", {
+    timeZone: "Europe/London",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
     second: "2-digit"
   });
@@ -475,17 +488,18 @@ function sharedStyles() {
       font-family: Arial, sans-serif;
       background: #111827;
       color: white;
-      padding: 40px;
+      padding: 32px;
     }
 
     a {
       color: #93c5fd;
       text-decoration: none;
-      margin-right: 18px;
+      margin-right: 14px;
+      font-weight: bold;
     }
 
     h1 {
-      font-size: 42px;
+      font-size: 40px;
       margin-bottom: 5px;
     }
 
@@ -495,11 +509,11 @@ function sharedStyles() {
 
     .subtitle {
       color: #9ca3af;
-      margin-bottom: 30px;
+      margin-bottom: 24px;
     }
 
     .nav {
-      margin-bottom: 25px;
+      margin-bottom: 22px;
     }
 
     .login-bar {
@@ -517,13 +531,13 @@ function sharedStyles() {
     .panel {
       background: #1f2937;
       border-radius: 14px;
-      padding: 25px;
-      margin-bottom: 35px;
+      padding: 22px;
+      margin-bottom: 28px;
     }
 
     input, select, textarea, button {
-      font-size: 16px;
-      padding: 12px;
+      font-size: 15px;
+      padding: 10px;
       border-radius: 8px;
       border: 1px solid #374151;
     }
@@ -551,24 +565,93 @@ function sharedStyles() {
 
     th, td {
       text-align: left;
-      padding: 14px;
+      padding: 12px;
       border-bottom: 1px solid #374151;
-      font-size: 16px;
-      vertical-align: top;
+      font-size: 14px;
+      vertical-align: middle;
     }
 
     th {
       color: #9ca3af;
-      font-size: 13px;
+      font-size: 12px;
       text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .invoice-table th,
+    .invoice-table td {
+      padding: 11px 10px;
+      font-size: 13px;
+    }
+
+    .invoice-main {
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .invoice-sub {
+      color: #9ca3af;
+      font-size: 12px;
+      margin-top: 4px;
+      line-height: 1.35;
+    }
+
+    .compact-stage {
+      min-width: 245px;
+    }
+
+    .compact-stage-top {
+      margin-bottom: 7px;
+    }
+
+    .compact-stage-form {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .compact-stage-form select {
+      font-size: 12px;
+      padding: 7px;
+      width: 180px;
+    }
+
+    .compact-stage-form button {
+      font-size: 12px;
+      padding: 7px 10px;
+    }
+
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .actions a {
+      margin-right: 0;
+      font-size: 13px;
+    }
+
+    .delete-link {
+      color: #fca5a5;
+    }
+
+    .delete-button {
+      background: #dc2626;
+    }
+
+    .cancel-button {
+      background: #374151;
     }
 
     .pill, .status {
-      padding: 7px 12px;
+      padding: 6px 10px;
       border-radius: 999px;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: bold;
       white-space: nowrap;
+      display: inline-block;
     }
 
     .available { background: #16a34a; color: white; }
@@ -597,9 +680,9 @@ function sharedStyles() {
 
     .audit {
       color: #9ca3af;
-      font-size: 13px;
-      line-height: 1.4;
-      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 6px;
     }
 
     .warning-text {
@@ -622,23 +705,6 @@ function sharedStyles() {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 15px;
-    }
-
-    .stage-form {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-
-    .stage-form select {
-      font-size: 13px;
-      padding: 8px;
-      min-width: 210px;
-    }
-
-    .stage-form button {
-      font-size: 13px;
-      padding: 8px 12px;
     }
 
     .checkbox-row {
@@ -700,20 +766,38 @@ function invoiceRows(invoices) {
       ? invoice.customer_postcode
       : invoice.site_postcode;
 
-    const auditText = invoice.stage_updated_by
-      ? `Last stage update by ${escapeHtml(invoice.stage_updated_by)}<br>${formatDateTime(invoice.stage_updated_at)}`
-      : `No stage audit yet`;
+    const updatedText = invoice.stage_updated_by
+      ? `Updated by ${escapeHtml(invoice.stage_updated_by)} · ${formatDateTime(invoice.stage_updated_at)}`
+      : "";
 
     return `
       <tr>
-        <td>${escapeHtml(invoice.invoice_number)}</td>
-        <td>${escapeHtml(invoice.dispatcher_name)}</td>
         <td>
-          <div style="margin-bottom:8px;">
+          <div class="invoice-main">${escapeHtml(invoice.invoice_number)}</div>
+          <div class="invoice-sub">By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
+        </td>
+
+        <td>
+          <div class="invoice-main">${escapeHtml(invoice.customer_name || "—")}</div>
+          <div class="invoice-sub">Site: ${escapeHtml(sitePostcode || "—")}</div>
+        </td>
+
+        <td>
+          <div class="invoice-main">${escapeHtml(company.name)}</div>
+          <div class="invoice-sub">${escapeHtml(invoice.payment_method || "—")}</div>
+        </td>
+
+        <td>
+          <div class="invoice-main">${escapeHtml(invoice.invoice_date || "—")}</div>
+          <div class="invoice-sub">${money(invoice.total)}</div>
+        </td>
+
+        <td class="compact-stage">
+          <div class="compact-stage-top">
             <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
           </div>
 
-          <form class="stage-form" method="POST" action="/invoices/stage">
+          <form class="compact-stage-form" method="POST" action="/invoices/stage">
             <input type="hidden" name="id" value="${invoice.id}">
             <select name="invoice_stage">
               ${invoiceStageOptions(stage)}
@@ -721,16 +805,14 @@ function invoiceRows(invoices) {
             <button type="submit">Save</button>
           </form>
 
-          <div class="audit">${auditText}</div>
+          ${updatedText ? `<div class="audit">${updatedText}</div>` : ""}
         </td>
-        <td>${escapeHtml(invoice.customer_name)}</td>
-        <td>${escapeHtml(sitePostcode)}</td>
-        <td>${escapeHtml(company.name)}</td>
-        <td>${escapeHtml(invoice.payment_method)}</td>
-        <td>${escapeHtml(invoice.invoice_date)}</td>
-        <td>${money(invoice.total)}</td>
+
         <td>
-          <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
+          <div class="actions">
+            <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
+            <a class="delete-link" href="/invoices/${invoice.id}/delete">Delete</a>
+          </div>
         </td>
       </tr>
     `;
@@ -977,10 +1059,10 @@ app.get("/", async (req, res) => {
     const lastReceived = latestResult.rows[0].last_received;
 
     const lastUpdatedText = lastReceived
-      ? `Last call received: ${formatDateTime(lastReceived)}`
+      ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}`
       : "No calls received yet";
 
-    const pageUpdatedText = `Page refreshed: ${formatDateTime(new Date())}`;
+    const pageUpdatedText = `Page refreshed: ${formatDateTimeWithSeconds(new Date())}`;
 
     const agentStats = {};
 
@@ -1163,31 +1245,27 @@ app.get("/invoices", async (req, res) => {
         ${nav(req)}
 
         <h1>Invoices</h1>
-        <div class="subtitle">Only invoices that have not been emailed are shown here.</div>
+        <div class="subtitle">Active invoices only. Emailed invoices move into Historic Invoices.</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
           <a href="/invoices/historic">Historic Invoices</a>
         </div>
 
-        <table>
+        <table class="invoice-table">
           <thead>
             <tr>
-              <th>Invoice / Job No.</th>
-              <th>Dispatcher</th>
+              <th>Invoice</th>
+              <th>Customer / Site</th>
+              <th>Company / Payment</th>
+              <th>Date / Total</th>
               <th>Stage</th>
-              <th>Customer</th>
-              <th>Site Postcode</th>
-              <th>Company</th>
-              <th>Payment</th>
-              <th>Date</th>
-              <th>Total</th>
-              <th>PDF</th>
+              <th>Actions</th>
             </tr>
           </thead>
 
           <tbody>
-            ${rows || `<tr><td colspan="10">No active invoices waiting to be sent</td></tr>`}
+            ${rows || `<tr><td colspan="6">No active invoices waiting to be sent</td></tr>`}
           </tbody>
         </table>
       </body>
@@ -1254,24 +1332,20 @@ app.get("/invoices/historic", async (req, res) => {
           <a href="/invoices">Back to active invoices</a>
         </div>
 
-        <table>
+        <table class="invoice-table">
           <thead>
             <tr>
-              <th>Invoice / Job No.</th>
-              <th>Dispatcher</th>
+              <th>Invoice</th>
+              <th>Customer / Site</th>
+              <th>Company / Payment</th>
+              <th>Date / Total</th>
               <th>Stage</th>
-              <th>Customer</th>
-              <th>Site Postcode</th>
-              <th>Company</th>
-              <th>Payment</th>
-              <th>Date</th>
-              <th>Total</th>
-              <th>PDF</th>
+              <th>Actions</th>
             </tr>
           </thead>
 
           <tbody>
-            ${rows || `<tr><td colspan="10">No historic invoices found</td></tr>`}
+            ${rows || `<tr><td colspan="6">No historic invoices found</td></tr>`}
           </tbody>
         </table>
       </body>
@@ -1303,6 +1377,83 @@ app.post("/invoices/stage", async (req, res) => {
   } catch (error) {
     console.error("Update invoice stage error:", error);
     res.status(500).send("Update invoice stage error. Check Render logs.");
+  }
+});
+
+app.get("/invoices/:id/delete", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const invoice = result.rows[0];
+
+    if (!invoice) return res.status(404).send("Invoice not found");
+
+    const company = companies[invoice.company_key] || companies.online;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Delete Invoice</title>
+        <style>
+          ${sharedStyles()}
+
+          .danger-panel {
+            max-width: 680px;
+            background: #1f2937;
+            border: 1px solid #dc2626;
+            border-radius: 16px;
+            padding: 28px;
+          }
+
+          .button-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 22px;
+          }
+
+          .button-row form {
+            margin: 0;
+          }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+
+        <div class="danger-panel">
+          <h1>Delete invoice?</h1>
+          <div class="subtitle">This permanently removes the invoice from the dashboard.</div>
+
+          <p><strong>Invoice:</strong> ${escapeHtml(invoice.invoice_number)}</p>
+          <p><strong>Customer:</strong> ${escapeHtml(invoice.customer_name || "—")}</p>
+          <p><strong>Company:</strong> ${escapeHtml(company.name)}</p>
+          <p><strong>Total:</strong> ${money(invoice.total)}</p>
+
+          <div class="button-row">
+            <form method="POST" action="/invoices/${invoice.id}/delete">
+              <button class="delete-button" type="submit">Yes, delete invoice</button>
+            </form>
+
+            <form method="GET" action="/invoices">
+              <button class="cancel-button" type="submit">Cancel</button>
+            </form>
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Delete invoice confirmation error:", error);
+    res.status(500).send("Delete invoice confirmation error. Check Render logs.");
+  }
+});
+
+app.post("/invoices/:id/delete", async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM invoices WHERE id = $1`, [req.params.id]);
+    res.redirect("/invoices");
+  } catch (error) {
+    console.error("Delete invoice error:", error);
+    res.status(500).send("Delete invoice error. Check Render logs.");
   }
 });
 
@@ -1954,7 +2105,7 @@ app.get("/dispatch", async (req, res) => {
           </td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
-          <td>${formatDateTime(tech.updated_at)}</td>
+          <td>${formatDateTimeWithSeconds(tech.updated_at)}</td>
         </tr>
       `;
     }).join("");
@@ -2088,7 +2239,7 @@ app.get("/technicians", async (req, res) => {
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
           <td>
-            ${formatDateTime(tech.updated_at)}
+            ${formatDateTimeWithSeconds(tech.updated_at)}
             <div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div>
           </td>
           <td>
@@ -2265,7 +2416,7 @@ app.get("/technicians/edit", async (req, res) => {
 
         <h1>Edit Technician</h1>
         <div class="subtitle">
-          Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTime(tech.updated_at)}
+          Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTimeWithSeconds(tech.updated_at)}
         </div>
 
         <div class="panel">
