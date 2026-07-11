@@ -2160,21 +2160,177 @@ app.get("/dispatch", async (req, res) => {
       <head>
         <title>Dispatch Map</title>
 
-        <link
-          rel="stylesheet"
-          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-          integrity="sha256-p4NxAoJBhIINfQ5d1G1eoYkZrjZ9gHh7uKybqvDMcfM="
-          crossorigin=""
-        />
-
-        <script
-          src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-          crossorigin="">
-        </script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
         <style>
           ${sharedStyles()}
+
+          .leaflet-container {
+            overflow: hidden;
+            position: relative;
+            outline-style: none;
+          }
+
+          .leaflet-pane,
+          .leaflet-tile,
+          .leaflet-marker-icon,
+          .leaflet-marker-shadow,
+          .leaflet-tile-container,
+          .leaflet-pane > svg,
+          .leaflet-pane > canvas,
+          .leaflet-zoom-box,
+          .leaflet-image-layer,
+          .leaflet-layer {
+            position: absolute;
+            left: 0;
+            top: 0;
+          }
+
+          .leaflet-container {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            line-height: 1.5;
+          }
+
+          .leaflet-tile,
+          .leaflet-marker-icon,
+          .leaflet-marker-shadow {
+            user-select: none;
+            -webkit-user-drag: none;
+          }
+
+          .leaflet-tile {
+            filter: inherit;
+            visibility: hidden;
+          }
+
+          .leaflet-tile-loaded {
+            visibility: inherit;
+          }
+
+          .leaflet-zoom-animated {
+            transform-origin: 0 0;
+          }
+
+          .leaflet-map-pane {
+            z-index: 400;
+          }
+
+          .leaflet-tile-pane {
+            z-index: 200;
+          }
+
+          .leaflet-overlay-pane {
+            z-index: 400;
+          }
+
+          .leaflet-shadow-pane {
+            z-index: 500;
+          }
+
+          .leaflet-marker-pane {
+            z-index: 600;
+          }
+
+          .leaflet-tooltip-pane {
+            z-index: 650;
+          }
+
+          .leaflet-popup-pane {
+            z-index: 700;
+          }
+
+          .leaflet-control {
+            position: relative;
+            z-index: 800;
+            pointer-events: auto;
+          }
+
+          .leaflet-top,
+          .leaflet-bottom {
+            position: absolute;
+            z-index: 1000;
+            pointer-events: none;
+          }
+
+          .leaflet-top {
+            top: 0;
+          }
+
+          .leaflet-right {
+            right: 0;
+          }
+
+          .leaflet-bottom {
+            bottom: 0;
+          }
+
+          .leaflet-left {
+            left: 0;
+          }
+
+          .leaflet-control-zoom {
+            border: 2px solid rgba(0,0,0,0.2);
+            background-clip: padding-box;
+            border-radius: 4px;
+            margin-left: 10px;
+            margin-top: 10px;
+          }
+
+          .leaflet-control-zoom a {
+            background-color: white;
+            border-bottom: 1px solid #ccc;
+            color: black;
+            display: block;
+            height: 26px;
+            line-height: 26px;
+            text-align: center;
+            text-decoration: none;
+            width: 26px;
+            margin: 0;
+            font-size: 18px;
+          }
+
+          .leaflet-popup {
+            position: absolute;
+            text-align: center;
+            margin-bottom: 20px;
+          }
+
+          .leaflet-popup-content-wrapper {
+            background: white;
+            border-radius: 12px;
+            padding: 1px;
+            text-align: left;
+            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+          }
+
+          .leaflet-popup-content {
+            margin: 13px 19px;
+            line-height: 1.45;
+            color: #111827;
+          }
+
+          .leaflet-popup-tip-container {
+            width: 40px;
+            height: 20px;
+            position: absolute;
+            left: 50%;
+            margin-left: -20px;
+            overflow: hidden;
+            pointer-events: none;
+          }
+
+          .leaflet-popup-tip {
+            width: 17px;
+            height: 17px;
+            padding: 1px;
+            margin: -10px auto 0;
+            background: white;
+            transform: rotate(45deg);
+            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+          }
 
           form.search {
             display: grid;
@@ -2242,12 +2398,6 @@ app.get("/dispatch", async (req, res) => {
           .dot-onjob { background: #2563eb; }
           .dot-other { background: #6b7280; }
 
-          .leaflet-popup-content {
-            color: #111827;
-            font-size: 14px;
-            line-height: 1.45;
-          }
-
           .leaflet-popup-content strong {
             font-size: 15px;
           }
@@ -2312,7 +2462,7 @@ app.get("/dispatch", async (req, res) => {
 
         <div class="panel">
           <form class="search" method="GET" action="/dispatch">
-            <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. E6 3PZ">
+            <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. SE13 5BY">
             <input name="job_type" value="${escapeHtml(jobType)}" placeholder="Job type e.g. lockout, uPVC">
             <button type="submit">Find Locksmith</button>
           </form>
@@ -2393,10 +2543,14 @@ app.get("/dispatch", async (req, res) => {
             scrollWheelZoom: true
           });
 
-          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
             maxZoom: 19,
             attribution: "&copy; OpenStreetMap contributors"
           }).addTo(map);
+
+          setTimeout(function() {
+            map.invalidateSize();
+          }, 250);
 
           const defaultLondonCentre = [51.5072, -0.1276];
 
