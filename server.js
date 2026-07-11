@@ -2067,7 +2067,15 @@ app.get("/dispatch", async (req, res) => {
     });
 
     const mapTechnicians = candidatesWithDistance
-      .filter(item => item.techLocation && item.techLocation.ok)
+      .filter(item => {
+        if (!item.techLocation || !item.techLocation.ok) return false;
+
+        if (customerLocation && customerLocation.ok) {
+          return item.distance !== null && item.distance <= 25;
+        }
+
+        return true;
+      })
       .map((item, index) => {
         const tech = item.tech;
 
@@ -2191,41 +2199,39 @@ app.get("/dispatch", async (req, res) => {
             border-left-color: #dc2626;
           }
 
-          .map-layout {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            margin-bottom: 28px;
-          }
-
           #dispatch-map {
-            height: 640px;
+            height: 680px;
             width: 100%;
             border-radius: 16px;
             overflow: hidden;
             border: 1px solid #374151;
             background: #111827;
+            margin-bottom: 28px;
           }
 
-          .map-side-panel {
+          .map-summary {
             background: #1f2937;
-            border-radius: 16px;
             border: 1px solid #374151;
-            padding: 20px;
+            border-radius: 14px;
+            padding: 16px 20px;
+            margin-bottom: 20px;
+            color: #d1d5db;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 18px;
+            align-items: center;
           }
 
           .legend-item {
             display: flex;
             align-items: center;
-            gap: 10px;
-            margin-bottom: 12px;
-            color: #d1d5db;
+            gap: 8px;
             font-size: 14px;
           }
 
           .legend-dot {
-            width: 14px;
-            height: 14px;
+            width: 13px;
+            height: 13px;
             border-radius: 50%;
             display: inline-block;
           }
@@ -2235,31 +2241,6 @@ app.get("/dispatch", async (req, res) => {
           .dot-soon { background: #f59e0b; }
           .dot-onjob { background: #2563eb; }
           .dot-other { background: #6b7280; }
-
-          .area-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 8px;
-            margin-top: 16px;
-          }
-
-          .area-pill {
-            background: #111827;
-            border: 1px solid #374151;
-            border-radius: 999px;
-            padding: 7px 10px;
-            color: #d1d5db;
-            font-size: 13px;
-            font-weight: bold;
-            text-align: center;
-          }
-
-          .map-note {
-            margin-top: 18px;
-            color: #9ca3af;
-            line-height: 1.5;
-            font-size: 14px;
-          }
 
           .leaflet-popup-content {
             color: #111827;
@@ -2275,8 +2256,8 @@ app.get("/dispatch", async (req, res) => {
             background: white;
             border: 2px solid #111827;
             border-radius: 999px;
-            width: 28px;
-            height: 28px;
+            width: 30px;
+            height: 30px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -2311,8 +2292,8 @@ app.get("/dispatch", async (req, res) => {
             color: white;
           }
 
-          @media (max-width: 1100px) {
-            .map-layout {
+          @media (max-width: 900px) {
+            form.search {
               grid-template-columns: 1fr;
             }
 
@@ -2327,7 +2308,7 @@ app.get("/dispatch", async (req, res) => {
         ${nav(req)}
 
         <h1>Dispatch Map</h1>
-        <div class="subtitle">Clean interactive map · Customer and technician postcode positions</div>
+        <div class="subtitle">Search a postcode to zoom into that region only</div>
 
         <div class="panel">
           <form class="search" method="GET" action="/dispatch">
@@ -2342,67 +2323,45 @@ app.get("/dispatch", async (req, res) => {
             ? `<div class="notice ${customerLocation && customerLocation.ok ? "good" : "bad"}">
                 <strong>${escapeHtml(customerPostcode)}</strong> — ${escapeHtml(customerLocationMessage)}
                 <br>
-                Map positions use postcode data. Distances are straight-line estimates, not driving times.
+                The map is zoomed into this postcode region. Technician pins shown are within roughly 25 miles.
               </div>`
             : `<div class="notice">
-                Enter a customer postcode to plot the job and nearby locksmiths on the map.
+                Enter a customer postcode to zoom into that area and show nearby locksmiths.
               </div>`
         }
 
-        <div class="map-layout">
-          <div id="dispatch-map"></div>
+        <div class="map-summary">
+          <div class="legend-item">
+            <span class="legend-dot dot-customer"></span>
+            Customer
+          </div>
 
-          <div class="map-side-panel">
-            <h2>Map Key</h2>
+          <div class="legend-item">
+            <span class="legend-dot dot-available"></span>
+            Available
+          </div>
 
-            <div class="legend-item">
-              <span class="legend-dot dot-customer"></span>
-              Customer postcode
-            </div>
+          <div class="legend-item">
+            <span class="legend-dot dot-soon"></span>
+            Available soon
+          </div>
 
-            <div class="legend-item">
-              <span class="legend-dot dot-available"></span>
-              Available technician
-            </div>
+          <div class="legend-item">
+            <span class="legend-dot dot-onjob"></span>
+            On job
+          </div>
 
-            <div class="legend-item">
-              <span class="legend-dot dot-soon"></span>
-              Available soon
-            </div>
+          <div class="legend-item">
+            <span class="legend-dot dot-other"></span>
+            Other usable status
+          </div>
 
-            <div class="legend-item">
-              <span class="legend-dot dot-onjob"></span>
-              On job
-            </div>
-
-            <div class="legend-item">
-              <span class="legend-dot dot-other"></span>
-              Other usable status
-            </div>
-
-            <h2 style="margin-top:24px;">London Areas</h2>
-
-            <div class="area-grid">
-              <div class="area-pill">N</div>
-              <div class="area-pill">NW</div>
-              <div class="area-pill">E</div>
-              <div class="area-pill">EC</div>
-              <div class="area-pill">SE</div>
-              <div class="area-pill">SW</div>
-              <div class="area-pill">W</div>
-              <div class="area-pill">WC</div>
-            </div>
-
-            <div class="map-note">
-              <strong>Important:</strong><br>
-              This version keeps the map clean and removes the broken postcode-boundary overlay.
-              <br><br>
-              Technician position uses current postcode first, then base postcode.
-              <br><br>
-              It shows straight-line distance, not driving time.
-            </div>
+          <div class="legend-item muted">
+            Straight-line distance only, not driving time.
           </div>
         </div>
+
+        <div id="dispatch-map"></div>
 
         <h2>Ranked Technician List</h2>
 
@@ -2440,9 +2399,19 @@ app.get("/dispatch", async (req, res) => {
           }).addTo(map);
 
           const defaultLondonCentre = [51.5072, -0.1276];
-          map.setView(defaultLondonCentre, 10);
 
-          const bounds = [];
+          const hasCustomer = !!mapData.customer;
+
+          if (hasCustomer) {
+            const zoomLevel = mapData.customer.precision === "Exact" ? 14 : 12;
+
+            map.setView(
+              [mapData.customer.latitude, mapData.customer.longitude],
+              zoomLevel
+            );
+          } else {
+            map.setView(defaultLondonCentre, 10);
+          }
 
           function safeText(value) {
             return String(value || "")
@@ -2475,9 +2444,9 @@ app.get("/dispatch", async (req, res) => {
             return L.divIcon({
               className: "",
               html: '<div class="marker-label ' + className + '">' + number + '</div>',
-              iconSize: [28, 28],
-              iconAnchor: [14, 14],
-              popupAnchor: [0, -14]
+              iconSize: [30, 30],
+              iconAnchor: [15, 15],
+              popupAnchor: [0, -15]
             });
           }
 
@@ -2487,8 +2456,6 @@ app.get("/dispatch", async (req, res) => {
               mapData.customer.longitude
             ];
 
-            bounds.push(customerLatLng);
-
             L.marker(customerLatLng, {
               icon: makeNumberIcon("C", "marker-customer")
             })
@@ -2497,12 +2464,23 @@ app.get("/dispatch", async (req, res) => {
                 "<strong>Customer</strong><br>" +
                 safeText(mapData.customer.postcode) +
                 "<br>Precision: " + safeText(mapData.customer.precision)
-              );
+              )
+              .openPopup();
+
+            L.circle(customerLatLng, {
+              radius: mapData.customer.precision === "Exact" ? 1200 : 4500,
+              color: "#a855f7",
+              fillColor: "#a855f7",
+              fillOpacity: 0.08,
+              weight: 2
+            }).addTo(map);
           }
+
+          const technicianBounds = [];
 
           mapData.technicians.forEach(function(tech) {
             const latLng = [tech.latitude, tech.longitude];
-            bounds.push(latLng);
+            technicianBounds.push(latLng);
 
             const distanceText = tech.distance === null
               ? "Distance unavailable"
@@ -2526,10 +2504,10 @@ app.get("/dispatch", async (req, res) => {
               .bindPopup(popupHtml);
           });
 
-          if (bounds.length > 0) {
-            map.fitBounds(bounds, {
+          if (!hasCustomer && technicianBounds.length > 0) {
+            map.fitBounds(technicianBounds, {
               padding: [45, 45],
-              maxZoom: 13
+              maxZoom: 11
             });
           }
         </script>
