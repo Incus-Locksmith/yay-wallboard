@@ -103,7 +103,6 @@ function makeSessionCookie(agentName) {
   ).toString("base64url");
 
   const signature = signValue(payload);
-
   return `${payload}.${signature}`;
 }
 
@@ -125,19 +124,12 @@ function readSession(req) {
   }
 
   try {
-    const decoded = JSON.parse(
-      Buffer.from(payload, "base64url").toString("utf8")
-    );
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 
-    if (!decoded.agentName || !agentNames.includes(decoded.agentName)) {
-      return null;
-    }
+    if (!decoded.agentName || !agentNames.includes(decoded.agentName)) return null;
 
     const maxAgeMs = 1000 * 60 * 60 * 24 * 7;
-
-    if (!decoded.createdAt || Date.now() - decoded.createdAt > maxAgeMs) {
-      return null;
-    }
+    if (!decoded.createdAt || Date.now() - decoded.createdAt > maxAgeMs) return null;
 
     return decoded;
   } catch (error) {
@@ -164,9 +156,7 @@ function clearSessionCookie(res) {
 function requireLogin(req, res, next) {
   const openPaths = ["/login", "/logout", "/webhook/yay"];
 
-  if (openPaths.includes(req.path)) {
-    return next();
-  }
+  if (openPaths.includes(req.path)) return next();
 
   const session = readSession(req);
 
@@ -218,7 +208,6 @@ function formatSeconds(seconds) {
   const secs = seconds % 60;
 
   if (mins === 0) return `${secs}s`;
-
   return `${mins}m ${secs}s`;
 }
 
@@ -366,7 +355,6 @@ function getBestLocation(tech) {
 
 function isFullUkPostcode(postcode) {
   const value = (postcode || "").trim().toUpperCase();
-
   return /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(value);
 }
 
@@ -607,6 +595,13 @@ function sharedStyles() {
       color: #9ca3af;
     }
 
+    .audit {
+      color: #9ca3af;
+      font-size: 13px;
+      line-height: 1.4;
+      margin-top: 8px;
+    }
+
     .warning-text {
       color: #fbbf24;
       font-weight: bold;
@@ -705,6 +700,10 @@ function invoiceRows(invoices) {
       ? invoice.customer_postcode
       : invoice.site_postcode;
 
+    const auditText = invoice.stage_updated_by
+      ? `Last stage update by ${escapeHtml(invoice.stage_updated_by)}<br>${formatDateTime(invoice.stage_updated_at)}`
+      : `No stage audit yet`;
+
     return `
       <tr>
         <td>${escapeHtml(invoice.invoice_number)}</td>
@@ -721,6 +720,8 @@ function invoiceRows(invoices) {
             </select>
             <button type="submit">Save</button>
           </form>
+
+          <div class="audit">${auditText}</div>
         </td>
         <td>${escapeHtml(invoice.customer_name)}</td>
         <td>${escapeHtml(sitePostcode)}</td>
@@ -780,12 +781,14 @@ async function initDb() {
       skills TEXT,
       notes TEXT,
       active BOOLEAN DEFAULT TRUE,
+      updated_by TEXT,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
 
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoices (
@@ -795,6 +798,8 @@ async function initDb() {
       payment_method TEXT NOT NULL,
       dispatcher_name TEXT,
       invoice_stage TEXT DEFAULT 'Draft only',
+      stage_updated_by TEXT,
+      stage_updated_at TIMESTAMP,
       customer_name TEXT,
       customer_address TEXT,
       customer_postcode TEXT,
@@ -817,6 +822,8 @@ async function initDb() {
 
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_stage TEXT DEFAULT 'Draft only';`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stage_updated_by TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stage_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
@@ -955,10 +962,7 @@ app.get("/", async (req, res) => {
 
     const missedCalls = recentCalls.filter(call => !call.answered_by);
 
-    const reportableCalls = [
-      ...answeredCalls,
-      ...missedCalls
-    ];
+    const reportableCalls = [...answeredCalls, ...missedCalls];
 
     const missedRate = reportableCalls.length
       ? Math.round((missedCalls.length / reportableCalls.length) * 100)
@@ -1284,13 +1288,16 @@ app.post("/invoices/stage", async (req, res) => {
     const id = req.body.id;
     const invoiceStage = req.body.invoice_stage || "Draft only";
     const redirectTo = req.get("referer") || "/invoices";
+    const agentName = currentAgentName(req);
 
     await pool.query(`
       UPDATE invoices
       SET invoice_stage = $1,
+          stage_updated_by = $2,
+          stage_updated_at = NOW(),
           updated_at = NOW()
-      WHERE id = $2
-    `, [invoiceStage, id]);
+      WHERE id = $3
+    `, [invoiceStage, agentName, id]);
 
     res.redirect(redirectTo);
   } catch (error) {
@@ -1579,6 +1586,8 @@ app.post("/invoices/create", async (req, res) => {
         payment_method,
         dispatcher_name,
         invoice_stage,
+        stage_updated_by,
+        stage_updated_at,
         customer_name,
         customer_address,
         customer_postcode,
@@ -1596,7 +1605,7 @@ app.post("/invoices/create", async (req, res) => {
         notes,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
       RETURNING id
     `, [
       req.body.invoice_number,
@@ -1604,6 +1613,7 @@ app.post("/invoices/create", async (req, res) => {
       paymentMethod,
       dispatcherName,
       req.body.invoice_stage || "Draft only",
+      dispatcherName,
       req.body.customer_name,
       req.body.customer_address,
       req.body.customer_postcode,
@@ -1636,9 +1646,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     const invoice = result.rows[0];
 
-    if (!invoice) {
-      return res.status(404).send("Invoice not found");
-    }
+    if (!invoice) return res.status(404).send("Invoice not found");
 
     const company = companies[invoice.company_key] || companies.online;
 
@@ -2079,7 +2087,10 @@ app.get("/technicians", async (req, res) => {
           <td>${escapeHtml(tech.available_from)}</td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
-          <td>${formatDateTime(tech.updated_at)}</td>
+          <td>
+            ${formatDateTime(tech.updated_at)}
+            <div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div>
+          </td>
           <td>
             <form method="GET" action="/technicians/edit" style="display:inline;">
               <input type="hidden" name="id" value="${tech.id}">
@@ -2190,9 +2201,7 @@ app.get("/technicians/edit", async (req, res) => {
     const result = await pool.query(`SELECT * FROM technicians WHERE id = $1`, [id]);
     const tech = result.rows[0];
 
-    if (!tech) {
-      return res.status(404).send("Technician not found");
-    }
+    if (!tech) return res.status(404).send("Technician not found");
 
     const statuses = [
       "Available",
@@ -2255,6 +2264,9 @@ app.get("/technicians/edit", async (req, res) => {
         ${nav(req)}
 
         <h1>Edit Technician</h1>
+        <div class="subtitle">
+          Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTime(tech.updated_at)}
+        </div>
 
         <div class="panel">
           <form class="edit" method="POST" action="/technicians/save">
@@ -2309,6 +2321,8 @@ app.post("/technicians/save", async (req, res) => {
       notes
     } = req.body;
 
+    const agentName = currentAgentName(req);
+
     if (id) {
       await pool.query(`
         UPDATE technicians
@@ -2321,8 +2335,9 @@ app.post("/technicians/save", async (req, res) => {
             available_from = $7,
             skills = $8,
             notes = $9,
+            updated_by = $10,
             updated_at = NOW()
-        WHERE id = $10
+        WHERE id = $11
       `, [
         name,
         phone,
@@ -2333,6 +2348,7 @@ app.post("/technicians/save", async (req, res) => {
         available_from,
         skills,
         notes,
+        agentName,
         id
       ]);
     } else {
@@ -2347,9 +2363,10 @@ app.post("/technicians/save", async (req, res) => {
           available_from,
           skills,
           notes,
+          updated_by,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
       `, [
         name,
         phone,
@@ -2359,7 +2376,8 @@ app.post("/technicians/save", async (req, res) => {
         priority || "Normal",
         available_from,
         skills,
-        notes
+        notes,
+        agentName
       ]);
     }
 
@@ -2375,9 +2393,10 @@ app.post("/technicians/delete", async (req, res) => {
     await pool.query(`
       UPDATE technicians
       SET active = FALSE,
+          updated_by = $1,
           updated_at = NOW()
-      WHERE id = $1
-    `, [req.body.id]);
+      WHERE id = $2
+    `, [currentAgentName(req), req.body.id]);
 
     res.redirect("/technicians");
   } catch (error) {
