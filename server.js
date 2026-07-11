@@ -3,19 +3,12 @@ const { Pool } = require("pg");
 const fetch = require("node-fetch");
 const PDFDocument = require("pdfkit");
 const path = require("path");
-const Stripe = require("stripe");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.set("trust proxy", 1);
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? new Stripe(process.env.STRIPE_SECRET_KEY)
-  : null;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -82,10 +75,6 @@ function isPaymentAllowedForCompany(companyKey, paymentMethod) {
   return false;
 }
 
-function canCreateStripeLink(invoice) {
-  return invoice.company_key === "online" && invoice.payment_method === "Card";
-}
-
 function paymentRuleMessage(companyKey) {
   if (companyKey === "locksmiths") {
     return "24H Locksmiths Ltd can only use Bank transfer or Cash.";
@@ -96,6 +85,11 @@ function paymentRuleMessage(companyKey) {
   }
 
   return "Invalid company selected.";
+}
+
+function isHistoricInvoice(stage) {
+  const value = (stage || "").toLowerCase();
+  return value.includes("emailed");
 }
 
 async function initDb() {
@@ -172,8 +166,6 @@ async function initDb() {
       vat_amount NUMERIC(10,2),
       total NUMERIC(10,2),
       notes TEXT,
-      stripe_payment_link TEXT,
-      stripe_checkout_session_id TEXT,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -184,8 +176,6 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link TEXT;`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_checkout_session_id TEXT;`);
 }
 
 function escapeHtml(value) {
@@ -259,41 +249,54 @@ function technicianStatusClass(status) {
 
 function priorityClass(priority) {
   const value = (priority || "").toLowerCase();
+
   if (value.includes("high")) return "priority-high";
   if (value.includes("push")) return "priority-push";
   if (value.includes("do not")) return "priority-low";
+
   return "priority-normal";
 }
 
 function priorityRank(priority) {
   const value = (priority || "").toLowerCase();
+
   if (value.includes("high")) return 1;
   if (value.includes("push")) return 2;
   if (value.includes("do not")) return 9;
+
   return 3;
 }
 
 function invoiceStageClass(stage) {
   const value = (stage || "").toLowerCase();
+
   if (value.includes("manager")) return "stage-approval";
   if (value.includes("emailed") && value.includes("photos")) return "stage-emailed-photos";
   if (value.includes("emailed")) return "stage-emailed";
   if (value.includes("approved")) return "stage-approved";
   if (value.includes("cancelled")) return "stage-cancelled";
+
   return "stage-draft";
 }
 
 function dispatchRank(status) {
   const value = (status || "").toLowerCase();
+
   if (value.includes("available") && !value.includes("soon")) return 1;
   if (value.includes("soon")) return 2;
   if (value.includes("job")) return 3;
+
   return 4;
 }
 
 function isUsableForDispatch(status) {
   const value = (status || "").toLowerCase();
-  return value.includes("available") || value.includes("soon") || value.includes("job");
+
+  return (
+    value.includes("available") ||
+    value.includes("soon") ||
+    value.includes("job")
+  );
 }
 
 function getBestLocation(tech) {
@@ -580,26 +583,16 @@ function sharedStyles() {
       margin-top: 8px;
     }
 
-    .stripe-button {
-      background: #635bff;
-      display: inline-block;
-      color: white;
-      padding: 9px 12px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: bold;
-      margin-top: 8px;
+    .search-form {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 15px;
+      align-items: center;
     }
 
-    .stripe-open {
-      background: #16a34a;
-      display: inline-block;
-      color: white;
-      padding: 9px 12px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: bold;
-      margin-top: 8px;
+    .small-link {
+      font-size: 14px;
+      color: #93c5fd;
     }
   `;
 }
@@ -611,9 +604,50 @@ function nav() {
       <a href="/technicians">Technicians</a>
       <a href="/dispatch">Dispatch</a>
       <a href="/invoices">Invoices</a>
+      <a href="/invoices/historic">Historic Invoices</a>
       <a href="/invoices/new">New Invoice</a>
     </div>
   `;
+}
+
+function invoiceRows(invoices) {
+  return invoices.map(invoice => {
+    const company = companies[invoice.company_key] || companies.online;
+    const stage = invoice.invoice_stage || "Draft only";
+    const stageClass = invoiceStageClass(stage);
+    const sitePostcode = invoice.site_same_as_invoice
+      ? invoice.customer_postcode
+      : invoice.site_postcode;
+
+    return `
+      <tr>
+        <td>${escapeHtml(invoice.invoice_number)}</td>
+        <td>${escapeHtml(invoice.dispatcher_name)}</td>
+        <td>
+          <div style="margin-bottom:8px;">
+            <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
+          </div>
+
+          <form class="stage-form" method="POST" action="/invoices/stage">
+            <input type="hidden" name="id" value="${invoice.id}">
+            <select name="invoice_stage">
+              ${invoiceStageOptions(stage)}
+            </select>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+        <td>${escapeHtml(invoice.customer_name)}</td>
+        <td>${escapeHtml(sitePostcode)}</td>
+        <td>${escapeHtml(company.name)}</td>
+        <td>${escapeHtml(invoice.payment_method)}</td>
+        <td>${escapeHtml(invoice.invoice_date)}</td>
+        <td>${money(invoice.total)}</td>
+        <td>
+          <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
+        </td>
+      </tr>
+    `;
+  }).join("");
 }
 
 app.get("/", async (req, res) => {
@@ -809,66 +843,12 @@ app.get("/invoices", async (req, res) => {
     const result = await pool.query(`
       SELECT *
       FROM invoices
+      WHERE LOWER(COALESCE(invoice_stage, 'Draft only')) NOT LIKE '%emailed%'
       ORDER BY created_at DESC
       LIMIT 100
     `);
 
-    const rows = result.rows.map(invoice => {
-      const company = companies[invoice.company_key] || companies.online;
-      const stage = invoice.invoice_stage || "Draft only";
-      const stageClass = invoiceStageClass(stage);
-      const sitePostcode = invoice.site_same_as_invoice
-        ? invoice.customer_postcode
-        : invoice.site_postcode;
-
-      let stripeAction = `<span class="muted">—</span>`;
-
-      if (invoice.stripe_payment_link) {
-        stripeAction = `
-          <a class="stripe-open" href="${escapeHtml(invoice.stripe_payment_link)}" target="_blank">Open Stripe Link</a>
-        `;
-      } else if (canCreateStripeLink(invoice)) {
-        stripeAction = `
-          <form method="POST" action="/invoices/${invoice.id}/stripe-link">
-            <button class="stripe-button" type="submit">Create Stripe Link</button>
-          </form>
-        `;
-      } else if (invoice.company_key === "online") {
-        stripeAction = `<span class="muted">Card invoices only</span>`;
-      } else {
-        stripeAction = `<span class="muted">Not for this company</span>`;
-      }
-
-      return `
-        <tr>
-          <td>${escapeHtml(invoice.invoice_number)}</td>
-          <td>${escapeHtml(invoice.dispatcher_name)}</td>
-          <td>
-            <div style="margin-bottom:8px;">
-              <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
-            </div>
-
-            <form class="stage-form" method="POST" action="/invoices/stage">
-              <input type="hidden" name="id" value="${invoice.id}">
-              <select name="invoice_stage">
-                ${invoiceStageOptions(stage)}
-              </select>
-              <button type="submit">Save</button>
-            </form>
-          </td>
-          <td>${escapeHtml(invoice.customer_name)}</td>
-          <td>${escapeHtml(sitePostcode)}</td>
-          <td>${escapeHtml(company.name)}</td>
-          <td>${escapeHtml(invoice.payment_method)}</td>
-          <td>${escapeHtml(invoice.invoice_date)}</td>
-          <td>${money(invoice.total)}</td>
-          <td>
-            <a href="/invoices/${invoice.id}/pdf" target="_blank">Download PDF</a>
-          </td>
-          <td>${stripeAction}</td>
-        </tr>
-      `;
-    }).join("");
+    const rows = invoiceRows(result.rows);
 
     res.send(`
       <!DOCTYPE html>
@@ -880,10 +860,11 @@ app.get("/invoices", async (req, res) => {
       <body>
         ${nav()}
         <h1>Invoices</h1>
-        <div class="subtitle">Recent invoices · Site postcode shown for operational use · Stripe links for card invoices</div>
+        <div class="subtitle">Only invoices that have not been emailed are shown here</div>
 
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
+          <a href="/invoices/historic">Historic Invoices</a>
         </div>
 
         <table>
@@ -899,10 +880,9 @@ app.get("/invoices", async (req, res) => {
               <th>Date</th>
               <th>Total</th>
               <th>PDF</th>
-              <th>Stripe</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="11">No invoices yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="10">No active invoices waiting to be sent</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -913,107 +893,81 @@ app.get("/invoices", async (req, res) => {
   }
 });
 
-app.post("/invoices/:id/stripe-link", async (req, res) => {
+app.get("/invoices/historic", async (req, res) => {
   try {
-    if (!stripe) {
-      return res.status(500).send(`
-        <html>
-          <body style="font-family: Arial; padding: 40px;">
-            <h1>Stripe is not configured</h1>
-            <p>STRIPE_SECRET_KEY is missing in Render environment variables.</p>
-            <p><a href="/invoices">Back to invoices</a></p>
-          </body>
-        </html>
+    const postcode = (req.query.postcode || "").trim();
+
+    let result;
+
+    if (postcode) {
+      result = await pool.query(`
+        SELECT *
+        FROM invoices
+        WHERE LOWER(COALESCE(invoice_stage, '')) LIKE '%emailed%'
+        AND (
+          LOWER(COALESCE(customer_postcode, '')) LIKE LOWER($1)
+          OR LOWER(COALESCE(site_postcode, '')) LIKE LOWER($1)
+        )
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [`%${postcode}%`]);
+    } else {
+      result = await pool.query(`
+        SELECT *
+        FROM invoices
+        WHERE LOWER(COALESCE(invoice_stage, '')) LIKE '%emailed%'
+        ORDER BY created_at DESC
+        LIMIT 100
       `);
     }
 
-    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
-    const invoice = result.rows[0];
+    const rows = invoiceRows(result.rows);
 
-    if (!invoice) {
-      return res.status(404).send("Invoice not found");
-    }
-
-    if (!canCreateStripeLink(invoice)) {
-      return res.status(400).send(`
-        <html>
-          <body style="font-family: Arial; padding: 40px;">
-            <h1>Stripe link not allowed</h1>
-            <p>Stripe links are only for 24H Online Services Ltd invoices where payment method is Card.</p>
-            <p><a href="/invoices">Back to invoices</a></p>
-          </body>
-        </html>
-      `);
-    }
-
-    if (invoice.stripe_payment_link) {
-      return res.redirect("/invoices");
-    }
-
-    const baseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
-    const amountPence = Math.round(Number(invoice.total || 0) * 100);
-
-    if (!amountPence || amountPence < 50) {
-      return res.status(400).send(`
-        <html>
-          <body style="font-family: Arial; padding: 40px;">
-            <h1>Invalid invoice total</h1>
-            <p>The invoice total must be at least £0.50 to create a Stripe link.</p>
-            <p><a href="/invoices">Back to invoices</a></p>
-          </body>
-        </html>
-      `);
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      success_url: `${baseUrl}/invoices?stripe=success`,
-      cancel_url: `${baseUrl}/invoices?stripe=cancelled`,
-      customer_email: invoice.customer_email || undefined,
-      client_reference_id: invoice.invoice_number,
-      metadata: {
-        invoice_id: String(invoice.id),
-        invoice_number: invoice.invoice_number || "",
-        customer_name: invoice.customer_name || "",
-        dispatcher_name: invoice.dispatcher_name || "",
-        locksmith_name: invoice.locksmith_name || ""
-      },
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "gbp",
-            unit_amount: amountPence,
-            product_data: {
-              name: `Invoice ${invoice.invoice_number}`,
-              description: `${invoice.customer_name || "Customer"} - ${invoice.locksmith_name || "Locksmith job"}`
-            }
-          }
-        }
-      ]
-    });
-
-    await pool.query(`
-      UPDATE invoices
-      SET stripe_payment_link = $1,
-          stripe_checkout_session_id = $2,
-          updated_at = NOW()
-      WHERE id = $3
-    `, [session.url, session.id, invoice.id]);
-
-    res.redirect("/invoices");
-  } catch (error) {
-    console.error("Create Stripe link error:", error);
-    res.status(500).send(`
+    res.send(`
+      <!DOCTYPE html>
       <html>
-        <body style="font-family: Arial; padding: 40px;">
-          <h1>Create Stripe link error</h1>
-          <p>Check Render logs for details.</p>
-          <p><a href="/invoices">Back to invoices</a></p>
-        </body>
+      <head>
+        <title>Historic Invoices</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav()}
+        <h1>Historic Invoices</h1>
+        <div class="subtitle">Invoices marked as emailed are filed here. Search by invoice or site postcode.</div>
+
+        <div class="panel">
+          <form class="search-form" method="GET" action="/invoices/historic">
+            <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Search historic invoices by postcode">
+            <button type="submit">Search</button>
+          </form>
+          <br>
+          <a href="/invoices/historic">Clear search</a>
+          <a href="/invoices">Back to active invoices</a>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Invoice / Job No.</th>
+              <th>Dispatcher</th>
+              <th>Stage</th>
+              <th>Customer</th>
+              <th>Site Postcode</th>
+              <th>Company</th>
+              <th>Payment</th>
+              <th>Date</th>
+              <th>Total</th>
+              <th>PDF</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="10">No historic invoices found</td></tr>`}</tbody>
+        </table>
+      </body>
       </html>
     `);
+  } catch (error) {
+    console.error("Historic invoices error:", error);
+    res.status(500).send("Historic invoices error. Check Render logs.");
   }
 });
 
@@ -1021,6 +975,7 @@ app.post("/invoices/stage", async (req, res) => {
   try {
     const id = req.body.id;
     const invoiceStage = req.body.invoice_stage || "Draft only";
+    const redirectTo = req.get("referer") || "/invoices";
 
     await pool.query(`
       UPDATE invoices
@@ -1029,7 +984,7 @@ app.post("/invoices/stage", async (req, res) => {
       WHERE id = $2
     `, [invoiceStage, id]);
 
-    res.redirect("/invoices");
+    res.redirect(redirectTo);
   } catch (error) {
     console.error("Update invoice stage error:", error);
     res.status(500).send("Update invoice stage error. Check Render logs.");
@@ -1485,7 +1440,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     } else if (invoice.payment_method === "Card") {
       doc.font("Helvetica").fontSize(10)
         .text("Payment method: Card", 70, paymentBoxY + 34)
-        .text(invoice.stripe_payment_link ? "Stripe payment link provided separately." : "Please use the card payment link provided separately.", 70, paymentBoxY + 55, {
+        .text("Please use the card payment link provided separately.", 70, paymentBoxY + 55, {
           width: 210
         });
     } else {
