@@ -501,7 +501,32 @@ function sharedStyles() {
     h1 { font-size: 40px; margin-bottom: 5px; }
     h2 { margin-top: 0; }
     .subtitle { color: #9ca3af; margin-bottom: 24px; }
-    .nav { margin-bottom: 22px; }
+    .nav { margin-bottom: 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .nav a { margin-right: 0; }
+    .dropdown { position: relative; display: inline-block; }
+    .dropdown-button { color: #93c5fd; font-weight: bold; cursor: pointer; padding: 0; }
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      top: 20px;
+      left: 0;
+      background: #1f2937;
+      min-width: 220px;
+      border: 1px solid #374151;
+      border-radius: 10px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+      z-index: 9999;
+      overflow: hidden;
+    }
+    .dropdown-content a {
+      display: block;
+      padding: 11px 13px;
+      color: #bfdbfe;
+      white-space: nowrap;
+      font-size: 14px;
+    }
+    .dropdown-content a:hover { background: #374151; color: white; }
+    .dropdown:hover .dropdown-content { display: block; }
     .login-bar { background: #1f2937; border: 1px solid #374151; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; color: #d1d5db; display: flex; justify-content: space-between; align-items: center; }
     .panel { background: #1f2937; border-radius: 14px; padding: 22px; margin-bottom: 28px; }
     input, select, textarea, button { font-size: 15px; padding: 10px; border-radius: 8px; border: 1px solid #374151; }
@@ -568,11 +593,17 @@ function nav(req) {
       <a href="/reports">Reports</a>
       <a href="/technicians">Technicians</a>
       <a href="/dispatch">Dispatch</a>
-      <a href="/invoices">Invoices</a>
-      <a href="/invoices/historic">Historic Invoices</a>
-      <a href="/invoices/new">New Invoice</a>
-      <a href="/invoice-items">Invoice Items</a>
-      <a href="/invoice-templates">Account Templates</a>
+
+      <div class="dropdown">
+        <a class="dropdown-button" href="/invoices">Invoices</a>
+        <div class="dropdown-content">
+          <a href="/invoices">Active Invoices</a>
+          <a href="/invoices/historic">Historic Invoices</a>
+          <a href="/invoices/new">New Invoice</a>
+          <a href="/invoice-items">Invoice Items</a>
+          <a href="/invoice-templates">Account Templates</a>
+        </div>
+      </div>
     </div>
   `;
 }
