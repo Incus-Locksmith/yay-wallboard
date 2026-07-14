@@ -66,6 +66,28 @@ const companies = {
   }
 };
 
+const defaultInvoiceItems = [
+  ["Locksmith call out", 40, 10],
+  ["Emergency response (locksmith call out)", 55, 20],
+  ["Labour to open security lock", 60, 30],
+  ["Labour to force open security lock", 75, 40],
+  ["Labour to replace lock", 55, 50],
+  ["Supply of euro cylinder", 40, 60],
+  ["Supply of night latch", 55, 70],
+  ["Supply of mortice lock", 65, 80],
+  ["Fresh installation labour", 150, 90],
+  ["Boarding up / temporary security", 120, 100],
+  ["Additional labour", 40, 110],
+  ["Parking / congestion charge", 15, 120],
+  ["Other", 0, 999]
+];
+
+const defaultInvoiceTemplates = [
+  ["Adam Lee", "Adam Lee Property Maintenance LTD", "8 Langley Park\nLondon", "NW7 2AA", 10],
+  ["CSG", "Classic Services Group", "Classic House, Genesis Business Centre, Redkiln Way\nHorsham", "RH13 5QH", 20],
+  ["Buns From Home", "Buns From Home LTD", "22 Charterhouse Square\nLONDON", "EC1M 6DX", 30]
+];
+
 function authSecret() {
   return process.env.DASHBOARD_PASSWORD || "change-me-now";
 }
@@ -73,59 +95,38 @@ function authSecret() {
 function parseCookies(req) {
   const header = req.headers.cookie || "";
   const cookies = {};
-
   header.split(";").forEach(part => {
     const index = part.indexOf("=");
     if (index === -1) return;
-
-    const key = part.slice(0, index).trim();
-    const value = part.slice(index + 1).trim();
-
-    cookies[key] = decodeURIComponent(value);
+    cookies[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim());
   });
-
   return cookies;
 }
 
 function signValue(value) {
-  return crypto
-    .createHmac("sha256", authSecret())
-    .update(value)
-    .digest("hex");
+  return crypto.createHmac("sha256", authSecret()).update(value).digest("hex");
 }
 
 function makeSessionCookie(agentName) {
-  const payload = Buffer.from(
-    JSON.stringify({
-      agentName,
-      createdAt: Date.now()
-    })
-  ).toString("base64url");
-
-  const signature = signValue(payload);
-  return `${payload}.${signature}`;
+  const payload = Buffer.from(JSON.stringify({ agentName, createdAt: Date.now() })).toString("base64url");
+  return `${payload}.${signValue(payload)}`;
 }
 
 function readSession(req) {
-  const cookies = parseCookies(req);
-  const raw = cookies.dashboard_session;
-
+  const raw = parseCookies(req).dashboard_session;
   if (!raw || !raw.includes(".")) return null;
 
   const [payload, signature] = raw.split(".");
   const expected = signValue(payload);
 
   try {
-    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
-      return null;
-    }
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
   } catch (error) {
     return null;
   }
 
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-
     if (!decoded.agentName || !agentNames.includes(decoded.agentName)) return null;
 
     const maxAgeMs = 1000 * 60 * 60 * 24 * 7;
@@ -139,7 +140,6 @@ function readSession(req) {
 
 function setSessionCookie(res, agentName) {
   const cookieValue = makeSessionCookie(agentName);
-
   res.setHeader(
     "Set-Cookie",
     `dashboard_session=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=${60 * 60 * 24 * 7}`
@@ -147,22 +147,15 @@ function setSessionCookie(res, agentName) {
 }
 
 function clearSessionCookie(res) {
-  res.setHeader(
-    "Set-Cookie",
-    "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0"
-  );
+  res.setHeader("Set-Cookie", "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0");
 }
 
 function requireLogin(req, res, next) {
   const openPaths = ["/login", "/logout", "/webhook/yay"];
-
   if (openPaths.includes(req.path)) return next();
 
   const session = readSession(req);
-
-  if (!session) {
-    return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
-  }
+  if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
 
   req.currentAgent = session.agentName;
   next();
@@ -176,7 +169,6 @@ function currentAgentName(req) {
 
 function escapeHtml(value) {
   if (value === null || value === undefined) return "";
-
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -187,7 +179,6 @@ function escapeHtml(value) {
 
 function pdfText(value) {
   if (value === null || value === undefined) return "";
-
   return String(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -203,17 +194,14 @@ function money(value) {
 
 function formatSeconds(seconds) {
   if (!seconds) return "0s";
-
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
-
   if (mins === 0) return `${secs}s`;
   return `${mins}m ${secs}s`;
 }
 
 function formatDateTime(date) {
   if (!date) return "—";
-
   return new Date(date).toLocaleString("en-GB", {
     timeZone: "Europe/London",
     day: "2-digit",
@@ -226,7 +214,6 @@ function formatDateTime(date) {
 
 function formatDateTimeWithSeconds(date) {
   if (!date) return "—";
-
   return new Date(date).toLocaleString("en-GB", {
     timeZone: "Europe/London",
     day: "2-digit",
@@ -240,7 +227,6 @@ function formatDateTimeWithSeconds(date) {
 
 function formatTimeOnly(date) {
   if (!date) return "—";
-
   return new Date(date).toLocaleTimeString("en-GB", {
     timeZone: "Europe/London",
     hour: "2-digit",
@@ -249,33 +235,111 @@ function formatTimeOnly(date) {
   });
 }
 
+function dateInputValue(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function londonDateParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+
+  const parts = formatter.formatToParts(date);
+  const lookup = {};
+  parts.forEach(part => {
+    lookup[part.type] = part.value;
+  });
+
+  return {
+    year: Number(lookup.year),
+    month: Number(lookup.month),
+    day: Number(lookup.day)
+  };
+}
+
+function makeDate(year, month, day) {
+  return new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+}
+
+function addDays(date, days) {
+  const copy = new Date(date);
+  copy.setUTCDate(copy.getUTCDate() + days);
+  return copy;
+}
+
+function startOfWeekMonday(date) {
+  const day = date.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  return addDays(date, diff);
+}
+
+function buildReportRange(query) {
+  const range = query.range || "today";
+  const nowParts = londonDateParts();
+  const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+
+  let start = today;
+  let end = addDays(today, 1);
+  let label = "Today";
+
+  if (range === "yesterday") {
+    start = addDays(today, -1);
+    end = today;
+    label = "Yesterday";
+  } else if (range === "this_week") {
+    start = startOfWeekMonday(today);
+    end = addDays(today, 1);
+    label = "This week";
+  } else if (range === "this_month") {
+    start = makeDate(nowParts.year, nowParts.month, 1);
+    end = addDays(today, 1);
+    label = "This month";
+  } else if (range === "last_month") {
+    const lastMonth = nowParts.month === 1 ? 12 : nowParts.month - 1;
+    const year = nowParts.month === 1 ? nowParts.year - 1 : nowParts.year;
+    start = makeDate(year, lastMonth, 1);
+    end = makeDate(nowParts.year, nowParts.month, 1);
+    label = "Last month";
+  } else if (range === "custom") {
+    const from = query.from || dateInputValue(today);
+    const to = query.to || dateInputValue(today);
+    start = new Date(`${from}T00:00:00.000Z`);
+    end = addDays(new Date(`${to}T00:00:00.000Z`), 1);
+    label = `Custom: ${from} to ${to}`;
+  }
+
+  return {
+    range,
+    label,
+    start,
+    end,
+    fromValue: dateInputValue(start),
+    toValue: dateInputValue(addDays(end, -1))
+  };
+}
+
+function csvValue(value) {
+  if (value === null || value === undefined) return "\"\"";
+  return `"${String(value).replace(/"/g, "\"\"")}"`;
+}
+
 function isPaymentAllowedForCompany(companyKey, paymentMethod) {
-  if (companyKey === "locksmiths") {
-    return paymentMethod === "Bank transfer" || paymentMethod === "Cash";
-  }
-
-  if (companyKey === "online") {
-    return paymentMethod === "Card" || paymentMethod === "Cash";
-  }
-
+  if (companyKey === "locksmiths") return paymentMethod === "Bank transfer" || paymentMethod === "Cash";
+  if (companyKey === "online") return paymentMethod === "Card" || paymentMethod === "Cash";
   return false;
 }
 
 function paymentRuleMessage(companyKey) {
-  if (companyKey === "locksmiths") {
-    return "24H Locksmiths Ltd can only use Bank transfer or Cash.";
-  }
-
-  if (companyKey === "online") {
-    return "24H Online Services Ltd can only use Card or Cash.";
-  }
-
+  if (companyKey === "locksmiths") return "24H Locksmiths Ltd can only use Bank transfer or Cash.";
+  if (companyKey === "online") return "24H Online Services Ltd can only use Card or Cash.";
   return "Invalid company selected.";
 }
 
 function technicianStatusClass(status) {
   const value = (status || "").toLowerCase();
-
   if (value.includes("soon")) return "soon";
   if (value.includes("available")) return "available";
   if (value.includes("job")) return "onjob";
@@ -284,39 +348,32 @@ function technicianStatusClass(status) {
   if (value.includes("vehicle")) return "bad";
   if (value.includes("do not")) return "bad";
   if (value.includes("off")) return "off";
-
   return "neutral";
 }
 
 function priorityClass(priority) {
   const value = (priority || "").toLowerCase();
-
   if (value.includes("high")) return "priority-high";
   if (value.includes("push")) return "priority-push";
   if (value.includes("do not")) return "priority-low";
-
   return "priority-normal";
 }
 
 function priorityRank(priority) {
   const value = (priority || "").toLowerCase();
-
   if (value.includes("high")) return 1;
   if (value.includes("push")) return 2;
   if (value.includes("do not")) return 9;
-
   return 3;
 }
 
 function invoiceStageClass(stage) {
   const value = (stage || "").toLowerCase();
-
   if (value.includes("manager")) return "stage-approval";
   if (value.includes("emailed") && value.includes("photos")) return "stage-emailed-photos";
   if (value.includes("emailed")) return "stage-emailed";
   if (value.includes("approved")) return "stage-approved";
   if (value.includes("cancelled")) return "stage-cancelled";
-
   return "stage-draft";
 }
 
@@ -338,31 +395,22 @@ function invoiceStageOptions(selectedStage = "Draft only") {
 
 function dispatchRank(status) {
   const value = (status || "").toLowerCase();
-
   if (value.includes("available") && !value.includes("soon")) return 1;
   if (value.includes("soon")) return 2;
   if (value.includes("job")) return 3;
-
   return 4;
 }
 
 function isUsableForDispatch(status) {
   const value = (status || "").toLowerCase();
-
-  return (
-    value.includes("available") ||
-    value.includes("soon") ||
-    value.includes("job")
-  );
+  return value.includes("available") || value.includes("soon") || value.includes("job");
 }
 
 function getBestLocation(tech) {
   const current = (tech.current_postcode || "").trim();
   const base = (tech.base_postcode || "").trim();
-
   if (current) return { postcode: current, source: "Current" };
   if (base) return { postcode: base, source: "Base" };
-
   return { postcode: "", source: "Unknown" };
 }
 
@@ -373,10 +421,8 @@ function isFullUkPostcode(postcode) {
 
 function postcodePrecision(postcode) {
   const value = (postcode || "").trim().toUpperCase();
-
   if (!value) return "Unknown";
   if (isFullUkPostcode(value)) return "Exact";
-
   return "Approx";
 }
 
@@ -386,25 +432,14 @@ function normalisePostcode(postcode) {
 
 async function lookupPostcodeLocation(postcode) {
   const clean = normalisePostcode(postcode);
-
   if (!clean) {
-    return {
-      ok: false,
-      latitude: null,
-      longitude: null,
-      precision: "Unknown",
-      error: "No postcode"
-    };
+    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "No postcode" };
   }
 
   try {
     if (isFullUkPostcode(clean)) {
-      const response = await fetch(
-        `https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`
-      );
-
+      const response = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(clean)}`);
       const json = await response.json();
-
       if (json.status === 200 && json.result) {
         return {
           ok: true,
@@ -417,11 +452,7 @@ async function lookupPostcodeLocation(postcode) {
     }
 
     const outcode = clean.split(" ")[0];
-
-    const outcodeResponse = await fetch(
-      `https://api.postcodes.io/outcodes/${encodeURIComponent(outcode)}`
-    );
-
+    const outcodeResponse = await fetch(`https://api.postcodes.io/outcodes/${encodeURIComponent(outcode)}`);
     const outcodeJson = await outcodeResponse.json();
 
     if (outcodeJson.status === 200 && outcodeJson.result) {
@@ -434,34 +465,18 @@ async function lookupPostcodeLocation(postcode) {
       };
     }
 
-    return {
-      ok: false,
-      latitude: null,
-      longitude: null,
-      precision: "Unknown",
-      error: "Postcode not found"
-    };
+    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "Postcode not found" };
   } catch (error) {
     console.error("Postcode lookup error:", error);
-
-    return {
-      ok: false,
-      latitude: null,
-      longitude: null,
-      precision: "Unknown",
-      error: "Lookup failed"
-    };
+    return { ok: false, latitude: null, longitude: null, precision: "Unknown", error: "Lookup failed" };
   }
 }
 
 function distanceMiles(lat1, lon1, lat2, lon2) {
-  if ([lat1, lon1, lat2, lon2].some(v => v === null || v === undefined)) {
-    return null;
-  }
+  if ([lat1, lon1, lat2, lon2].some(v => v === null || v === undefined)) return null;
 
   const earthRadiusMiles = 3958.8;
   const toRadians = degrees => degrees * Math.PI / 180;
-
   const dLat = toRadians(lat2 - lat1);
   const dLon = toRadians(lon2 - lon1);
 
@@ -475,185 +490,41 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
 }
 
 function formatDistance(distance) {
-  if (distance === null || distance === undefined || Number.isNaN(distance)) {
-    return "—";
-  }
-
+  if (distance === null || distance === undefined || Number.isNaN(distance)) return "—";
   return `${distance.toFixed(1)} miles`;
 }
 
 function sharedStyles() {
   return `
-    body {
-      font-family: Arial, sans-serif;
-      background: #111827;
-      color: white;
-      padding: 32px;
-    }
-
-    a {
-      color: #93c5fd;
-      text-decoration: none;
-      margin-right: 14px;
-      font-weight: bold;
-    }
-
-    h1 {
-      font-size: 40px;
-      margin-bottom: 5px;
-    }
-
-    h2 {
-      margin-top: 0;
-    }
-
-    .subtitle {
-      color: #9ca3af;
-      margin-bottom: 24px;
-    }
-
-    .nav {
-      margin-bottom: 22px;
-    }
-
-    .login-bar {
-      background: #1f2937;
-      border: 1px solid #374151;
-      border-radius: 12px;
-      padding: 12px 16px;
-      margin-bottom: 20px;
-      color: #d1d5db;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .panel {
-      background: #1f2937;
-      border-radius: 14px;
-      padding: 22px;
-      margin-bottom: 28px;
-    }
-
-    input, select, textarea, button {
-      font-size: 15px;
-      padding: 10px;
-      border-radius: 8px;
-      border: 1px solid #374151;
-    }
-
-    input, select, textarea {
-      background: #111827;
-      color: white;
-    }
-
-    button {
-      background: #2563eb;
-      color: white;
-      border: none;
-      cursor: pointer;
-      font-weight: bold;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #1f2937;
-      border-radius: 14px;
-      overflow: hidden;
-    }
-
-    th, td {
-      text-align: left;
-      padding: 12px;
-      border-bottom: 1px solid #374151;
-      font-size: 14px;
-      vertical-align: middle;
-    }
-
-    th {
-      color: #9ca3af;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-    }
-
-    .invoice-table th,
-    .invoice-table td {
-      padding: 11px 10px;
-      font-size: 13px;
-    }
-
-    .invoice-main {
-      font-weight: bold;
-      font-size: 14px;
-    }
-
-    .invoice-sub {
-      color: #9ca3af;
-      font-size: 12px;
-      margin-top: 4px;
-      line-height: 1.35;
-    }
-
-    .compact-stage {
-      min-width: 245px;
-    }
-
-    .compact-stage-top {
-      margin-bottom: 7px;
-    }
-
-    .compact-stage-form {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-    }
-
-    .compact-stage-form select {
-      font-size: 12px;
-      padding: 7px;
-      width: 180px;
-    }
-
-    .compact-stage-form button {
-      font-size: 12px;
-      padding: 7px 10px;
-    }
-
-    .actions {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      align-items: flex-start;
-    }
-
-    .actions a {
-      margin-right: 0;
-      font-size: 13px;
-    }
-
-    .delete-link {
-      color: #fca5a5;
-    }
-
-    .delete-button {
-      background: #dc2626;
-    }
-
-    .cancel-button {
-      background: #374151;
-    }
-
-    .pill, .status {
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: bold;
-      white-space: nowrap;
-      display: inline-block;
-    }
-
+    body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 32px; }
+    a { color: #93c5fd; text-decoration: none; margin-right: 14px; font-weight: bold; }
+    h1 { font-size: 40px; margin-bottom: 5px; }
+    h2 { margin-top: 0; }
+    .subtitle { color: #9ca3af; margin-bottom: 24px; }
+    .nav { margin-bottom: 22px; }
+    .login-bar { background: #1f2937; border: 1px solid #374151; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; color: #d1d5db; display: flex; justify-content: space-between; align-items: center; }
+    .panel { background: #1f2937; border-radius: 14px; padding: 22px; margin-bottom: 28px; }
+    input, select, textarea, button { font-size: 15px; padding: 10px; border-radius: 8px; border: 1px solid #374151; }
+    input, select, textarea { background: #111827; color: white; }
+    button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; background: #1f2937; border-radius: 14px; overflow: hidden; }
+    th, td { text-align: left; padding: 12px; border-bottom: 1px solid #374151; font-size: 14px; vertical-align: middle; }
+    th { color: #9ca3af; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .invoice-table th, .invoice-table td { padding: 11px 10px; font-size: 13px; }
+    .invoice-main { font-weight: bold; font-size: 14px; }
+    .invoice-sub { color: #9ca3af; font-size: 12px; margin-top: 4px; line-height: 1.35; }
+    .compact-stage { min-width: 245px; }
+    .compact-stage-top { margin-bottom: 7px; }
+    .compact-stage-form { display: flex; gap: 6px; align-items: center; }
+    .compact-stage-form select { font-size: 12px; padding: 7px; width: 180px; }
+    .compact-stage-form button { font-size: 12px; padding: 7px 10px; }
+    .actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+    .actions a { margin-right: 0; font-size: 13px; }
+    .delete-link { color: #fca5a5; }
+    .delete-button, .danger { background: #dc2626; }
+    .cancel-button { background: #374151; }
+    .small-button { font-size: 12px; padding: 7px 10px; }
+    .pill, .status { padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: bold; white-space: nowrap; display: inline-block; }
     .available { background: #16a34a; color: white; }
     .soon { background: #f59e0b; color: black; }
     .onjob { background: #2563eb; color: white; }
@@ -661,84 +532,31 @@ function sharedStyles() {
     .bad { background: #dc2626; color: white; }
     .neutral, .inactive { background: #374151; color: #d1d5db; }
     .engaged { background: #dc2626; color: white; }
-
     .priority-high { background: #dc2626; color: white; }
     .priority-push { background: #f59e0b; color: black; }
     .priority-normal { background: #374151; color: #d1d5db; }
     .priority-low { background: #6b7280; color: white; }
-
     .stage-draft { background: #374151; color: #d1d5db; }
     .stage-approval { background: #f59e0b; color: black; }
     .stage-approved { background: #2563eb; color: white; }
     .stage-emailed { background: #16a34a; color: white; }
     .stage-emailed-photos { background: #22c55e; color: black; }
     .stage-cancelled { background: #dc2626; color: white; }
-
-    .muted {
-      color: #9ca3af;
-    }
-
-    .audit {
-      color: #9ca3af;
-      font-size: 12px;
-      line-height: 1.35;
-      margin-top: 6px;
-    }
-
-    .warning-text {
-      color: #fbbf24;
-      font-weight: bold;
-    }
-
-    .distance {
-      font-size: 22px;
-      font-weight: bold;
-    }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 15px;
-    }
-
-    .grid-3 {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 15px;
-    }
-
-    .checkbox-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin: 16px 0;
-      color: #d1d5db;
-      font-size: 16px;
-    }
-
-    .checkbox-row input {
-      width: 18px;
-      height: 18px;
-    }
-
-    .help {
-      color: #9ca3af;
-      font-size: 14px;
-      margin-top: 8px;
-    }
-
-    .search-form {
-      display: grid;
-      grid-template-columns: 2fr 1fr;
-      gap: 15px;
-      align-items: center;
-    }
+    .muted { color: #9ca3af; }
+    .audit { color: #9ca3af; font-size: 12px; line-height: 1.35; margin-top: 6px; }
+    .warning-text { color: #fbbf24; font-weight: bold; }
+    .distance { font-size: 22px; font-weight: bold; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .checkbox-row { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: #d1d5db; font-size: 16px; }
+    .checkbox-row input { width: 18px; height: 18px; }
+    .help { color: #9ca3af; font-size: 14px; margin-top: 8px; }
+    .search-form { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
   `;
 }
 
 function nav(req) {
   const name = currentAgentName(req);
-
   return `
     <div class="login-bar">
       <div>Logged in as <strong>${escapeHtml(name)}</strong></div>
@@ -747,11 +565,14 @@ function nav(req) {
 
     <div class="nav">
       <a href="/">Call Wallboard</a>
+      <a href="/reports">Reports</a>
       <a href="/technicians">Technicians</a>
       <a href="/dispatch">Dispatch</a>
       <a href="/invoices">Invoices</a>
       <a href="/invoices/historic">Historic Invoices</a>
       <a href="/invoices/new">New Invoice</a>
+      <a href="/invoice-items">Invoice Items</a>
+      <a href="/invoice-templates">Account Templates</a>
     </div>
   `;
 }
@@ -762,9 +583,7 @@ function invoiceRows(invoices) {
     const stage = invoice.invoice_stage || "Draft only";
     const stageClass = invoiceStageClass(stage);
 
-    const sitePostcode = invoice.site_same_as_invoice
-      ? invoice.customer_postcode
-      : invoice.site_postcode;
+    const sitePostcode = invoice.site_same_as_invoice ? invoice.customer_postcode : invoice.site_postcode;
 
     const updatedText = invoice.stage_updated_by
       ? `Updated by ${escapeHtml(invoice.stage_updated_by)} · ${formatDateTime(invoice.stage_updated_at)}`
@@ -776,38 +595,27 @@ function invoiceRows(invoices) {
           <div class="invoice-main">${escapeHtml(invoice.invoice_number)}</div>
           <div class="invoice-sub">By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
         </td>
-
         <td>
           <div class="invoice-main">${escapeHtml(invoice.customer_name || "—")}</div>
           <div class="invoice-sub">Site: ${escapeHtml(sitePostcode || "—")}</div>
         </td>
-
         <td>
           <div class="invoice-main">${escapeHtml(company.name)}</div>
           <div class="invoice-sub">${escapeHtml(invoice.payment_method || "—")}</div>
         </td>
-
         <td>
           <div class="invoice-main">${escapeHtml(invoice.invoice_date || "—")}</div>
           <div class="invoice-sub">${money(invoice.total)}</div>
         </td>
-
         <td class="compact-stage">
-          <div class="compact-stage-top">
-            <span class="pill ${stageClass}">${escapeHtml(stage)}</span>
-          </div>
-
+          <div class="compact-stage-top"><span class="pill ${stageClass}">${escapeHtml(stage)}</span></div>
           <form class="compact-stage-form" method="POST" action="/invoices/stage">
             <input type="hidden" name="id" value="${invoice.id}">
-            <select name="invoice_stage">
-              ${invoiceStageOptions(stage)}
-            </select>
+            <select name="invoice_stage">${invoiceStageOptions(stage)}</select>
             <button type="submit">Save</button>
           </form>
-
           ${updatedText ? `<div class="audit">${updatedText}</div>` : ""}
         </td>
-
         <td>
           <div class="actions">
             <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
@@ -817,6 +625,33 @@ function invoiceRows(invoices) {
       </tr>
     `;
   }).join("");
+}
+
+async function seedDefaultInvoiceItems() {
+  const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM invoice_items`);
+  if (countResult.rows[0].count > 0) return;
+
+  for (const [description, defaultPrice, sortOrder] of defaultInvoiceItems) {
+    await pool.query(`
+      INSERT INTO invoice_items (description, default_price, sort_order, active, created_at, updated_at)
+      VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+    `, [description, defaultPrice, sortOrder]);
+  }
+}
+
+async function seedDefaultInvoiceTemplates() {
+  const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM invoice_templates`);
+  if (countResult.rows[0].count > 0) return;
+
+  for (const [templateName, customerName, customerAddress, customerPostcode, sortOrder] of defaultInvoiceTemplates) {
+    await pool.query(`
+      INSERT INTO invoice_templates (
+        template_name, customer_name, customer_address, customer_postcode,
+        sort_order, active, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+    `, [templateName, customerName, customerAddress, customerPostcode, sortOrder]);
+  }
 }
 
 async function initDb() {
@@ -909,15 +744,51 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoice_items (
+      id SERIAL PRIMARY KEY,
+      description TEXT NOT NULL,
+      default_price NUMERIC(10,2) DEFAULT 0,
+      sort_order INTEGER DEFAULT 100,
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS default_price NUMERIC(10,2) DEFAULT 0;`);
+  await pool.query(`ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
+  await pool.query(`ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoice_templates (
+      id SERIAL PRIMARY KEY,
+      template_name TEXT NOT NULL,
+      customer_name TEXT NOT NULL,
+      customer_address TEXT,
+      customer_postcode TEXT,
+      sort_order INTEGER DEFAULT 100,
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
+  await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+
+  await seedDefaultInvoiceItems();
+  await seedDefaultInvoiceTemplates();
 }
+
+/* The rest of this file keeps all your current working routes and adds the invoice upgrade.
+   Because this response needs to be copied safely, the complete route set continues below. */
 
 app.get("/login", (req, res) => {
   const next = req.query.next || "/";
   const error = req.query.error === "1";
-
-  const options = agentNames.map(name => {
-    return `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
-  }).join("");
+  const options = agentNames.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
 
   res.send(`
     <!DOCTYPE html>
@@ -925,81 +796,28 @@ app.get("/login", (req, res) => {
     <head>
       <title>Dashboard Login</title>
       <style>
-        body {
-          font-family: Arial, sans-serif;
-          background: #111827;
-          color: white;
-          padding: 40px;
-        }
-
-        .login-box {
-          max-width: 440px;
-          margin: 80px auto;
-          background: #1f2937;
-          border-radius: 16px;
-          padding: 30px;
-          border: 1px solid #374151;
-        }
-
-        h1 {
-          margin-top: 0;
-          font-size: 36px;
-        }
-
-        .subtitle {
-          color: #9ca3af;
-          margin-bottom: 25px;
-        }
-
-        select, input, button {
-          width: 100%;
-          box-sizing: border-box;
-          font-size: 17px;
-          padding: 14px;
-          border-radius: 8px;
-          border: 1px solid #374151;
-          margin-bottom: 14px;
-        }
-
-        select, input {
-          background: #111827;
-          color: white;
-        }
-
-        button {
-          background: #2563eb;
-          color: white;
-          border: none;
-          font-weight: bold;
-          cursor: pointer;
-        }
-
-        .error {
-          background: #dc2626;
-          color: white;
-          border-radius: 8px;
-          padding: 12px;
-          margin-bottom: 14px;
-        }
+        body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 40px; }
+        .login-box { max-width: 440px; margin: 80px auto; background: #1f2937; border-radius: 16px; padding: 30px; border: 1px solid #374151; }
+        h1 { margin-top: 0; font-size: 36px; }
+        .subtitle { color: #9ca3af; margin-bottom: 25px; }
+        select, input, button { width: 100%; box-sizing: border-box; font-size: 17px; padding: 14px; border-radius: 8px; border: 1px solid #374151; margin-bottom: 14px; }
+        select, input { background: #111827; color: white; }
+        button { background: #2563eb; color: white; border: none; font-weight: bold; cursor: pointer; }
+        .error { background: #dc2626; color: white; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
       </style>
     </head>
     <body>
       <div class="login-box">
         <h1>Dashboard Login</h1>
         <div class="subtitle">Choose your name and enter the shared password.</div>
-
         ${error ? `<div class="error">Wrong agent or password. Try again.</div>` : ""}
-
         <form method="POST" action="/login">
           <input type="hidden" name="next" value="${escapeHtml(next)}">
-
           <select name="agent_name" required>
             <option value="">Choose your name</option>
             ${options}
           </select>
-
           <input name="password" type="password" placeholder="Password" required>
-
           <button type="submit">Log in</button>
         </form>
       </div>
@@ -1037,78 +855,43 @@ app.get("/", async (req, res) => {
 
     const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
     const recentCalls = result.rows;
-
-    const answeredCalls = recentCalls.filter(call =>
-      call.answered_by && agents[call.answered_by]
-    );
-
+    const answeredCalls = recentCalls.filter(call => call.answered_by && agents[call.answered_by]);
     const missedCalls = recentCalls.filter(call => !call.answered_by);
-
     const reportableCalls = [...answeredCalls, ...missedCalls];
 
-    const missedRate = reportableCalls.length
-      ? Math.round((missedCalls.length / reportableCalls.length) * 100)
-      : 0;
+    const missedRate = reportableCalls.length ? Math.round((missedCalls.length / reportableCalls.length) * 100) : 0;
 
     let missedRateClass = "good";
-
     if (reportableCalls.length === 0) missedRateClass = "neutral";
     else if (missedRate >= 20) missedRateClass = "bad";
     else if (missedRate >= 10) missedRateClass = "soon";
 
     const lastReceived = latestResult.rows[0].last_received;
-
-    const lastUpdatedText = lastReceived
-      ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}`
-      : "No calls received yet";
-
+    const lastUpdatedText = lastReceived ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}` : "No calls received yet";
     const pageUpdatedText = `Page refreshed: ${formatDateTimeWithSeconds(new Date())}`;
 
     const agentStats = {};
-
     Object.entries(agents).forEach(([ext, name]) => {
-      agentStats[ext] = {
-        ext,
-        name,
-        answered: 0,
-        totalDuration: 0,
-        lastCallTime: null,
-        status: "No active call"
-      };
+      agentStats[ext] = { ext, name, answered: 0, totalDuration: 0, lastCallTime: null, status: "No active call" };
     });
 
     answeredCalls.forEach(call => {
       const ext = call.answered_by;
-      const name = agents[ext];
-
-      if (!name) return;
-
+      if (!agents[ext]) return;
       agentStats[ext].answered += 1;
       agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
-
       const callTime = call.start_time || call.received_at;
-
-      if (
-        !agentStats[ext].lastCallTime ||
-        new Date(callTime) > new Date(agentStats[ext].lastCallTime)
-      ) {
+      if (!agentStats[ext].lastCallTime || new Date(callTime) > new Date(agentStats[ext].lastCallTime)) {
         agentStats[ext].lastCallTime = callTime;
       }
-
-      if (!call.end_time) {
-        agentStats[ext].status = "Engaged";
-      }
+      if (!call.end_time) agentStats[ext].status = "Engaged";
     });
 
     const agentRows = Object.values(agentStats)
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(agent => {
-        const avgDuration = agent.answered
-          ? Math.round(agent.totalDuration / agent.answered)
-          : 0;
-
+        const avgDuration = agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0;
         const statusClass = agent.status === "Engaged" ? "engaged" : "inactive";
-
         return `
           <tr>
             <td>${escapeHtml(agent.name)}</td>
@@ -1118,8 +901,7 @@ app.get("/", async (req, res) => {
             <td><span class="status ${statusClass}">${agent.status}</span></td>
           </tr>
         `;
-      })
-      .join("");
+      }).join("");
 
     res.send(`
       <!DOCTYPE html>
@@ -1129,43 +911,15 @@ app.get("/", async (req, res) => {
         <meta http-equiv="refresh" content="5">
         <style>
           ${sharedStyles()}
-
-          .updated {
-            color: #d1d5db;
-            font-size: 16px;
-            margin-bottom: 30px;
-          }
-
-          .cards {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-            margin-bottom: 40px;
-          }
-
-          .card {
-            background: #1f2937;
-            border-radius: 14px;
-            padding: 25px;
-            border: 2px solid transparent;
-          }
-
+          .updated { color: #d1d5db; font-size: 16px; margin-bottom: 30px; }
+          .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }
+          .card { background: #1f2937; border-radius: 14px; padding: 25px; border: 2px solid transparent; }
           .card.good { border-color: #16a34a; }
           .card.soon { border-color: #f59e0b; }
           .card.bad { border-color: #dc2626; }
           .card.neutral { border-color: #374151; }
-
-          .label {
-            color: #9ca3af;
-            font-size: 16px;
-          }
-
-          .value {
-            font-size: 42px;
-            font-weight: bold;
-            margin-top: 10px;
-          }
-
+          .label { color: #9ca3af; font-size: 16px; }
+          .value { font-size: 42px; font-weight: bold; margin-top: 10px; }
           .value.good { color: #22c55e; }
           .value.soon { color: #fbbf24; }
           .value.bad { color: #ef4444; }
@@ -1174,42 +928,18 @@ app.get("/", async (req, res) => {
       </head>
       <body>
         ${nav(req)}
-
         <h1>Keys247 Call Wallboard</h1>
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
         <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
-
         <div class="cards">
-          <div class="card">
-            <div class="label">Total Calls</div>
-            <div class="value">${reportableCalls.length}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Answered</div>
-            <div class="value">${answeredCalls.length}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Missed</div>
-            <div class="value">${missedCalls.length}</div>
-          </div>
-
-          <div class="card ${missedRateClass}">
-            <div class="label">Miss Rate</div>
-            <div class="value ${missedRateClass}">${missedRate}%</div>
-          </div>
+          <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
+          <div class="card"><div class="label">Answered</div><div class="value">${answeredCalls.length}</div></div>
+          <div class="card"><div class="label">Missed</div><div class="value">${missedCalls.length}</div></div>
+          <div class="card ${missedRateClass}"><div class="label">Miss Rate</div><div class="value ${missedRateClass}">${missedRate}%</div></div>
         </div>
-
         <table>
           <thead>
-            <tr>
-              <th>Agent</th>
-              <th>Answered</th>
-              <th>Avg Duration</th>
-              <th>Last Call</th>
-              <th>Status</th>
-            </tr>
+            <tr><th>Agent</th><th>Answered</th><th>Avg Duration</th><th>Last Call</th><th>Status</th></tr>
           </thead>
           <tbody>${agentRows}</tbody>
         </table>
@@ -1219,6 +949,195 @@ app.get("/", async (req, res) => {
   } catch (error) {
     console.error("Wallboard error:", error);
     res.status(500).send("Wallboard error. Check Render logs.");
+  }
+});
+
+app.get("/invoice-items", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoice_items ORDER BY active DESC, sort_order ASC, description ASC`);
+
+    const rows = result.rows.map(item => `
+      <tr>
+        <form method="POST" action="/invoice-items/save">
+          <input type="hidden" name="id" value="${item.id}">
+          <td><input name="description" value="${escapeHtml(item.description)}" required style="width:95%;"></td>
+          <td><input name="default_price" value="${Number(item.default_price || 0).toFixed(2)}" style="width:90px;"></td>
+          <td><input name="sort_order" value="${item.sort_order || 100}" style="width:70px;"></td>
+          <td>
+            <select name="active">
+              <option value="true" ${item.active ? "selected" : ""}>Active</option>
+              <option value="false" ${!item.active ? "selected" : ""}>Hidden</option>
+            </select>
+          </td>
+          <td><button class="small-button" type="submit">Save</button></td>
+        </form>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Invoice Items</title>
+        <style>
+          ${sharedStyles()}
+          .add-grid { display: grid; grid-template-columns: 3fr 1fr 1fr 1fr; gap: 12px; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Invoice Items</h1>
+        <div class="subtitle">Edit the dropdown lines used when generating invoices.</div>
+        <div class="panel">
+          <h2>Add New Invoice Item</h2>
+          <form class="add-grid" method="POST" action="/invoice-items/save">
+            <input name="description" placeholder="Description e.g. Supply of lock" required>
+            <input name="default_price" placeholder="Default price" value="0.00">
+            <input name="sort_order" placeholder="Sort" value="100">
+            <button type="submit">Add Item</button>
+          </form>
+          <div class="help">Hidden items stay in old invoices but disappear from the new invoice dropdown.</div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Description</th><th>Default Price</th><th>Sort</th><th>Status</th><th>Save</th></tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="5">No invoice items found</td></tr>`}</tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Invoice items page error:", error);
+    res.status(500).send("Invoice items page error. Check Render logs.");
+  }
+});
+
+app.post("/invoice-items/save", async (req, res) => {
+  try {
+    const id = req.body.id || "";
+    const description = req.body.description || "";
+    const defaultPrice = Number(req.body.default_price || 0);
+    const sortOrder = Number(req.body.sort_order || 100);
+    const active = req.body.active === "false" ? false : true;
+
+    if (id) {
+      await pool.query(`
+        UPDATE invoice_items
+        SET description = $1, default_price = $2, sort_order = $3, active = $4, updated_at = NOW()
+        WHERE id = $5
+      `, [description, defaultPrice, sortOrder, active, id]);
+    } else {
+      await pool.query(`
+        INSERT INTO invoice_items (description, default_price, sort_order, active, created_at, updated_at)
+        VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+      `, [description, defaultPrice, sortOrder]);
+    }
+
+    res.redirect("/invoice-items");
+  } catch (error) {
+    console.error("Save invoice item error:", error);
+    res.status(500).send("Save invoice item error. Check Render logs.");
+  }
+});
+
+app.get("/invoice-templates", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoice_templates ORDER BY active DESC, sort_order ASC, template_name ASC`);
+
+    const rows = result.rows.map(template => `
+      <tr>
+        <form method="POST" action="/invoice-templates/save">
+          <input type="hidden" name="id" value="${template.id}">
+          <td><input name="template_name" value="${escapeHtml(template.template_name)}" required style="width:95%;"></td>
+          <td><input name="customer_name" value="${escapeHtml(template.customer_name)}" required style="width:95%;"></td>
+          <td><textarea name="customer_address" style="width:95%; min-height:70px;">${escapeHtml(template.customer_address)}</textarea></td>
+          <td><input name="customer_postcode" value="${escapeHtml(template.customer_postcode)}" style="width:95%;"></td>
+          <td><input name="sort_order" value="${template.sort_order || 100}" style="width:65px;"></td>
+          <td>
+            <select name="active">
+              <option value="true" ${template.active ? "selected" : ""}>Active</option>
+              <option value="false" ${!template.active ? "selected" : ""}>Hidden</option>
+            </select>
+          </td>
+          <td><button class="small-button" type="submit">Save</button></td>
+        </form>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Account Templates</title>
+        <style>
+          ${sharedStyles()}
+          .add-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+          textarea { min-height: 80px; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Account Templates</h1>
+        <div class="subtitle">Add and edit property management/account invoice address templates.</div>
+        <div class="panel">
+          <h2>Add New Account Template</h2>
+          <form class="add-grid" method="POST" action="/invoice-templates/save">
+            <input name="template_name" placeholder="Template name e.g. Property Account" required>
+            <input name="customer_name" placeholder="Invoice name / company" required>
+            <textarea name="customer_address" placeholder="Invoice address"></textarea>
+            <input name="customer_postcode" placeholder="Invoice postcode">
+            <input name="sort_order" placeholder="Sort order" value="100">
+            <button type="submit">Add Template</button>
+          </form>
+          <div class="help">Templates auto-fill the invoice address. The site address can still be different.</div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Template</th><th>Invoice Name</th><th>Address</th><th>Postcode</th><th>Sort</th><th>Status</th><th>Save</th></tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="7">No account templates found</td></tr>`}</tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Invoice templates page error:", error);
+    res.status(500).send("Invoice templates page error. Check Render logs.");
+  }
+});
+
+app.post("/invoice-templates/save", async (req, res) => {
+  try {
+    const id = req.body.id || "";
+    const templateName = req.body.template_name || "";
+    const customerName = req.body.customer_name || "";
+    const customerAddress = req.body.customer_address || "";
+    const customerPostcode = req.body.customer_postcode || "";
+    const sortOrder = Number(req.body.sort_order || 100);
+    const active = req.body.active === "false" ? false : true;
+
+    if (id) {
+      await pool.query(`
+        UPDATE invoice_templates
+        SET template_name = $1, customer_name = $2, customer_address = $3,
+            customer_postcode = $4, sort_order = $5, active = $6, updated_at = NOW()
+        WHERE id = $7
+      `, [templateName, customerName, customerAddress, customerPostcode, sortOrder, active, id]);
+    } else {
+      await pool.query(`
+        INSERT INTO invoice_templates (
+          template_name, customer_name, customer_address, customer_postcode,
+          sort_order, active, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+      `, [templateName, customerName, customerAddress, customerPostcode, sortOrder]);
+    }
+
+    res.redirect("/invoice-templates");
+  } catch (error) {
+    console.error("Save invoice template error:", error);
+    res.status(500).send("Save invoice template error. Check Render logs.");
   }
 });
 
@@ -1237,36 +1156,20 @@ app.get("/invoices", async (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head>
-        <title>Invoices</title>
-        <style>${sharedStyles()}</style>
-      </head>
+      <head><title>Invoices</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
-
         <h1>Invoices</h1>
         <div class="subtitle">Active invoices only. Emailed invoices move into Historic Invoices.</div>
-
         <div class="panel">
           <a href="/invoices/new">Create New Invoice</a>
           <a href="/invoices/historic">Historic Invoices</a>
         </div>
-
         <table class="invoice-table">
           <thead>
-            <tr>
-              <th>Invoice</th>
-              <th>Customer / Site</th>
-              <th>Company / Payment</th>
-              <th>Date / Total</th>
-              <th>Stage</th>
-              <th>Actions</th>
-            </tr>
+            <tr><th>Invoice</th><th>Customer / Site</th><th>Company / Payment</th><th>Date / Total</th><th>Stage</th><th>Actions</th></tr>
           </thead>
-
-          <tbody>
-            ${rows || `<tr><td colspan="6">No active invoices waiting to be sent</td></tr>`}
-          </tbody>
+          <tbody>${rows || `<tr><td colspan="6">No active invoices waiting to be sent</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -1280,7 +1183,6 @@ app.get("/invoices", async (req, res) => {
 app.get("/invoices/historic", async (req, res) => {
   try {
     const postcode = (req.query.postcode || "").trim();
-
     let result;
 
     if (postcode) {
@@ -1310,43 +1212,25 @@ app.get("/invoices/historic", async (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head>
-        <title>Historic Invoices</title>
-        <style>${sharedStyles()}</style>
-      </head>
+      <head><title>Historic Invoices</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
-
         <h1>Historic Invoices</h1>
         <div class="subtitle">Invoices marked as emailed are filed here. Search by invoice or site postcode.</div>
-
         <div class="panel">
           <form class="search-form" method="GET" action="/invoices/historic">
             <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Search historic invoices by postcode">
             <button type="submit">Search</button>
           </form>
-
           <br>
-
           <a href="/invoices/historic">Clear search</a>
           <a href="/invoices">Back to active invoices</a>
         </div>
-
         <table class="invoice-table">
           <thead>
-            <tr>
-              <th>Invoice</th>
-              <th>Customer / Site</th>
-              <th>Company / Payment</th>
-              <th>Date / Total</th>
-              <th>Stage</th>
-              <th>Actions</th>
-            </tr>
+            <tr><th>Invoice</th><th>Customer / Site</th><th>Company / Payment</th><th>Date / Total</th><th>Stage</th><th>Actions</th></tr>
           </thead>
-
-          <tbody>
-            ${rows || `<tr><td colspan="6">No historic invoices found</td></tr>`}
-          </tbody>
+          <tbody>${rows || `<tr><td colspan="6">No historic invoices found</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -1384,7 +1268,6 @@ app.get("/invoices/:id/delete", async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
     const invoice = result.rows[0];
-
     if (!invoice) return res.status(404).send("Invoice not found");
 
     const company = companies[invoice.company_key] || companies.online;
@@ -1396,46 +1279,23 @@ app.get("/invoices/:id/delete", async (req, res) => {
         <title>Delete Invoice</title>
         <style>
           ${sharedStyles()}
-
-          .danger-panel {
-            max-width: 680px;
-            background: #1f2937;
-            border: 1px solid #dc2626;
-            border-radius: 16px;
-            padding: 28px;
-          }
-
-          .button-row {
-            display: flex;
-            gap: 12px;
-            margin-top: 22px;
-          }
-
-          .button-row form {
-            margin: 0;
-          }
+          .danger-panel { max-width: 680px; background: #1f2937; border: 1px solid #dc2626; border-radius: 16px; padding: 28px; }
+          .button-row { display: flex; gap: 12px; margin-top: 22px; }
+          .button-row form { margin: 0; }
         </style>
       </head>
       <body>
         ${nav(req)}
-
         <div class="danger-panel">
           <h1>Delete invoice?</h1>
           <div class="subtitle">This permanently removes the invoice from the dashboard.</div>
-
           <p><strong>Invoice:</strong> ${escapeHtml(invoice.invoice_number)}</p>
           <p><strong>Customer:</strong> ${escapeHtml(invoice.customer_name || "—")}</p>
           <p><strong>Company:</strong> ${escapeHtml(company.name)}</p>
           <p><strong>Total:</strong> ${money(invoice.total)}</p>
-
           <div class="button-row">
-            <form method="POST" action="/invoices/${invoice.id}/delete">
-              <button class="delete-button" type="submit">Yes, delete invoice</button>
-            </form>
-
-            <form method="GET" action="/invoices">
-              <button class="cancel-button" type="submit">Cancel</button>
-            </form>
+            <form method="POST" action="/invoices/${invoice.id}/delete"><button class="delete-button" type="submit">Yes, delete invoice</button></form>
+            <form method="GET" action="/invoices"><button class="cancel-button" type="submit">Cancel</button></form>
           </div>
         </div>
       </body>
@@ -1457,219 +1317,226 @@ app.post("/invoices/:id/delete", async (req, res) => {
   }
 });
 
-app.get("/invoices/new", (req, res) => {
-  const today = new Date().toLocaleDateString("en-GB", {
-    timeZone: "Europe/London",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  });
+app.get("/invoices/new", async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString("en-GB", {
+      timeZone: "Europe/London",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    });
 
-  const agentName = currentAgentName(req);
+    const agentName = currentAgentName(req);
 
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>New Invoice</title>
-      <style>
-        ${sharedStyles()}
+    const itemResult = await pool.query(`
+      SELECT *
+      FROM invoice_items
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, description ASC
+    `);
 
-        textarea {
-          min-height: 90px;
-        }
+    const templateResult = await pool.query(`
+      SELECT *
+      FROM invoice_templates
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, template_name ASC
+    `);
 
-        .line-grid {
-          display: grid;
-          grid-template-columns: 1fr 90px 140px;
-          gap: 12px;
-          margin-bottom: 12px;
-        }
+    const itemOptions = itemResult.rows.map(item => {
+      return `<option value="${item.id}" data-description="${escapeHtml(item.description)}" data-price="${Number(item.default_price || 0).toFixed(2)}">${escapeHtml(item.description)} — ${money(item.default_price)}</option>`;
+    }).join("");
 
-        .notice {
-          background: #1f2937;
-          border-left: 5px solid #f59e0b;
-          border-radius: 10px;
-          padding: 18px;
-          margin-bottom: 25px;
-          color: #d1d5db;
-        }
+    const templateOptions = templateResult.rows.map(template => {
+      return `<option value="${template.id}" data-name="${escapeHtml(template.customer_name)}" data-address="${escapeHtml(template.customer_address)}" data-postcode="${escapeHtml(template.customer_postcode)}">${escapeHtml(template.template_name)}</option>`;
+    }).join("");
 
-        .rule-box {
-          display: grid;
-          grid-template-columns: repeat(2, 1fr);
-          gap: 15px;
-          margin-top: 15px;
-        }
+    function lineBlock(number) {
+      return `
+        <div class="line-block">
+          <div class="line-grid">
+            <select name="line${number}_item_id" onchange="fillInvoiceLine(${number}, this)">
+              <option value="">Choose invoice line</option>
+              ${itemOptions}
+            </select>
+            <input name="line${number}_qty" value="${number <= 2 ? "1" : ""}" placeholder="Qty">
+            <input name="line${number}_unit_price" placeholder="Unit price">
+          </div>
+          <input class="description-input" name="line${number}_description" placeholder="Description appears on invoice">
+        </div>
+      `;
+    }
 
-        .rule {
-          background: #111827;
-          border-radius: 10px;
-          padding: 15px;
-          border: 1px solid #374151;
-        }
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>New Invoice</title>
+        <style>
+          ${sharedStyles()}
+          textarea { min-height: 90px; }
+          .line-block { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid #374151; }
+          .line-grid { display: grid; grid-template-columns: 1fr 90px 140px; gap: 12px; margin-bottom: 10px; }
+          .description-input { width: 100%; box-sizing: border-box; }
+          .notice { background: #1f2937; border-left: 5px solid #f59e0b; border-radius: 10px; padding: 18px; margin-bottom: 25px; color: #d1d5db; }
+          .rule-box { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-top: 15px; }
+          .rule { background: #111827; border-radius: 10px; padding: 15px; border: 1px solid #374151; }
+          #site-fields { margin-top: 18px; }
+          .account-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
+        </style>
 
-        #site-fields {
-          margin-top: 18px;
-        }
-      </style>
-
-      <script>
-        function toggleSiteAddress() {
-          const checkbox = document.getElementById("site_same_as_invoice");
-          const siteFields = document.getElementById("site-fields");
-
-          if (checkbox.checked) {
-            siteFields.style.display = "none";
-          } else {
-            siteFields.style.display = "block";
+        <script>
+          function toggleSiteAddress() {
+            const checkbox = document.getElementById("site_same_as_invoice");
+            const siteFields = document.getElementById("site-fields");
+            siteFields.style.display = checkbox.checked ? "none" : "block";
           }
-        }
 
-        window.addEventListener("DOMContentLoaded", toggleSiteAddress);
-      </script>
-    </head>
+          function fillInvoiceLine(number, select) {
+            const selected = select.options[select.selectedIndex];
+            const description = selected.getAttribute("data-description") || "";
+            const price = selected.getAttribute("data-price") || "";
 
-    <body>
-      ${nav(req)}
+            const descriptionInput = document.querySelector("[name='line" + number + "_description']");
+            const priceInput = document.querySelector("[name='line" + number + "_unit_price']");
+            const qtyInput = document.querySelector("[name='line" + number + "_qty']");
 
-      <h1>New Invoice</h1>
-      <div class="subtitle">Created by ${escapeHtml(agentName)}</div>
+            if (descriptionInput && description) descriptionInput.value = description;
+            if (priceInput && price) priceInput.value = price;
+            if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+          }
 
-      <div class="notice">
-        <strong>Invoice rules:</strong>
+          function fillTemplate(select) {
+            const selected = select.options[select.selectedIndex];
+            if (!selected || !selected.value) return;
 
-        <div class="rule-box">
-          <div class="rule">
-            <strong>24H Locksmiths Ltd</strong><br>
-            Bank transfer or Cash only
-          </div>
+            document.querySelector("[name='customer_name']").value = selected.getAttribute("data-name") || "";
+            document.querySelector("[name='customer_address']").value = selected.getAttribute("data-address") || "";
+            document.querySelector("[name='customer_postcode']").value = selected.getAttribute("data-postcode") || "";
 
-          <div class="rule">
-            <strong>24H Online Services Ltd</strong><br>
-            Card or Cash only
-          </div>
-        </div>
-      </div>
+            document.getElementById("site_same_as_invoice").checked = false;
+            toggleSiteAddress();
+          }
 
-      <form method="POST" action="/invoices/create">
-        <div class="panel">
-          <h2>Invoice Details</h2>
+          window.addEventListener("DOMContentLoaded", toggleSiteAddress);
+        </script>
+      </head>
 
-          <div class="grid-3">
-            <select name="company_key" required>
-              <option value="locksmiths">24H Locksmiths Ltd</option>
-              <option value="online">24H Online Services Ltd</option>
-            </select>
+      <body>
+        ${nav(req)}
 
-            <select name="payment_method" required>
-              <option>Bank transfer</option>
-              <option>Cash</option>
-              <option>Card</option>
-            </select>
+        <h1>New Invoice</h1>
+        <div class="subtitle">Created by ${escapeHtml(agentName)}</div>
 
-            <input name="invoice_number" placeholder="Invoice / Job No." required>
-          </div>
-
-          <br>
-
-          <div class="grid-3">
-            <input name="invoice_date" value="${today}" placeholder="Date">
-
-            <input value="Created by ${escapeHtml(agentName)}" disabled>
-
-            <select name="invoice_stage" required>
-              ${invoiceStageOptions("Draft only")}
-            </select>
-          </div>
-
-          <br>
-
-          <div class="grid-3">
-            <input name="locksmith_name" placeholder="Locksmith name">
-
-            <select name="paid_status">
-              <option>Unpaid</option>
-              <option>Paid with thanks</option>
-            </select>
-
-            <input name="customer_email" placeholder="Customer email">
+        <div class="notice">
+          <strong>Invoice rules:</strong>
+          <div class="rule-box">
+            <div class="rule"><strong>24H Locksmiths Ltd</strong><br>Bank transfer or Cash only</div>
+            <div class="rule"><strong>24H Online Services Ltd</strong><br>Card or Cash only</div>
           </div>
         </div>
 
-        <div class="panel">
-          <h2>Customer / Invoice Address</h2>
-
-          <div class="grid-2">
-            <input name="customer_name" placeholder="Customer name" required>
-            <input name="customer_postcode" placeholder="Invoice postcode">
-          </div>
-
-          <br>
-
-          <textarea name="customer_address" placeholder="Invoice address"></textarea>
-
-          <label class="checkbox-row">
-            <input
-              id="site_same_as_invoice"
-              name="site_same_as_invoice"
-              type="checkbox"
-              value="yes"
-              checked
-              onchange="toggleSiteAddress()"
-            >
-            Site address same as invoice address
-          </label>
-
-          <div id="site-fields">
-            <h2>Site Address</h2>
-            <div class="help">Use this only if the job location is different from the invoice address.</div>
-
-            <br>
-
-            <div class="grid-2">
-              <input name="site_postcode" placeholder="Site postcode">
-              <input name="site_address_line" placeholder="Quick site address line">
+        <form method="POST" action="/invoices/create">
+          <div class="panel">
+            <h2>Invoice Details</h2>
+            <div class="grid-3">
+              <select name="company_key" required>
+                <option value="locksmiths">24H Locksmiths Ltd</option>
+                <option value="online">24H Online Services Ltd</option>
+              </select>
+              <select name="payment_method" required>
+                <option>Bank transfer</option>
+                <option>Cash</option>
+                <option>Card</option>
+              </select>
+              <input name="invoice_number" placeholder="Invoice / Job No." required>
             </div>
 
             <br>
 
-            <textarea name="site_address" placeholder="Full site address"></textarea>
+            <div class="grid-3">
+              <input name="invoice_date" value="${today}" placeholder="Date">
+              <input value="Created by ${escapeHtml(agentName)}" disabled>
+              <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
+            </div>
+
+            <br>
+
+            <div class="grid-3">
+              <input name="locksmith_name" placeholder="Locksmith name">
+              <select name="paid_status">
+                <option>Unpaid</option>
+                <option>Paid with thanks</option>
+              </select>
+              <input name="customer_email" placeholder="Customer email">
+            </div>
           </div>
-        </div>
 
-        <div class="panel">
-          <h2>Line Items</h2>
+          <div class="panel">
+            <h2>Account Template / Invoice Address</h2>
 
-          <div class="line-grid">
-            <input name="line1_description" value="Locksmith call out">
-            <input name="line1_qty" value="1">
-            <input name="line1_unit_price" value="40.00">
+            <div class="account-row">
+              <select name="invoice_template_id" onchange="fillTemplate(this)">
+                <option value="">Normal customer / no template</option>
+                ${templateOptions}
+              </select>
+              <a href="/invoice-templates">Edit account templates</a>
+            </div>
+
+            <br>
+
+            <div class="grid-2">
+              <input name="customer_name" placeholder="Customer / invoice name" required>
+              <input name="customer_postcode" placeholder="Invoice postcode">
+            </div>
+
+            <br>
+
+            <textarea name="customer_address" placeholder="Invoice address"></textarea>
+
+            <label class="checkbox-row">
+              <input id="site_same_as_invoice" name="site_same_as_invoice" type="checkbox" value="yes" checked onchange="toggleSiteAddress()">
+              Site address same as invoice address
+            </label>
+
+            <div id="site-fields">
+              <h2>Site Address</h2>
+              <div class="help">Use this if the job location is different from the invoice/account address.</div>
+              <br>
+              <div class="grid-2">
+                <input name="site_postcode" placeholder="Site postcode">
+                <input name="site_address_line" placeholder="Quick site address line">
+              </div>
+              <br>
+              <textarea name="site_address" placeholder="Full site address"></textarea>
+            </div>
           </div>
 
-          <div class="line-grid">
-            <input name="line2_description" value="Labour to open security lock">
-            <input name="line2_qty" value="1">
-            <input name="line2_unit_price" value="60.00">
+          <div class="panel">
+            <h2>Line Items</h2>
+            <div class="help">Pick a dropdown line, then adjust qty or price if needed. Use Other for custom lines.</div>
+            <br>
+            ${lineBlock(1)}
+            ${lineBlock(2)}
+            ${lineBlock(3)}
+            ${lineBlock(4)}
+            ${lineBlock(5)}
+            <a href="/invoice-items">Edit invoice dropdown lines</a>
           </div>
 
-          <div class="line-grid">
-            <input name="line3_description" placeholder="Optional extra line">
-            <input name="line3_qty" placeholder="Qty">
-            <input name="line3_unit_price" placeholder="Unit price">
+          <div class="panel">
+            <h2>Notes</h2>
+            <textarea name="notes" placeholder="Invoice notes">6 months warranty on parts fitted</textarea>
           </div>
-        </div>
 
-        <div class="panel">
-          <h2>Notes</h2>
-          <textarea name="notes" placeholder="Invoice notes">6 months warranty on parts fitted</textarea>
-        </div>
-
-        <button type="submit">Generate PDF Invoice</button>
-      </form>
-    </body>
-    </html>
-  `);
+          <button type="submit">Generate PDF Invoice</button>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("New invoice page error:", error);
+    res.status(500).send("New invoice page error. Check Render logs.");
+  }
 });
 
 app.post("/invoices/create", async (req, res) => {
@@ -1678,9 +1545,7 @@ app.post("/invoices/create", async (req, res) => {
     const paymentMethod = req.body.payment_method;
     const dispatcherName = currentAgentName(req);
 
-    if (!companies[companyKey]) {
-      return res.status(400).send("Invalid company selected.");
-    }
+    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
 
     if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
       return res.status(400).send(`
@@ -1705,56 +1570,29 @@ app.post("/invoices/create", async (req, res) => {
       ? req.body.customer_postcode
       : req.body.site_postcode;
 
-    const lineItems = [
-      {
-        description: req.body.line1_description,
-        qty: Number(req.body.line1_qty || 0),
-        unitPrice: Number(req.body.line1_unit_price || 0)
-      },
-      {
-        description: req.body.line2_description,
-        qty: Number(req.body.line2_qty || 0),
-        unitPrice: Number(req.body.line2_unit_price || 0)
-      },
-      {
-        description: req.body.line3_description,
-        qty: Number(req.body.line3_qty || 0),
-        unitPrice: Number(req.body.line3_unit_price || 0)
+    const lineItems = [];
+
+    for (let i = 1; i <= 5; i += 1) {
+      const description = (req.body[`line${i}_description`] || "").trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
+
+      if (description && qty > 0) {
+        lineItems.push({ description, qty, unitPrice });
       }
-    ].filter(item => item.description && item.qty > 0);
+    }
 
-    const subtotal = lineItems.reduce((sum, item) => {
-      return sum + item.qty * item.unitPrice;
-    }, 0);
-
+    const subtotal = lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
     const vatAmount = subtotal * 0.2;
     const total = subtotal + vatAmount;
 
     const result = await pool.query(`
       INSERT INTO invoices (
-        invoice_number,
-        company_key,
-        payment_method,
-        dispatcher_name,
-        invoice_stage,
-        stage_updated_by,
-        stage_updated_at,
-        customer_name,
-        customer_address,
-        customer_postcode,
-        site_same_as_invoice,
-        site_address,
-        site_postcode,
-        customer_email,
-        invoice_date,
-        locksmith_name,
-        paid_status,
-        line_items,
-        subtotal,
-        vat_amount,
-        total,
-        notes,
-        updated_at
+        invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
+        stage_updated_by, stage_updated_at, customer_name, customer_address,
+        customer_postcode, site_same_as_invoice, site_address, site_postcode,
+        customer_email, invoice_date, locksmith_name, paid_status, line_items,
+        subtotal, vat_amount, total, notes, updated_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
       RETURNING id
@@ -1791,12 +1629,8 @@ app.post("/invoices/create", async (req, res) => {
 
 app.get("/invoices/:id/pdf", async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [
-      req.params.id
-    ]);
-
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
     const invoice = result.rows[0];
-
     if (!invoice) return res.status(404).send("Invoice not found");
 
     const company = companies[invoice.company_key] || companies.online;
@@ -1806,26 +1640,13 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       : JSON.parse(invoice.line_items || "[]");
 
     const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
-
-    const siteAddress = siteSameAsInvoice
-      ? invoice.customer_address
-      : invoice.site_address;
-
-    const sitePostcode = siteSameAsInvoice
-      ? invoice.customer_postcode
-      : invoice.site_postcode;
+    const siteAddress = siteSameAsInvoice ? invoice.customer_address : invoice.site_address;
+    const sitePostcode = siteSameAsInvoice ? invoice.customer_postcode : invoice.site_postcode;
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="invoice-${invoice.invoice_number}.pdf"`
-    );
+    res.setHeader("Content-Disposition", `inline; filename="invoice-${invoice.invoice_number}.pdf"`);
 
-    const doc = new PDFDocument({
-      size: "A4",
-      margin: 50
-    });
-
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
     doc.pipe(res);
 
     const logoPath = path.join(__dirname, company.logo);
@@ -1857,33 +1678,22 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.font("Helvetica").fontSize(9.5)
       .text(pdfText(invoice.customer_name), 65, 217, { width: 190 })
-      .text(pdfText(invoice.customer_address), 65, 233, {
-        width: 190,
-        height: 40
-      })
-      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, {
-        width: 190
-      });
+      .text(pdfText(invoice.customer_address), 65, 233, { width: 190, height: 40 })
+      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, { width: 190 });
 
     doc.roundedRect(305, 185, 240, 110, 8).stroke();
     doc.fontSize(11).font("Helvetica-Bold").text("Site Address", 320, 197);
 
     doc.font("Helvetica").fontSize(9.5)
-      .text(siteSameAsInvoice ? "Same as invoice address" : pdfText(siteAddress), 320, 217, {
-        width: 190,
-        height: 56
-      })
-      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, {
-        width: 190
-      });
+      .text(siteSameAsInvoice ? "Same as invoice address" : pdfText(siteAddress), 320, 217, { width: 190, height: 56 })
+      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, { width: 190 });
 
     doc.roundedRect(50, 310, 495, 52, 8).stroke();
     doc.fontSize(11).font("Helvetica-Bold").text("Invoice Details", 65, 322);
 
     doc.font("Helvetica").fontSize(10)
       .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
-      .text(`Status: ${pdfText(invoice.paid_status)}`, 210, 342)
-      .text(`Dispatcher: ${pdfText(invoice.dispatcher_name)}`, 375, 342);
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 250, 342);
 
     const tableTop = 390;
 
@@ -1935,8 +1745,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       doc.font("Helvetica").fontSize(10)
         .text("Please pay via BACS transfer to:", 70, paymentBoxY + 34);
 
-      doc.font("Helvetica-Bold")
-        .text(company.name, 70, paymentBoxY + 55, { width: 220 });
+      doc.font("Helvetica-Bold").text(company.name, 70, paymentBoxY + 55, { width: 220 });
 
       doc.font("Helvetica")
         .text(`Sort code: ${company.sortCode}`, 70, paymentBoxY + 73)
@@ -1944,15 +1753,11 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     } else if (invoice.payment_method === "Card") {
       doc.font("Helvetica").fontSize(10)
         .text("Payment method: Card", 70, paymentBoxY + 34)
-        .text("Please use the card payment link provided separately.", 70, paymentBoxY + 55, {
-          width: 210
-        });
+        .text("Please use the card payment link provided separately.", 70, paymentBoxY + 55, { width: 210 });
     } else {
       doc.font("Helvetica").fontSize(10)
         .text("Payment method: Cash", 70, paymentBoxY + 34)
-        .text("Cash payment to be collected/confirmed by the office.", 70, paymentBoxY + 55, {
-          width: 210
-        });
+        .text("Cash payment to be collected/confirmed by the office.", 70, paymentBoxY + 55, { width: 210 });
     }
 
     doc.roundedRect(330, paymentBoxY, 215, 105, 8).stroke();
@@ -1962,43 +1767,135 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       pdfText(invoice.notes || "6 months warranty on parts fitted"),
       350,
       paymentBoxY + 35,
-      {
-        width: 175,
-        height: 55
-      }
+      { width: 175, height: 55 }
     );
 
-    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 718, {
-      align: "center",
-      width: 495
-    });
+    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 718, { align: "center", width: 495 });
 
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 733, {
-        align: "center",
-        width: 495
-      })
-      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, {
-        align: "center",
-        width: 495
-      });
+      .text(company.footer, 50, 733, { align: "center", width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, { align: "center", width: 495 });
 
     doc.moveTo(50, 768).lineTo(545, 768).stroke();
 
-    doc.fontSize(9).font("Helvetica-Oblique").text(
-      "Thank you for using our services",
-      50,
-      780,
-      {
-        align: "center",
-        width: 495
-      }
-    );
+    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 780, {
+      align: "center",
+      width: 495
+    });
 
     doc.end();
   } catch (error) {
     console.error("PDF invoice error:", error);
     res.status(500).send("PDF invoice error. Check Render logs.");
+  }
+});
+
+/* Existing dispatch, reports and technician routes are preserved below in compact form. */
+
+app.get("/reports", async (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Reports</title><style>${sharedStyles()}</style></head>
+    <body>
+      ${nav(req)}
+      <h1>Reports</h1>
+      <div class="subtitle">Reports are still available. Use CSV downloads below.</div>
+      <div class="panel">
+        <a href="/reports/invoices.csv">Download invoices CSV</a>
+        <a href="/reports/calls.csv">Download calls CSV</a>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.get("/reports/invoices.csv", async (req, res) => {
+  try {
+    const reportRange = buildReportRange(req.query);
+    const result = await pool.query(`
+      SELECT *
+      FROM invoices
+      WHERE created_at >= $1
+      AND created_at < $2
+      ORDER BY created_at DESC
+    `, [reportRange.start, reportRange.end]);
+
+    const header = [
+      "Invoice Number", "Created At", "Invoice Date", "Customer", "Customer Postcode",
+      "Site Postcode", "Company", "Payment Method", "Paid Status", "Stage",
+      "Dispatcher", "Subtotal", "VAT", "Total"
+    ];
+
+    const lines = [header.map(csvValue).join(",")];
+
+    result.rows.forEach(invoice => {
+      const company = companies[invoice.company_key] || {};
+      const sitePostcode = invoice.site_same_as_invoice ? invoice.customer_postcode : invoice.site_postcode;
+
+      lines.push([
+        invoice.invoice_number,
+        formatDateTime(invoice.created_at),
+        invoice.invoice_date,
+        invoice.customer_name,
+        invoice.customer_postcode,
+        sitePostcode,
+        company.name || invoice.company_key,
+        invoice.payment_method,
+        invoice.paid_status,
+        invoice.invoice_stage,
+        invoice.dispatcher_name,
+        invoice.subtotal,
+        invoice.vat_amount,
+        invoice.total
+      ].map(csvValue).join(","));
+    });
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="invoice-report-${reportRange.fromValue}-to-${reportRange.toValue}.csv"`);
+    res.send(lines.join("\n"));
+  } catch (error) {
+    console.error("Invoice CSV error:", error);
+    res.status(500).send("Invoice CSV error. Check Render logs.");
+  }
+});
+
+app.get("/reports/calls.csv", async (req, res) => {
+  try {
+    const reportRange = buildReportRange(req.query);
+    const result = await pool.query(`
+      SELECT *
+      FROM calls
+      WHERE start_time >= $1
+      AND start_time < $2
+      ORDER BY start_time DESC
+    `, [reportRange.start, reportRange.end]);
+
+    const header = ["Call Time", "From", "To", "Answered By Extension", "Answered By Agent", "Answer Type", "Duration Seconds", "Call Result"];
+    const lines = [header.map(csvValue).join(",")];
+
+    result.rows.forEach(call => {
+      const agent = agents[call.answered_by] || "";
+      const resultText = call.answered_by && agent ? "Answered" : "Missed";
+
+      lines.push([
+        formatDateTimeWithSeconds(call.start_time),
+        call.from_number,
+        call.to_number,
+        call.answered_by,
+        agent,
+        call.answer_type,
+        call.duration_seconds,
+        resultText
+      ].map(csvValue).join(","));
+    });
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="call-report-${reportRange.fromValue}-to-${reportRange.toValue}.csv"`);
+    res.send(lines.join("\n"));
+  } catch (error) {
+    console.error("Calls CSV error:", error);
+    res.status(500).send("Calls CSV error. Check Render logs.");
   }
 });
 
@@ -2012,45 +1909,30 @@ app.get("/dispatch", async (req, res) => {
 
     if (customerPostcode) {
       customerLocation = await lookupPostcodeLocation(customerPostcode);
-
       customerLocationMessage = customerLocation.ok
         ? `Customer postcode located using ${customerLocation.precision.toLowerCase()} postcode data.`
         : `Could not locate customer postcode: ${customerPostcode}`;
     }
 
-    const result = await pool.query(`
-      SELECT *
-      FROM technicians
-      WHERE active = TRUE
-      ORDER BY updated_at DESC
-    `);
-
+    const result = await pool.query(`SELECT * FROM technicians WHERE active = TRUE ORDER BY updated_at DESC`);
     const candidates = result.rows.filter(tech => isUsableForDispatch(tech.status));
 
-    const candidatesWithDistance = await Promise.all(
-      candidates.map(async tech => {
-        const location = getBestLocation(tech);
-        const techLocation = await lookupPostcodeLocation(location.postcode);
+    const candidatesWithDistance = await Promise.all(candidates.map(async tech => {
+      const location = getBestLocation(tech);
+      const techLocation = await lookupPostcodeLocation(location.postcode);
 
-        let distance = null;
+      let distance = null;
+      if (customerLocation && customerLocation.ok && techLocation && techLocation.ok) {
+        distance = distanceMiles(
+          customerLocation.latitude,
+          customerLocation.longitude,
+          techLocation.latitude,
+          techLocation.longitude
+        );
+      }
 
-        if (customerLocation && customerLocation.ok && techLocation && techLocation.ok) {
-          distance = distanceMiles(
-            customerLocation.latitude,
-            customerLocation.longitude,
-            techLocation.latitude,
-            techLocation.longitude
-          );
-        }
-
-        return {
-          tech,
-          location,
-          techLocation,
-          distance
-        };
-      })
-    );
+      return { tech, location, techLocation, distance };
+    }));
 
     candidatesWithDistance.sort((a, b) => {
       const statusDiff = dispatchRank(a.tech.status) - dispatchRank(b.tech.status);
@@ -2069,16 +1951,11 @@ app.get("/dispatch", async (req, res) => {
     const mapTechnicians = candidatesWithDistance
       .filter(item => {
         if (!item.techLocation || !item.techLocation.ok) return false;
-
-        if (customerLocation && customerLocation.ok) {
-          return item.distance !== null && item.distance <= 25;
-        }
-
+        if (customerLocation && customerLocation.ok) return item.distance !== null && item.distance <= 25;
         return true;
       })
       .map((item, index) => {
         const tech = item.tech;
-
         return {
           rank: index + 1,
           name: tech.name || "",
@@ -2115,38 +1992,19 @@ app.get("/dispatch", async (req, res) => {
       const statusClass = technicianStatusClass(tech.status);
       const priority = tech.priority || "Normal";
       const priorityBadgeClass = priorityClass(priority);
-
-      const precision = item.techLocation.ok
-        ? item.techLocation.precision
-        : postcodePrecision(item.location.postcode);
-
-      const precisionText = precision === "Approx"
-        ? `<span class="warning-text">Approx</span>`
-        : escapeHtml(precision);
-
-      const distanceText = customerPostcode
-        ? formatDistance(item.distance)
-        : "Enter postcode";
+      const precision = item.techLocation.ok ? item.techLocation.precision : postcodePrecision(item.location.postcode);
+      const precisionText = precision === "Approx" ? `<span class="warning-text">Approx</span>` : escapeHtml(precision);
+      const distanceText = customerPostcode ? formatDistance(item.distance) : "Enter postcode";
 
       return `
         <tr>
           <td>${index + 1}</td>
-          <td>
-            <strong>${escapeHtml(tech.name)}</strong><br>
-            <span class="muted">${escapeHtml(tech.phone)}</span>
-          </td>
+          <td><strong>${escapeHtml(tech.name)}</strong><br><span class="muted">${escapeHtml(tech.phone)}</span></td>
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
           <td><span class="pill ${priorityBadgeClass}">${escapeHtml(priority)}</span></td>
           <td>${escapeHtml(tech.available_from || "Now / check")}</td>
-          <td>
-            ${escapeHtml(item.location.postcode || "No postcode")}
-            <br>
-            <span class="muted">${escapeHtml(item.location.source)} · ${precisionText}</span>
-          </td>
-          <td>
-            <span class="distance">${distanceText}</span><br>
-            <span class="muted">Straight-line estimate</span>
-          </td>
+          <td>${escapeHtml(item.location.postcode || "No postcode")}<br><span class="muted">${escapeHtml(item.location.source)} · ${precisionText}</span></td>
+          <td><span class="distance">${distanceText}</span><br><span class="muted">Straight-line estimate</span></td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
           <td>${formatDateTimeWithSeconds(tech.updated_at)}</td>
@@ -2159,307 +2017,63 @@ app.get("/dispatch", async (req, res) => {
       <html>
       <head>
         <title>Dispatch Map</title>
-
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
         <style>
           ${sharedStyles()}
-
-          .leaflet-container {
-            overflow: hidden;
-            position: relative;
-            outline-style: none;
-          }
-
-          .leaflet-pane,
-          .leaflet-tile,
-          .leaflet-marker-icon,
-          .leaflet-marker-shadow,
-          .leaflet-tile-container,
-          .leaflet-pane > svg,
-          .leaflet-pane > canvas,
-          .leaflet-zoom-box,
-          .leaflet-image-layer,
-          .leaflet-layer {
-            position: absolute;
-            left: 0;
-            top: 0;
-          }
-
-          .leaflet-container {
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-            line-height: 1.5;
-          }
-
-          .leaflet-tile,
-          .leaflet-marker-icon,
-          .leaflet-marker-shadow {
-            user-select: none;
-            -webkit-user-drag: none;
-          }
-
-          .leaflet-tile {
-            filter: inherit;
-            visibility: hidden;
-          }
-
-          .leaflet-tile-loaded {
-            visibility: inherit;
-          }
-
-          .leaflet-zoom-animated {
-            transform-origin: 0 0;
-          }
-
-          .leaflet-map-pane {
-            z-index: 400;
-          }
-
-          .leaflet-tile-pane {
-            z-index: 200;
-          }
-
-          .leaflet-overlay-pane {
-            z-index: 400;
-          }
-
-          .leaflet-shadow-pane {
-            z-index: 500;
-          }
-
-          .leaflet-marker-pane {
-            z-index: 600;
-          }
-
-          .leaflet-tooltip-pane {
-            z-index: 650;
-          }
-
-          .leaflet-popup-pane {
-            z-index: 700;
-          }
-
-          .leaflet-control {
-            position: relative;
-            z-index: 800;
-            pointer-events: auto;
-          }
-
-          .leaflet-top,
-          .leaflet-bottom {
-            position: absolute;
-            z-index: 1000;
-            pointer-events: none;
-          }
-
-          .leaflet-top {
-            top: 0;
-          }
-
-          .leaflet-right {
-            right: 0;
-          }
-
-          .leaflet-bottom {
-            bottom: 0;
-          }
-
-          .leaflet-left {
-            left: 0;
-          }
-
-          .leaflet-control-zoom {
-            border: 2px solid rgba(0,0,0,0.2);
-            background-clip: padding-box;
-            border-radius: 4px;
-            margin-left: 10px;
-            margin-top: 10px;
-          }
-
-          .leaflet-control-zoom a {
-            background-color: white;
-            border-bottom: 1px solid #ccc;
-            color: black;
-            display: block;
-            height: 26px;
-            line-height: 26px;
-            text-align: center;
-            text-decoration: none;
-            width: 26px;
-            margin: 0;
-            font-size: 18px;
-          }
-
-          .leaflet-popup {
-            position: absolute;
-            text-align: center;
-            margin-bottom: 20px;
-          }
-
-          .leaflet-popup-content-wrapper {
-            background: white;
-            border-radius: 12px;
-            padding: 1px;
-            text-align: left;
-            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
-          }
-
-          .leaflet-popup-content {
-            margin: 13px 19px;
-            line-height: 1.45;
-            color: #111827;
-          }
-
-          .leaflet-popup-tip-container {
-            width: 40px;
-            height: 20px;
-            position: absolute;
-            left: 50%;
-            margin-left: -20px;
-            overflow: hidden;
-            pointer-events: none;
-          }
-
-          .leaflet-popup-tip {
-            width: 17px;
-            height: 17px;
-            padding: 1px;
-            margin: -10px auto 0;
-            background: white;
-            transform: rotate(45deg);
-            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
-          }
-
-          form.search {
-            display: grid;
-            grid-template-columns: 2fr 2fr 1fr;
-            gap: 15px;
-          }
-
-          .notice {
-            background: #1f2937;
-            border-left: 5px solid #f59e0b;
-            border-radius: 10px;
-            padding: 18px;
-            margin-bottom: 25px;
-            color: #d1d5db;
-          }
-
-          .notice.good {
-            border-left-color: #16a34a;
-          }
-
-          .notice.bad {
-            border-left-color: #dc2626;
-          }
-
-          #dispatch-map {
-            height: 680px;
-            width: 100%;
-            border-radius: 16px;
-            overflow: hidden;
-            border: 1px solid #374151;
-            background: #111827;
-            margin-bottom: 28px;
-          }
-
-          .map-summary {
-            background: #1f2937;
-            border: 1px solid #374151;
-            border-radius: 14px;
-            padding: 16px 20px;
-            margin-bottom: 20px;
-            color: #d1d5db;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 18px;
-            align-items: center;
-          }
-
-          .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-          }
-
-          .legend-dot {
-            width: 13px;
-            height: 13px;
-            border-radius: 50%;
-            display: inline-block;
-          }
-
+          .leaflet-container { overflow: hidden; position: relative; outline-style: none; }
+          .leaflet-pane, .leaflet-tile, .leaflet-marker-icon, .leaflet-marker-shadow, .leaflet-tile-container, .leaflet-pane > svg, .leaflet-pane > canvas, .leaflet-zoom-box, .leaflet-image-layer, .leaflet-layer { position: absolute; left: 0; top: 0; }
+          .leaflet-container { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.5; }
+          .leaflet-tile, .leaflet-marker-icon, .leaflet-marker-shadow { user-select: none; -webkit-user-drag: none; }
+          .leaflet-tile { filter: inherit; visibility: hidden; }
+          .leaflet-tile-loaded { visibility: inherit; }
+          .leaflet-zoom-animated { transform-origin: 0 0; }
+          .leaflet-map-pane { z-index: 400; }
+          .leaflet-tile-pane { z-index: 200; }
+          .leaflet-overlay-pane { z-index: 400; }
+          .leaflet-shadow-pane { z-index: 500; }
+          .leaflet-marker-pane { z-index: 600; }
+          .leaflet-tooltip-pane { z-index: 650; }
+          .leaflet-popup-pane { z-index: 700; }
+          .leaflet-control { position: relative; z-index: 800; pointer-events: auto; }
+          .leaflet-top, .leaflet-bottom { position: absolute; z-index: 1000; pointer-events: none; }
+          .leaflet-top { top: 0; }
+          .leaflet-right { right: 0; }
+          .leaflet-bottom { bottom: 0; }
+          .leaflet-left { left: 0; }
+          .leaflet-control-zoom { border: 2px solid rgba(0,0,0,0.2); background-clip: padding-box; border-radius: 4px; margin-left: 10px; margin-top: 10px; }
+          .leaflet-control-zoom a { background-color: white; border-bottom: 1px solid #ccc; color: black; display: block; height: 26px; line-height: 26px; text-align: center; text-decoration: none; width: 26px; margin: 0; font-size: 18px; }
+          .leaflet-popup { position: absolute; text-align: center; margin-bottom: 20px; }
+          .leaflet-popup-content-wrapper { background: white; border-radius: 12px; padding: 1px; text-align: left; box-shadow: 0 3px 14px rgba(0,0,0,0.4); }
+          .leaflet-popup-content { margin: 13px 19px; line-height: 1.45; color: #111827; }
+          .leaflet-popup-tip-container { width: 40px; height: 20px; position: absolute; left: 50%; margin-left: -20px; overflow: hidden; pointer-events: none; }
+          .leaflet-popup-tip { width: 17px; height: 17px; padding: 1px; margin: -10px auto 0; background: white; transform: rotate(45deg); box-shadow: 0 3px 14px rgba(0,0,0,0.4); }
+          form.search { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 15px; }
+          .notice { background: #1f2937; border-left: 5px solid #f59e0b; border-radius: 10px; padding: 18px; margin-bottom: 25px; color: #d1d5db; }
+          .notice.good { border-left-color: #16a34a; }
+          .notice.bad { border-left-color: #dc2626; }
+          #dispatch-map { height: 680px; width: 100%; border-radius: 16px; overflow: hidden; border: 1px solid #374151; background: #111827; margin-bottom: 28px; }
+          .map-summary { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 16px 20px; margin-bottom: 20px; color: #d1d5db; display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+          .legend-item { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+          .legend-dot { width: 13px; height: 13px; border-radius: 50%; display: inline-block; }
           .dot-customer { background: #a855f7; }
           .dot-available { background: #16a34a; }
           .dot-soon { background: #f59e0b; }
           .dot-onjob { background: #2563eb; }
           .dot-other { background: #6b7280; }
-
-          .leaflet-popup-content strong {
-            font-size: 15px;
-          }
-
-          .marker-label {
-            background: white;
-            border: 2px solid #111827;
-            border-radius: 999px;
-            width: 30px;
-            height: 30px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #111827;
-            font-weight: bold;
-            font-size: 13px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-          }
-
-          .marker-customer {
-            background: #a855f7;
-            color: white;
-          }
-
-          .marker-available {
-            background: #16a34a;
-            color: white;
-          }
-
-          .marker-soon {
-            background: #f59e0b;
-            color: black;
-          }
-
-          .marker-onjob {
-            background: #2563eb;
-            color: white;
-          }
-
-          .marker-other {
-            background: #6b7280;
-            color: white;
-          }
-
-          @media (max-width: 900px) {
-            form.search {
-              grid-template-columns: 1fr;
-            }
-
-            #dispatch-map {
-              height: 540px;
-            }
-          }
+          .marker-label { background: white; border: 2px solid #111827; border-radius: 999px; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; color: #111827; font-weight: bold; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+          .marker-customer { background: #a855f7; color: white; }
+          .marker-available { background: #16a34a; color: white; }
+          .marker-soon { background: #f59e0b; color: black; }
+          .marker-onjob { background: #2563eb; color: white; }
+          .marker-other { background: #6b7280; color: white; }
+          @media (max-width: 900px) { form.search { grid-template-columns: 1fr; } #dispatch-map { height: 540px; } }
         </style>
       </head>
-
       <body>
         ${nav(req)}
-
         <h1>Dispatch Map</h1>
         <div class="subtitle">Search a postcode to zoom into that region only</div>
-
         <div class="panel">
           <form class="search" method="GET" action="/dispatch">
             <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. SE13 5BY">
@@ -2467,130 +2081,59 @@ app.get("/dispatch", async (req, res) => {
             <button type="submit">Find Locksmith</button>
           </form>
         </div>
-
         ${
           customerPostcode
-            ? `<div class="notice ${customerLocation && customerLocation.ok ? "good" : "bad"}">
-                <strong>${escapeHtml(customerPostcode)}</strong> — ${escapeHtml(customerLocationMessage)}
-                <br>
-                The map is zoomed into this postcode region. Technician pins shown are within roughly 25 miles.
-              </div>`
-            : `<div class="notice">
-                Enter a customer postcode to zoom into that area and show nearby locksmiths.
-              </div>`
+            ? `<div class="notice ${customerLocation && customerLocation.ok ? "good" : "bad"}"><strong>${escapeHtml(customerPostcode)}</strong> — ${escapeHtml(customerLocationMessage)}<br>The map is zoomed into this postcode region. Technician pins shown are within roughly 25 miles.</div>`
+            : `<div class="notice">Enter a customer postcode to zoom into that area and show nearby locksmiths.</div>`
         }
-
         <div class="map-summary">
-          <div class="legend-item">
-            <span class="legend-dot dot-customer"></span>
-            Customer
-          </div>
-
-          <div class="legend-item">
-            <span class="legend-dot dot-available"></span>
-            Available
-          </div>
-
-          <div class="legend-item">
-            <span class="legend-dot dot-soon"></span>
-            Available soon
-          </div>
-
-          <div class="legend-item">
-            <span class="legend-dot dot-onjob"></span>
-            On job
-          </div>
-
-          <div class="legend-item">
-            <span class="legend-dot dot-other"></span>
-            Other usable status
-          </div>
-
-          <div class="legend-item muted">
-            Straight-line distance only, not driving time.
-          </div>
+          <div class="legend-item"><span class="legend-dot dot-customer"></span>Customer</div>
+          <div class="legend-item"><span class="legend-dot dot-available"></span>Available</div>
+          <div class="legend-item"><span class="legend-dot dot-soon"></span>Available soon</div>
+          <div class="legend-item"><span class="legend-dot dot-onjob"></span>On job</div>
+          <div class="legend-item"><span class="legend-dot dot-other"></span>Other usable status</div>
+          <div class="legend-item muted">Straight-line distance only, not driving time.</div>
         </div>
-
         <div id="dispatch-map"></div>
-
         <h2>Ranked Technician List</h2>
-
         <table>
           <thead>
             <tr>
-              <th>Rank</th>
-              <th>Technician</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Available From</th>
-              <th>Location</th>
-              <th>Distance</th>
-              <th>Skills</th>
-              <th>Notes</th>
-              <th>Last Updated</th>
+              <th>Rank</th><th>Technician</th><th>Status</th><th>Priority</th><th>Available From</th><th>Location</th><th>Distance</th><th>Skills</th><th>Notes</th><th>Last Updated</th>
             </tr>
           </thead>
-
-          <tbody>
-            ${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}
-          </tbody>
+          <tbody>${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}</tbody>
         </table>
-
         <script>
           const mapData = ${mapDataJson};
-
-          const map = L.map("dispatch-map", {
-            scrollWheelZoom: true
-          });
+          const map = L.map("dispatch-map", { scrollWheelZoom: true });
 
           L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
             maxZoom: 19,
             attribution: "&copy; OpenStreetMap contributors"
           }).addTo(map);
 
-          setTimeout(function() {
-            map.invalidateSize();
-          }, 250);
+          setTimeout(function() { map.invalidateSize(); }, 250);
 
           const defaultLondonCentre = [51.5072, -0.1276];
-
           const hasCustomer = !!mapData.customer;
 
           if (hasCustomer) {
             const zoomLevel = mapData.customer.precision === "Exact" ? 14 : 12;
-
-            map.setView(
-              [mapData.customer.latitude, mapData.customer.longitude],
-              zoomLevel
-            );
+            map.setView([mapData.customer.latitude, mapData.customer.longitude], zoomLevel);
           } else {
             map.setView(defaultLondonCentre, 10);
           }
 
           function safeText(value) {
-            return String(value || "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#039;");
+            return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
           }
 
           function markerClassForStatus(status) {
             const value = String(status || "").toLowerCase();
-
-            if (value.includes("available") && !value.includes("soon")) {
-              return "marker-available";
-            }
-
-            if (value.includes("soon")) {
-              return "marker-soon";
-            }
-
-            if (value.includes("job")) {
-              return "marker-onjob";
-            }
-
+            if (value.includes("available") && !value.includes("soon")) return "marker-available";
+            if (value.includes("soon")) return "marker-soon";
+            if (value.includes("job")) return "marker-onjob";
             return "marker-other";
           }
 
@@ -2605,20 +2148,11 @@ app.get("/dispatch", async (req, res) => {
           }
 
           if (mapData.customer) {
-            const customerLatLng = [
-              mapData.customer.latitude,
-              mapData.customer.longitude
-            ];
+            const customerLatLng = [mapData.customer.latitude, mapData.customer.longitude];
 
-            L.marker(customerLatLng, {
-              icon: makeNumberIcon("C", "marker-customer")
-            })
+            L.marker(customerLatLng, { icon: makeNumberIcon("C", "marker-customer") })
               .addTo(map)
-              .bindPopup(
-                "<strong>Customer</strong><br>" +
-                safeText(mapData.customer.postcode) +
-                "<br>Precision: " + safeText(mapData.customer.precision)
-              )
+              .bindPopup("<strong>Customer</strong><br>" + safeText(mapData.customer.postcode) + "<br>Precision: " + safeText(mapData.customer.precision))
               .openPopup();
 
             L.circle(customerLatLng, {
@@ -2636,9 +2170,7 @@ app.get("/dispatch", async (req, res) => {
             const latLng = [tech.latitude, tech.longitude];
             technicianBounds.push(latLng);
 
-            const distanceText = tech.distance === null
-              ? "Distance unavailable"
-              : tech.distance + " miles";
+            const distanceText = tech.distance === null ? "Distance unavailable" : tech.distance + " miles";
 
             const popupHtml =
               "<strong>#" + safeText(tech.rank) + " " + safeText(tech.name) + "</strong><br>" +
@@ -2651,18 +2183,13 @@ app.get("/dispatch", async (req, res) => {
               "<strong>Skills:</strong> " + safeText(tech.skills) + "<br>" +
               "<strong>Notes:</strong> " + safeText(tech.notes);
 
-            L.marker(latLng, {
-              icon: makeNumberIcon(tech.rank, markerClassForStatus(tech.status))
-            })
+            L.marker(latLng, { icon: makeNumberIcon(tech.rank, markerClassForStatus(tech.status)) })
               .addTo(map)
               .bindPopup(popupHtml);
           });
 
           if (!hasCustomer && technicianBounds.length > 0) {
-            map.fitBounds(technicianBounds, {
-              padding: [45, 45],
-              maxZoom: 11
-            });
+            map.fitBounds(technicianBounds, { padding: [45, 45], maxZoom: 11 });
           }
         </script>
       </body>
@@ -2712,10 +2239,7 @@ app.get("/technicians", async (req, res) => {
           <td>${escapeHtml(tech.available_from)}</td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
-          <td>
-            ${formatDateTimeWithSeconds(tech.updated_at)}
-            <div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div>
-          </td>
+          <td>${formatDateTimeWithSeconds(tech.updated_at)}<div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div></td>
           <td>
             <form method="GET" action="/technicians/edit" style="display:inline;">
               <input type="hidden" name="id" value="${tech.id}">
@@ -2734,81 +2258,38 @@ app.get("/technicians", async (req, res) => {
         <meta http-equiv="refresh" content="30">
         <style>
           ${sharedStyles()}
-
-          form.grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-          }
-
-          textarea {
-            grid-column: span 4;
-            min-height: 70px;
-          }
+          form.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+          textarea { grid-column: span 4; min-height: 70px; }
         </style>
       </head>
-
       <body>
         ${nav(req)}
-
         <h1>Technician Availability</h1>
         <div class="subtitle">Live locksmith availability board · Auto-refreshes every 30 seconds</div>
-
         <div class="panel">
           <h2>Add Technician</h2>
-
           <form class="grid" method="POST" action="/technicians/save">
             <input name="name" placeholder="Name" required>
             <input name="phone" placeholder="Phone">
             <input name="base_postcode" placeholder="Base postcode">
             <input name="current_postcode" placeholder="Current postcode">
-
             <select name="status">
-              <option>Available</option>
-              <option>On job</option>
-              <option>Available soon</option>
-              <option>Off today</option>
-              <option>Holiday</option>
-              <option>Sick</option>
-              <option>Vehicle issue</option>
-              <option>Do not use</option>
+              <option>Available</option><option>On job</option><option>Available soon</option><option>Off today</option><option>Holiday</option><option>Sick</option><option>Vehicle issue</option><option>Do not use</option>
             </select>
-
             <select name="priority">
-              <option>Normal</option>
-              <option>Push</option>
-              <option>High priority</option>
-              <option>Do not prioritise</option>
+              <option>Normal</option><option>Push</option><option>High priority</option><option>Do not prioritise</option>
             </select>
-
             <input name="available_from" placeholder="Available from e.g. 15:30">
             <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
             <button type="submit">Save Technician</button>
-
             <textarea name="notes" placeholder="Notes"></textarea>
           </form>
         </div>
-
         <table>
           <thead>
-            <tr>
-              <th>Name</th>
-              <th>Phone</th>
-              <th>Base</th>
-              <th>Current</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Available From</th>
-              <th>Skills</th>
-              <th>Notes</th>
-              <th>Last Updated</th>
-              <th>Edit</th>
-            </tr>
+            <tr><th>Name</th><th>Phone</th><th>Base</th><th>Current</th><th>Status</th><th>Priority</th><th>Available From</th><th>Skills</th><th>Notes</th><th>Last Updated</th><th>Edit</th></tr>
           </thead>
-
-          <tbody>
-            ${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}
-          </tbody>
+          <tbody>${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -2822,39 +2303,15 @@ app.get("/technicians", async (req, res) => {
 app.get("/technicians/edit", async (req, res) => {
   try {
     const id = req.query.id;
-
     const result = await pool.query(`SELECT * FROM technicians WHERE id = $1`, [id]);
     const tech = result.rows[0];
-
     if (!tech) return res.status(404).send("Technician not found");
 
-    const statuses = [
-      "Available",
-      "On job",
-      "Available soon",
-      "Off today",
-      "Holiday",
-      "Sick",
-      "Vehicle issue",
-      "Do not use"
-    ];
+    const statuses = ["Available", "On job", "Available soon", "Off today", "Holiday", "Sick", "Vehicle issue", "Do not use"];
+    const priorities = ["Normal", "Push", "High priority", "Do not prioritise"];
 
-    const priorities = [
-      "Normal",
-      "Push",
-      "High priority",
-      "Do not prioritise"
-    ];
-
-    const statusOptions = statuses.map(status => {
-      const selected = status === tech.status ? "selected" : "";
-      return `<option ${selected}>${escapeHtml(status)}</option>`;
-    }).join("");
-
-    const priorityOptions = priorities.map(priority => {
-      const selected = priority === (tech.priority || "Normal") ? "selected" : "";
-      return `<option ${selected}>${escapeHtml(priority)}</option>`;
-    }).join("");
+    const statusOptions = statuses.map(status => `<option ${status === tech.status ? "selected" : ""}>${escapeHtml(status)}</option>`).join("");
+    const priorityOptions = priorities.map(priority => `<option ${priority === (tech.priority || "Normal") ? "selected" : ""}>${escapeHtml(priority)}</option>`).join("");
 
     res.send(`
       <!DOCTYPE html>
@@ -2863,36 +2320,15 @@ app.get("/technicians/edit", async (req, res) => {
         <title>Edit Technician</title>
         <style>
           ${sharedStyles()}
-
-          .panel {
-            max-width: 900px;
-          }
-
-          form.edit {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-          }
-
-          textarea {
-            grid-column: span 2;
-            min-height: 100px;
-          }
-
-          .danger {
-            background: #dc2626;
-          }
+          .panel { max-width: 900px; }
+          form.edit { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+          textarea { grid-column: span 2; min-height: 100px; }
         </style>
       </head>
-
       <body>
         ${nav(req)}
-
         <h1>Edit Technician</h1>
-        <div class="subtitle">
-          Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTimeWithSeconds(tech.updated_at)}
-        </div>
-
+        <div class="subtitle">Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTimeWithSeconds(tech.updated_at)}</div>
         <div class="panel">
           <form class="edit" method="POST" action="/technicians/save">
             <input type="hidden" name="id" value="${tech.id}">
@@ -2900,23 +2336,13 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="phone" value="${escapeHtml(tech.phone)}" placeholder="Phone">
             <input name="base_postcode" value="${escapeHtml(tech.base_postcode)}" placeholder="Base postcode">
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
-
-            <select name="status">
-              ${statusOptions}
-            </select>
-
-            <select name="priority">
-              ${priorityOptions}
-            </select>
-
+            <select name="status">${statusOptions}</select>
+            <select name="priority">${priorityOptions}</select>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
-
             <button type="submit">Save Changes</button>
-
             <textarea name="notes" placeholder="Notes">${escapeHtml(tech.notes)}</textarea>
           </form>
-
           <form method="POST" action="/technicians/delete" style="margin-top:20px;">
             <input type="hidden" name="id" value="${tech.id}">
             <button class="danger" type="submit">Remove Technician</button>
@@ -2933,77 +2359,25 @@ app.get("/technicians/edit", async (req, res) => {
 
 app.post("/technicians/save", async (req, res) => {
   try {
-    const {
-      id,
-      name,
-      phone,
-      base_postcode,
-      current_postcode,
-      status,
-      priority,
-      available_from,
-      skills,
-      notes
-    } = req.body;
-
+    const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, skills, notes } = req.body;
     const agentName = currentAgentName(req);
 
     if (id) {
       await pool.query(`
         UPDATE technicians
-        SET name = $1,
-            phone = $2,
-            base_postcode = $3,
-            current_postcode = $4,
-            status = $5,
-            priority = $6,
-            available_from = $7,
-            skills = $8,
-            notes = $9,
-            updated_by = $10,
-            updated_at = NOW()
+        SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
+            status = $5, priority = $6, available_from = $7, skills = $8,
+            notes = $9, updated_by = $10, updated_at = NOW()
         WHERE id = $11
-      `, [
-        name,
-        phone,
-        base_postcode,
-        current_postcode,
-        status,
-        priority || "Normal",
-        available_from,
-        skills,
-        notes,
-        agentName,
-        id
-      ]);
+      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
-          name,
-          phone,
-          base_postcode,
-          current_postcode,
-          status,
-          priority,
-          available_from,
-          skills,
-          notes,
-          updated_by,
-          updated_at
+          name, phone, base_postcode, current_postcode, status, priority,
+          available_from, skills, notes, updated_by, updated_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-      `, [
-        name,
-        phone,
-        base_postcode,
-        current_postcode,
-        status,
-        priority || "Normal",
-        available_from,
-        skills,
-        notes,
-        agentName
-      ]);
+      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName]);
     }
 
     res.redirect("/technicians");
@@ -3015,14 +2389,7 @@ app.post("/technicians/save", async (req, res) => {
 
 app.post("/technicians/delete", async (req, res) => {
   try {
-    await pool.query(`
-      UPDATE technicians
-      SET active = FALSE,
-          updated_by = $1,
-          updated_at = NOW()
-      WHERE id = $2
-    `, [currentAgentName(req), req.body.id]);
-
+    await pool.query(`UPDATE technicians SET active = FALSE, updated_by = $1, updated_at = NOW() WHERE id = $2`, [currentAgentName(req), req.body.id]);
     res.redirect("/technicians");
   } catch (error) {
     console.error("Delete technician error:", error);
@@ -3033,23 +2400,13 @@ app.post("/technicians/delete", async (req, res) => {
 app.post("/webhook/yay", async (req, res) => {
   try {
     const data = req.body;
-
     console.log("Received Yay webhook:", data);
 
     await pool.query(
       `
       INSERT INTO calls (
-        uuid,
-        call_type,
-        from_number,
-        to_number,
-        start_time,
-        end_time,
-        duration_seconds,
-        answered_by,
-        answer_type,
-        raw_json,
-        updated_at
+        uuid, call_type, from_number, to_number, start_time, end_time,
+        duration_seconds, answered_by, answer_type, raw_json, updated_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
       ON CONFLICT (uuid)
@@ -3088,13 +2445,7 @@ app.post("/webhook/yay", async (req, res) => {
 
 app.get("/debug", async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT *
-      FROM calls
-      ORDER BY received_at DESC
-      LIMIT 50
-    `);
-
+    const result = await pool.query(`SELECT * FROM calls ORDER BY received_at DESC LIMIT 50`);
     res.json(result.rows);
   } catch (error) {
     console.error("Debug error:", error);
