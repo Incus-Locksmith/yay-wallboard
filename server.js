@@ -152,7 +152,7 @@ function clearSessionCookie(res) {
 
 function requireLogin(req, res, next) {
   const openPaths = ["/login", "/logout", "/webhook/yay"];
-  if (openPaths.includes(req.path)) return next();
+  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/")) return next();
 
   const session = readSession(req);
   if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
@@ -494,6 +494,67 @@ function formatDistance(distance) {
   return `${distance.toFixed(1)} miles`;
 }
 
+function makeCheckinToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function locationAgeMinutes(date) {
+  if (!date) return null;
+  return Math.floor((Date.now() - new Date(date).getTime()) / 60000);
+}
+
+function locationFreshnessClass(date) {
+  const age = locationAgeMinutes(date);
+  if (age === null) return "bad";
+  if (age <= 60) return "available";
+  if (age <= 180) return "soon";
+  return "bad";
+}
+
+function locationFreshnessText(date) {
+  const age = locationAgeMinutes(date);
+  if (age === null) return "No GPS check-in yet";
+  if (age < 1) return "Updated just now";
+  if (age === 1) return "Updated 1 minute ago";
+  if (age < 60) return `Updated ${age} minutes ago`;
+  const hours = Math.floor(age / 60);
+  const minutes = age % 60;
+  if (hours === 1 && minutes === 0) return "Updated 1 hour ago";
+  if (hours === 1) return `Updated 1 hour ${minutes} mins ago`;
+  if (minutes === 0) return `Updated ${hours} hours ago`;
+  return `Updated ${hours} hours ${minutes} mins ago`;
+}
+
+function technicianHasGps(tech) {
+  return tech.current_latitude !== null &&
+    tech.current_latitude !== undefined &&
+    tech.current_longitude !== null &&
+    tech.current_longitude !== undefined;
+}
+
+async function getTechnicianDispatchLocation(tech) {
+  if (technicianHasGps(tech)) {
+    return {
+      ok: true,
+      latitude: Number(tech.current_latitude),
+      longitude: Number(tech.current_longitude),
+      precision: "GPS",
+      postcode: tech.current_postcode || "",
+      source: "GPS check-in",
+      error: null
+    };
+  }
+
+  const location = getBestLocation(tech);
+  const lookedUp = await lookupPostcodeLocation(location.postcode);
+
+  return {
+    ...lookedUp,
+    postcode: location.postcode,
+    source: location.source
+  };
+}
+
 function sharedStyles() {
   return `
     body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 32px; }
@@ -577,6 +638,7 @@ function sharedStyles() {
     .checkbox-row input { width: 18px; height: 18px; }
     .help { color: #9ca3af; font-size: 14px; margin-top: 8px; }
     .search-form { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
+    .copy-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 7px; color: #d1d5db; }
   `;
 }
 
@@ -737,6 +799,18 @@ async function initDb() {
 
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS current_latitude NUMERIC(10,7);`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS current_longitude NUMERIC(10,7);`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS location_accuracy NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS location_checked_in_at TIMESTAMP;`);
+
+  const tokenResult = await pool.query(`SELECT id FROM technicians WHERE checkin_token IS NULL`);
+  for (const row of tokenResult.rows) {
+    await pool.query(`UPDATE technicians SET checkin_token = $1 WHERE id = $2`, [makeCheckinToken(), row.id]);
+  }
+
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS technicians_checkin_token_unique ON technicians (checkin_token);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoices (
@@ -1949,8 +2023,11 @@ app.get("/dispatch", async (req, res) => {
     const candidates = result.rows.filter(tech => isUsableForDispatch(tech.status));
 
     const candidatesWithDistance = await Promise.all(candidates.map(async tech => {
-      const location = getBestLocation(tech);
-      const techLocation = await lookupPostcodeLocation(location.postcode);
+      const techLocation = await getTechnicianDispatchLocation(tech);
+      const location = {
+        postcode: techLocation.postcode || "",
+        source: techLocation.source || "Unknown"
+      };
 
       let distance = null;
       if (customerLocation && customerLocation.ok && techLocation && techLocation.ok) {
@@ -2232,6 +2309,333 @@ app.get("/dispatch", async (req, res) => {
   }
 });
 
+
+app.get("/tech-checkin/:token", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [req.params.token]);
+    const tech = result.rows[0];
+
+    if (!tech) {
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Check-In Link Not Found</title>
+          <style>
+            body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 30px; }
+            .box { max-width: 520px; margin: 60px auto; background: #1f2937; border-radius: 16px; padding: 28px; border: 1px solid #374151; }
+          </style>
+        </head>
+        <body>
+          <div class="box">
+            <h1>Link not found</h1>
+            <p>This technician check-in link is not valid. Ask the office for a new link.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    const statusOptions = ["Available", "On job", "Available soon", "Off today"]
+      .map(status => `<option ${status === tech.status ? "selected" : ""}>${escapeHtml(status)}</option>`)
+      .join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Technician Check-In</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #111827;
+            color: white;
+            padding: 18px;
+            margin: 0;
+          }
+          .wrap { max-width: 560px; margin: 0 auto; }
+          .card {
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 18px;
+            padding: 22px;
+            margin-bottom: 18px;
+          }
+          h1 { font-size: 32px; margin: 0 0 6px; }
+          h2 { margin-top: 0; }
+          .subtitle { color: #9ca3af; margin-bottom: 18px; line-height: 1.4; }
+          .status-pill {
+            display: inline-block;
+            padding: 8px 12px;
+            border-radius: 999px;
+            font-weight: bold;
+            font-size: 14px;
+            background: #2563eb;
+            color: white;
+            margin-bottom: 12px;
+          }
+          input, select, textarea, button {
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 18px;
+            padding: 14px;
+            border-radius: 12px;
+            border: 1px solid #374151;
+            margin-bottom: 12px;
+          }
+          input, select, textarea {
+            background: #111827;
+            color: white;
+          }
+          textarea { min-height: 90px; }
+          button {
+            border: none;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+          }
+          .big-button {
+            font-size: 20px;
+            padding: 18px;
+            margin-bottom: 14px;
+          }
+          .available { background: #16a34a; }
+          .job { background: #2563eb; }
+          .soon { background: #f59e0b; color: black; }
+          .off { background: #6b7280; }
+          .manual { background: #374151; }
+          .message {
+            display: none;
+            padding: 14px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            line-height: 1.4;
+          }
+          .message.good { background: #14532d; display: block; }
+          .message.bad { background: #7f1d1d; display: block; }
+          .help { color: #9ca3af; font-size: 14px; line-height: 1.45; }
+          .last { color: #d1d5db; line-height: 1.5; font-size: 15px; }
+          .small { font-size: 13px; color: #9ca3af; }
+        </style>
+        <script>
+          const token = ${JSON.stringify(req.params.token)};
+
+          function setMessage(text, type) {
+            const box = document.getElementById("message");
+            box.textContent = text;
+            box.className = "message " + (type || "good");
+          }
+
+          function getFormValues(statusOverride) {
+            return {
+              status: statusOverride || document.getElementById("status").value,
+              current_postcode: document.getElementById("current_postcode").value,
+              available_from: document.getElementById("available_from").value,
+              notes: document.getElementById("notes").value
+            };
+          }
+
+          async function sendUpdate(payload) {
+            const response = await fetch("/tech-checkin/" + token, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+
+            const json = await response.json();
+
+            if (!response.ok || !json.ok) {
+              throw new Error(json.error || "Update failed");
+            }
+
+            setMessage(json.message || "Updated successfully.", "good");
+
+            if (json.reload) {
+              setTimeout(() => window.location.reload(), 900);
+            }
+          }
+
+          function updateWithLocation(statusOverride) {
+            setMessage("Getting your location. Your phone may ask for permission.", "good");
+
+            if (!navigator.geolocation) {
+              setMessage("Your phone/browser does not support location check-in. You can still save postcode/status manually below.", "bad");
+              return;
+            }
+
+            navigator.geolocation.getCurrentPosition(async function(position) {
+              try {
+                const values = getFormValues(statusOverride);
+
+                await sendUpdate({
+                  ...values,
+                  latitude: position.coords.latitude,
+                  longitude: position.coords.longitude,
+                  accuracy: position.coords.accuracy,
+                  use_gps: true
+                });
+              } catch (error) {
+                setMessage(error.message, "bad");
+              }
+            }, function(error) {
+              let text = "Location permission was not allowed or GPS was unavailable. You can still save your postcode/status manually below.";
+              if (error && error.message) text += " " + error.message;
+              setMessage(text, "bad");
+            }, {
+              enableHighAccuracy: true,
+              timeout: 12000,
+              maximumAge: 60000
+            });
+          }
+
+          async function manualUpdate(statusOverride) {
+            try {
+              const values = getFormValues(statusOverride);
+              await sendUpdate({
+                ...values,
+                use_gps: false
+              });
+            } catch (error) {
+              setMessage(error.message, "bad");
+            }
+          }
+        </script>
+      </head>
+      <body>
+        <div class="wrap">
+          <div class="card">
+            <h1>${escapeHtml(tech.name)}</h1>
+            <div class="subtitle">Technician check-in</div>
+            <div class="status-pill">${escapeHtml(tech.status || "No status")}</div>
+            <div class="last">
+              <strong>Last GPS check-in:</strong><br>
+              ${escapeHtml(locationFreshnessText(tech.location_checked_in_at))}
+              ${tech.location_checked_in_at ? `<br>${escapeHtml(formatDateTimeWithSeconds(tech.location_checked_in_at))}` : ""}
+              ${tech.location_accuracy ? `<br><span class="small">Accuracy: roughly ${escapeHtml(tech.location_accuracy)} metres</span>` : ""}
+            </div>
+          </div>
+
+          <div id="message" class="message"></div>
+
+          <div class="card">
+            <h2>Quick check-in</h2>
+            <button class="big-button available" onclick="updateWithLocation('Available')">Available + update my location</button>
+            <button class="big-button job" onclick="updateWithLocation('On job')">On job + update my location</button>
+            <button class="big-button soon" onclick="updateWithLocation('Available soon')">Available soon + update my location</button>
+            <button class="big-button off" onclick="manualUpdate('Off today')">Off today</button>
+            <div class="help">
+              This is not background tracking. Your location only updates when you press one of the location buttons.
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Manual details</h2>
+            <select id="status">${statusOptions}</select>
+            <input id="current_postcode" value="${escapeHtml(tech.current_postcode || "")}" placeholder="Current postcode e.g. W3 7AR">
+            <input id="available_from" value="${escapeHtml(tech.available_from || "")}" placeholder="Available from e.g. 14:30 / 30 mins">
+            <textarea id="notes" placeholder="Notes for dispatch">${escapeHtml(tech.notes || "")}</textarea>
+            <button class="manual" onclick="manualUpdate()">Save without GPS</button>
+            <button class="available" onclick="updateWithLocation()">Save and update GPS location</button>
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Tech check-in page error:", error);
+    res.status(500).send("Tech check-in page error. Check Render logs.");
+  }
+});
+
+app.post("/tech-checkin/:token", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [req.params.token]);
+    const tech = result.rows[0];
+
+    if (!tech) {
+      return res.status(404).json({ ok: false, error: "Invalid technician check-in link." });
+    }
+
+    const allowedStatuses = ["Available", "On job", "Available soon", "Off today"];
+    const status = allowedStatuses.includes(req.body.status) ? req.body.status : tech.status;
+
+    const currentPostcode = (req.body.current_postcode || "").trim();
+    const availableFrom = (req.body.available_from || "").trim();
+    const notes = (req.body.notes || "").trim();
+
+    const useGps = req.body.use_gps === true;
+    const latitude = Number(req.body.latitude);
+    const longitude = Number(req.body.longitude);
+    const accuracy = Number(req.body.accuracy);
+
+    if (useGps) {
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return res.status(400).json({ ok: false, error: "GPS location was not received. Please try again." });
+      }
+
+      await pool.query(`
+        UPDATE technicians
+        SET status = $1,
+            current_postcode = $2,
+            available_from = $3,
+            notes = $4,
+            current_latitude = $5,
+            current_longitude = $6,
+            location_accuracy = $7,
+            location_checked_in_at = NOW(),
+            updated_by = $8,
+            updated_at = NOW()
+        WHERE id = $9
+      `, [
+        status,
+        currentPostcode,
+        availableFrom,
+        notes,
+        latitude,
+        longitude,
+        Number.isFinite(accuracy) ? accuracy.toFixed(2) : null,
+        `${tech.name} check-in`,
+        tech.id
+      ]);
+
+      return res.json({
+        ok: true,
+        reload: true,
+        message: "Location check-in saved. The office dashboard has been updated."
+      });
+    }
+
+    await pool.query(`
+      UPDATE technicians
+      SET status = $1,
+          current_postcode = $2,
+          available_from = $3,
+          notes = $4,
+          updated_by = $5,
+          updated_at = NOW()
+      WHERE id = $6
+    `, [
+      status,
+      currentPostcode,
+      availableFrom,
+      notes,
+      `${tech.name} check-in`,
+      tech.id
+    ]);
+
+    res.json({
+      ok: true,
+      reload: true,
+      message: "Status saved. GPS location was not updated."
+    });
+  } catch (error) {
+    console.error("Tech check-in update error:", error);
+    res.status(500).json({ ok: false, error: "Check-in update failed. Please tell the office." });
+  }
+});
+
+
 app.get("/technicians", async (req, res) => {
   try {
     const result = await pool.query(`
@@ -2270,12 +2674,21 @@ app.get("/technicians", async (req, res) => {
           <td>${escapeHtml(tech.available_from)}</td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
-          <td>${formatDateTimeWithSeconds(tech.updated_at)}<div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div></td>
+          <td>
+            ${formatDateTimeWithSeconds(tech.updated_at)}
+            <div class="audit">By ${escapeHtml(tech.updated_by || "Unknown")}</div>
+          </td>
+          <td>
+            <span class="pill ${locationFreshnessClass(tech.location_checked_in_at)}">${escapeHtml(locationFreshnessText(tech.location_checked_in_at))}</span>
+            ${technicianHasGps(tech) ? `<div class="audit">Accuracy: ${escapeHtml(tech.location_accuracy || "—")}m</div>` : ""}
+          </td>
           <td>
             <form method="GET" action="/technicians/edit" style="display:inline;">
               <input type="hidden" name="id" value="${tech.id}">
               <button type="submit">Edit</button>
             </form>
+            <br><br>
+            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a>
           </td>
         </tr>
       `;
@@ -2318,9 +2731,9 @@ app.get("/technicians", async (req, res) => {
         </div>
         <table>
           <thead>
-            <tr><th>Name</th><th>Phone</th><th>Base</th><th>Current</th><th>Status</th><th>Priority</th><th>Available From</th><th>Skills</th><th>Notes</th><th>Last Updated</th><th>Edit</th></tr>
+            <tr><th>Name</th><th>Phone</th><th>Base</th><th>Current</th><th>Status</th><th>Priority</th><th>Available From</th><th>Skills</th><th>Notes</th><th>Last Updated</th><th>GPS Check-In</th><th>Edit / Link</th></tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="11">No technicians added yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="12">No technicians added yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -2360,6 +2773,16 @@ app.get("/technicians/edit", async (req, res) => {
         ${nav(req)}
         <h1>Edit Technician</h1>
         <div class="subtitle">Last updated by ${escapeHtml(tech.updated_by || "Unknown")} · ${formatDateTimeWithSeconds(tech.updated_at)}</div>
+
+        <div class="panel">
+          <h2>Technician Check-In Link</h2>
+          <div class="help">Send this private link to the technician. It lets them update their own status and GPS check-in manually.</div>
+          <br>
+          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-checkin/${tech.checkin_token || ""}`}">
+          <br><br>
+          <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician check-in page</a>
+        </div>
+
         <div class="panel">
           <form class="edit" method="POST" action="/technicians/save">
             <input type="hidden" name="id" value="${tech.id}">
@@ -2405,10 +2828,10 @@ app.post("/technicians/save", async (req, res) => {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, skills, notes, updated_by, updated_at
+          available_from, skills, notes, updated_by, checkin_token, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName, makeCheckinToken()]);
     }
 
     res.redirect("/technicians");
