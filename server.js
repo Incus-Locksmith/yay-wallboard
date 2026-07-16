@@ -472,6 +472,79 @@ async function lookupPostcodeLocation(postcode) {
   }
 }
 
+
+function postcoderApiKey() {
+  return (process.env.POSTCODER_API_KEY || "").trim();
+}
+
+function safeAddressPart(value) {
+  return (value || "").toString().trim();
+}
+
+function compactPostcoderAddress(address) {
+  const line1 = safeAddressPart(address.addressline1);
+  const line2 = safeAddressPart(address.addressline2);
+  const line3 = safeAddressPart(address.addressline3);
+  const posttown = safeAddressPart(address.posttown);
+  const county = safeAddressPart(address.county);
+  const postcode = safeAddressPart(address.postcode);
+
+  const addressLines = [line1, line2, line3].filter(Boolean);
+  const fullAddressLines = [...addressLines, posttown, postcode].filter(Boolean);
+
+  return {
+    summary: safeAddressPart(address.summaryline) || fullAddressLines.join(", "),
+    address_line_1: line1,
+    address_line_2: line2,
+    address_line_3: line3,
+    town: posttown,
+    county,
+    postcode,
+    latitude: address.latitude || null,
+    longitude: address.longitude || null,
+    udprn: address.udprn || null,
+    full_address: fullAddressLines.join("\n")
+  };
+}
+
+async function lookupPostcoderAddresses(searchTerm) {
+  const apiKey = postcoderApiKey();
+  const search = (searchTerm || "").trim();
+
+  if (!apiKey) {
+    return { ok: false, addresses: [], error: "POSTCODER_API_KEY is missing in Render environment variables." };
+  }
+
+  if (!search) {
+    return { ok: false, addresses: [], error: "Enter a postcode or part of an address." };
+  }
+
+  const url = `https://ws.postcoder.com/pcw/${encodeURIComponent(apiKey)}/address/uk/${encodeURIComponent(search)}?format=json&lines=3&addtags=latitude,longitude,udprn&identifier=dispatch-office-booking-test`;
+
+  try {
+    const response = await fetch(url);
+    const json = await response.json();
+
+    if (!response.ok) {
+      const message = Array.isArray(json) ? JSON.stringify(json) : (json.message || json.error || "Postcoder lookup failed.");
+      return { ok: false, addresses: [], error: message };
+    }
+
+    if (!Array.isArray(json)) {
+      return { ok: false, addresses: [], error: "Unexpected response from Postcoder." };
+    }
+
+    return {
+      ok: true,
+      addresses: json.map(compactPostcoderAddress),
+      error: null
+    };
+  } catch (error) {
+    console.error("Postcoder lookup error:", error);
+    return { ok: false, addresses: [], error: "Postcoder lookup failed. Check Render logs." };
+  }
+}
+
 function distanceMiles(lat1, lon1, lat2, lon2) {
   if ([lat1, lon1, lat2, lon2].some(v => v === null || v === undefined)) return null;
 
@@ -655,6 +728,7 @@ function nav(req) {
       <a href="/reports">Reports</a>
       <a href="/technicians">Technicians</a>
       <a href="/dispatch">Dispatch</a>
+      <a href="/address-lookup-test">Address Lookup</a>
 
       <div class="dropdown">
         <a class="dropdown-button" href="/invoices">Invoices</a>
@@ -2002,6 +2076,153 @@ app.get("/reports/calls.csv", async (req, res) => {
     console.error("Calls CSV error:", error);
     res.status(500).send("Calls CSV error. Check Render logs.");
   }
+});
+
+
+app.get("/api/postcoder-addresses", async (req, res) => {
+  try {
+    const result = await lookupPostcoderAddresses(req.query.search || req.query.postcode || "");
+    res.json(result);
+  } catch (error) {
+    console.error("Postcoder API route error:", error);
+    res.status(500).json({ ok: false, addresses: [], error: "Address lookup failed. Check Render logs." });
+  }
+});
+
+app.get("/address-lookup-test", async (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Address Lookup Test</title>
+      <style>
+        ${sharedStyles()}
+        .lookup-grid { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+        .result-list { margin-top: 18px; display: grid; gap: 10px; }
+        .address-option { width: 100%; text-align: left; background: #111827; border: 1px solid #374151; color: #f9fafb; border-radius: 10px; padding: 14px; cursor: pointer; }
+        .address-option:hover { border-color: #f59e0b; background: #172033; }
+        .picked { white-space: pre-line; background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 16px; min-height: 80px; color: #d1d5db; }
+        .status { margin-top: 12px; color: #9ca3af; }
+        .status.error { color: #fca5a5; }
+        .form-preview { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 18px; }
+      </style>
+    </head>
+    <body>
+      ${nav(req)}
+
+      <h1>Address Lookup Test</h1>
+      <div class="subtitle">Use this page to test your Postcoder API key before we plug it into the booking portal.</div>
+
+      <div class="panel">
+        <h2>Find address</h2>
+        <div class="lookup-grid">
+          <input id="postcode-search" placeholder="Enter postcode, e.g. W3 7AR">
+          <button type="button" onclick="findAddresses()">Find address</button>
+        </div>
+        <div id="lookup-status" class="status"></div>
+        <div id="address-results" class="result-list"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Booking form preview</h2>
+        <div class="form-preview">
+          <input id="address_line_1" placeholder="Address line 1">
+          <input id="address_line_2" placeholder="Address line 2">
+          <input id="address_line_3" placeholder="Address line 3">
+          <input id="town" placeholder="Town">
+          <input id="postcode" placeholder="Postcode">
+          <input id="udprn" placeholder="UDPRN / unique address id">
+        </div>
+        <br>
+        <div id="picked-address" class="picked">Choose an address above and it will populate these fields.</div>
+      </div>
+
+      <script>
+        function escapeHtmlClient(value) {
+          return String(value || "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+        }
+
+        function setStatus(message, isError) {
+          const status = document.getElementById("lookup-status");
+          status.textContent = message || "";
+          status.className = isError ? "status error" : "status";
+        }
+
+        function chooseAddress(address) {
+          document.getElementById("address_line_1").value = address.address_line_1 || "";
+          document.getElementById("address_line_2").value = address.address_line_2 || "";
+          document.getElementById("address_line_3").value = address.address_line_3 || "";
+          document.getElementById("town").value = address.town || "";
+          document.getElementById("postcode").value = address.postcode || "";
+          document.getElementById("udprn").value = address.udprn || "";
+
+          const picked = [
+            address.address_line_1,
+            address.address_line_2,
+            address.address_line_3,
+            address.town,
+            address.postcode
+          ].filter(Boolean).join("\n");
+
+          document.getElementById("picked-address").textContent = picked || "Address selected.";
+        }
+
+        async function findAddresses() {
+          const search = document.getElementById("postcode-search").value.trim();
+          const results = document.getElementById("address-results");
+          results.innerHTML = "";
+
+          if (!search) {
+            setStatus("Enter a postcode first.", true);
+            return;
+          }
+
+          setStatus("Looking up addresses...", false);
+
+          try {
+            const response = await fetch("/api/postcoder-addresses?search=" + encodeURIComponent(search));
+            const data = await response.json();
+
+            if (!data.ok) {
+              setStatus(data.error || "Address lookup failed.", true);
+              return;
+            }
+
+            if (!data.addresses || data.addresses.length === 0) {
+              setStatus("No addresses found. Check the postcode or enter address manually.", true);
+              return;
+            }
+
+            setStatus(data.addresses.length + " address" + (data.addresses.length === 1 ? "" : "es") + " found. Choose one below.", false);
+
+            data.addresses.forEach(function(address) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.className = "address-option";
+              button.innerHTML = escapeHtmlClient(address.summary || address.full_address || "Address");
+              button.addEventListener("click", function() { chooseAddress(address); });
+              results.appendChild(button);
+            });
+          } catch (error) {
+            setStatus("Address lookup failed. Check Render logs.", true);
+          }
+        }
+
+        document.getElementById("postcode-search").addEventListener("keydown", function(event) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            findAddresses();
+          }
+        });
+      </script>
+    </body>
+    </html>
+  `);
 });
 
 app.get("/dispatch", async (req, res) => {
