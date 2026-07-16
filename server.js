@@ -1063,6 +1063,12 @@ async function initDb() {
       urgency TEXT DEFAULT 'Normal',
       source_campaign TEXT,
       quoted_price NUMERIC(10,2),
+      starting_price NUMERIC(10,2),
+      call_out_agreed NUMERIC(10,2),
+      start_price_locks NUMERIC(10,2),
+      offsite_payment BOOLEAN DEFAULT FALSE,
+      bill_payer_name TEXT,
+      bill_payer_phone TEXT,
       expected_payment_method TEXT DEFAULT 'Unknown',
       account_job BOOLEAN DEFAULT FALSE,
       account_template_id INTEGER,
@@ -1094,6 +1100,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS udprn TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_campaign TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS quoted_price NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS starting_price NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS call_out_agreed NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS start_price_locks NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offsite_payment BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bill_payer_name TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bill_payer_phone TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expected_payment_method TEXT DEFAULT 'Unknown';`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_job BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_template_id INTEGER;`);
@@ -2268,6 +2280,39 @@ function jobAddressBlock(job) {
   ].filter(Boolean).map(escapeHtml).join("<br>");
 }
 
+
+function jobAddressPlain(job) {
+  return [
+    job.address_line_1,
+    job.address_line_2,
+    job.address_line_3,
+    job.town,
+    job.county,
+    job.postcode
+  ].filter(Boolean).join(", ");
+}
+
+function phoneHref(value) {
+  const clean = String(value || "").replace(/[^0-9+]/g, "");
+  return clean ? `tel:${clean}` : "#";
+}
+
+function jobTechnicianSummary(job) {
+  const payerName = job.offsite_payment ? (job.bill_payer_name || "") : (job.customer_name || "");
+  const payerPhone = job.offsite_payment ? (job.bill_payer_phone || "") : (job.customer_phone || "");
+  return [
+    `Name: ${job.customer_name || ""}`,
+    `Address: ${jobAddressPlain(job)}`,
+    `${job.job_type || "Job"} - ${job.job_description || ""}`,
+    `Start price: ${money(job.starting_price || job.quoted_price || 0)}`,
+    `Call out agreed: ${money(job.call_out_agreed || 0)}`,
+    `Start price of parts: ${money(job.start_price_locks || 0)}`,
+    `Bill payer - ${payerName || ""}${payerPhone ? ` ${payerPhone}` : ""}`,
+    `ETA: ${job.eta || ""}`,
+    `Telephone number: ${job.customer_phone || ""}`
+  ].join("\n");
+}
+
 app.get("/jobs", async (req, res) => {
   try {
     const selectedStatus = (req.query.status || "active").trim();
@@ -2329,13 +2374,14 @@ app.get("/jobs", async (req, res) => {
         <td>${jobAddressBlock(job) || "—"}</td>
         <td>
           <strong>${escapeHtml(job.job_type || "—")}</strong>
-          <div class="job-card-sub">${escapeHtml(job.urgency || "Normal")}${job.quoted_price !== null && job.quoted_price !== undefined ? ` · Quoted ${money(job.quoted_price)}` : ""}</div>
+          <div class="job-card-sub">${escapeHtml(job.urgency || "Normal")}${job.starting_price !== null && job.starting_price !== undefined ? ` · Start ${money(job.starting_price)}` : (job.quoted_price !== null && job.quoted_price !== undefined ? ` · Quoted ${money(job.quoted_price)}` : "")}</div>
         </td>
         <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
         <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
         <td>
           <div class="actions">
             <a href="/jobs/${job.id}/edit">Open / Edit</a>
+            <a href="/jobs/${job.id}/summary">Technician summary</a>
             <a href="/jobs/${job.id}/close">Close job</a>
           </div>
         </td>
@@ -2579,6 +2625,23 @@ app.get("/jobs/new", async (req, res) => {
             gap: 26px;
           }
           .tel-wrap { display: grid; grid-template-columns: 58px 1fr; }
+          .money-wrap { display: grid; grid-template-columns: 42px 1fr; }
+          .money-prefix {
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #bfc7d1;
+            border-right: 0;
+            color: #374151;
+            font-size: 15px;
+            font-weight: 800;
+            background: #f9fafb;
+          }
+          .money-wrap input { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+          .checkbox-line { display:flex; align-items:center; gap:10px; margin-top: 16px; font-weight:800; color:#111827; }
+          .checkbox-line input { width:18px; height:18px; }
+          .offsite-box { margin-top:14px; padding:14px; border:1px solid #d1d5db; background:#f9fafb; display:none; }
           .tel-prefix {
             min-height: 42px;
             display: flex;
@@ -2722,8 +2785,23 @@ app.get("/jobs/new", async (req, res) => {
 
                 <div class="form-grid-3" style="margin-top:16px;">
                   <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, "Normal")}</select></div>
-                  <div class="field"><label>Quoted / Start Price</label><input name="quoted_price" inputmode="decimal" placeholder="e.g. 75"></div>
+                  <div class="field"><label>Starting price</label><div class="money-wrap"><div class="money-prefix">£</div><input name="starting_price" inputmode="decimal" placeholder="e.g. 75"></div></div>
+                  <div class="field"><label>Call out agreed</label><div class="money-wrap"><div class="money-prefix">£</div><input name="call_out_agreed" inputmode="decimal" placeholder="e.g. 55"></div></div>
+                </div>
+
+                <div class="form-grid-3" style="margin-top:16px;">
+                  <div class="field"><label>Start price of locks</label><div class="money-wrap"><div class="money-prefix">£</div><input name="start_price_locks" inputmode="decimal" placeholder="e.g. 40"></div></div>
                   <div class="field"><label>Expected Payment Method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, "Unknown")}</select></div>
+                  <div class="field"><label>Quoted / overall price notes</label><div class="money-wrap"><div class="money-prefix">£</div><input name="quoted_price" inputmode="decimal" placeholder="optional"></div></div>
+                </div>
+
+                <label class="checkbox-line"><input type="checkbox" id="offsite_payment" name="offsite_payment" value="true"> Offsite payment</label>
+                <div class="offsite-box" id="offsite_payment_box">
+                  <div class="form-grid-2">
+                    <div class="field"><label>Bill payer name</label><input id="bill_payer_name" name="bill_payer_name" placeholder="Name of person paying"></div>
+                    <div class="field"><label>Bill payer telephone</label><div class="tel-wrap"><div class="tel-prefix">TEL</div><input id="bill_payer_phone" name="bill_payer_phone" placeholder="Telephone number"></div></div>
+                  </div>
+                  <div class="helper-line">Use this when someone other than the caller is paying, for example landlord, relative, office manager or account contact.</div>
                 </div>
 
                 <div class="form-grid-2" style="margin-top:16px;">
@@ -2792,6 +2870,17 @@ app.get("/jobs/new", async (req, res) => {
               if (accountTemplate.value && accountJob) accountJob.value = "true";
             });
           }
+
+          const offsitePayment = document.getElementById("offsite_payment");
+          const offsitePaymentBox = document.getElementById("offsite_payment_box");
+          function toggleOffsitePayment() {
+            if (!offsitePayment || !offsitePaymentBox) return;
+            offsitePaymentBox.style.display = offsitePayment.checked ? "block" : "none";
+          }
+          if (offsitePayment) {
+            offsitePayment.addEventListener("change", toggleOffsitePayment);
+            toggleOffsitePayment();
+          }
         </script>
       </body>
       </html>
@@ -2809,14 +2898,14 @@ app.post("/jobs/create", async (req, res) => {
       INSERT INTO jobs (
         customer_name, customer_phone, customer_alt_phone, customer_email,
         address_line_1, address_line_2, address_line_3, town, county, postcode, latitude, longitude, udprn,
-        job_type, job_description, urgency, source_campaign, quoted_price, expected_payment_method,
+        job_type, job_description, urgency, source_campaign, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
         account_job, account_template_id, assigned_technician_id, eta, dispatcher_name, dispatcher_notes, status,
         created_at, updated_at
       ) VALUES (
         $1,$2,$3,$4,
         $5,$6,$7,$8,$9,$10,$11,$12,$13,
-        $14,$15,$16,$17,$18,$19,
-        $20,$21,$22,$23,$24,$25,$26,
+        $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
+        $26,$27,$28,$29,$30,$31,$32,
         NOW(), NOW()
       ) RETURNING id
     `, [
@@ -2838,6 +2927,12 @@ app.post("/jobs/create", async (req, res) => {
       body.urgency || "Normal",
       body.source_campaign,
       parseMoneyInput(body.quoted_price),
+      parseMoneyInput(body.starting_price),
+      parseMoneyInput(body.call_out_agreed),
+      parseMoneyInput(body.start_price_locks),
+      body.offsite_payment === "true",
+      body.bill_payer_name,
+      body.bill_payer_phone,
       body.expected_payment_method || "Unknown",
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
@@ -2850,10 +2945,67 @@ app.post("/jobs/create", async (req, res) => {
 
     const id = result.rows[0].id;
     await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2`, [jobNumber(id), id]);
-    res.redirect(`/jobs/${id}/edit`);
+    res.redirect(`/jobs/${id}/summary`);
   } catch (error) {
     console.error("Create job error:", error);
     res.status(500).send("Could not create job");
+  }
+});
+
+
+app.get("/jobs/:id/summary", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
+    if (!result.rows.length) return res.status(404).send("Job not found");
+    const job = result.rows[0];
+    const summary = jobTechnicianSummary(job);
+    const telLink = phoneHref(job.customer_phone);
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Technician Summary</title>
+        <style>
+          ${sharedStyles()}
+          .summary-card { background:#111827; border:1px solid #374151; border-radius:12px; padding:20px; max-width:760px; }
+          .summary-box { width:100%; min-height:260px; box-sizing:border-box; border-radius:10px; border:1px solid #4b5563; background:#020617; color:#e5e7eb; padding:16px; font-size:16px; line-height:1.55; white-space:pre-wrap; }
+          .copy-button { margin-top:12px; background:#22c55e; color:#052e16; border:0; border-radius:8px; padding:12px 16px; font-weight:900; cursor:pointer; }
+          .quick-links { margin-top:16px; display:flex; gap:12px; flex-wrap:wrap; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Technician Summary</h1>
+        <div class="subtitle">Copy and paste this into WhatsApp for the technician.</div>
+
+        <div class="summary-card">
+          <textarea id="techSummary" class="summary-box" readonly>${escapeHtml(summary)}</textarea>
+          <button class="copy-button" type="button" onclick="copySummary()">Copy technician summary</button>
+          <div class="quick-links">
+            <a href="${escapeHtml(telLink)}">Call customer</a>
+            <a href="/jobs/${job.id}/edit">Open / edit job</a>
+            <a href="/jobs/${job.id}/close">Close job</a>
+            <a href="/jobs">Back to jobs</a>
+          </div>
+        </div>
+
+        <script>
+          function copySummary() {
+            const box = document.getElementById("techSummary");
+            box.focus();
+            box.select();
+            document.execCommand("copy");
+            alert("Technician summary copied.");
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Job summary error:", error);
+    res.status(500).send("Could not load job summary");
   }
 });
 
@@ -2880,6 +3032,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
 
         <div class="panel">
           <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+          <a href="/jobs/${job.id}/summary" style="margin-left:15px;">Technician summary</a>
           <a href="/jobs/${job.id}/close" style="margin-left:15px;">Close job / payment details</a>
           <a href="/jobs" style="margin-left:15px;">Back to jobs</a>
         </div>
@@ -2913,7 +3066,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
               <div class="field"><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
               <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
               <div class="field"><label>Source / campaign</label><input name="source_campaign" value="${escapeHtml(job.source_campaign)}"></div>
-              <div class="field"><label>Quoted price / start price</label><input name="quoted_price" value="${job.quoted_price !== null && job.quoted_price !== undefined ? Number(job.quoted_price).toFixed(2) : ""}"></div>
+              <div class="field"><label>Starting price</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
+              <div class="field"><label>Call out agreed</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
+              <div class="field"><label>Start price of locks</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
+              <div class="field"><label>Quoted / overall price notes</label><input name="quoted_price" value="${job.quoted_price !== null && job.quoted_price !== undefined ? Number(job.quoted_price).toFixed(2) : ""}"></div>
+              <div class="field"><label>Offsite payment?</label><select name="offsite_payment"><option value="false" ${!job.offsite_payment ? "selected" : ""}>No</option><option value="true" ${job.offsite_payment ? "selected" : ""}>Yes</option></select></div>
+              <div class="field"><label>Bill payer name</label><input name="bill_payer_name" value="${escapeHtml(job.bill_payer_name)}"></div>
+              <div class="field"><label>Bill payer telephone</label><input name="bill_payer_phone" value="${escapeHtml(job.bill_payer_phone)}"></div>
               <div class="field"><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
               <div class="field"><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
               <div class="field"><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
@@ -2948,9 +3107,10 @@ app.post("/jobs/:id/update", async (req, res) => {
         customer_name=$1, customer_phone=$2, customer_alt_phone=$3, customer_email=$4,
         address_line_1=$5, address_line_2=$6, address_line_3=$7, town=$8, county=$9, postcode=$10,
         job_type=$11, job_description=$12, urgency=$13, source_campaign=$14, quoted_price=$15,
-        expected_payment_method=$16, account_job=$17, account_template_id=$18, assigned_technician_id=$19,
-        eta=$20, dispatcher_notes=$21, status=$22, updated_at=NOW()
-      WHERE id=$23
+        starting_price=$16, call_out_agreed=$17, start_price_locks=$18, offsite_payment=$19, bill_payer_name=$20, bill_payer_phone=$21,
+        expected_payment_method=$22, account_job=$23, account_template_id=$24, assigned_technician_id=$25,
+        eta=$26, dispatcher_notes=$27, status=$28, updated_at=NOW()
+      WHERE id=$29
     `, [
       body.customer_name,
       body.customer_phone,
@@ -2967,6 +3127,12 @@ app.post("/jobs/:id/update", async (req, res) => {
       body.urgency || "Normal",
       body.source_campaign,
       parseMoneyInput(body.quoted_price),
+      parseMoneyInput(body.starting_price),
+      parseMoneyInput(body.call_out_agreed),
+      parseMoneyInput(body.start_price_locks),
+      body.offsite_payment === "true",
+      body.bill_payer_name,
+      body.bill_payer_phone,
       body.expected_payment_method || "Unknown",
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
