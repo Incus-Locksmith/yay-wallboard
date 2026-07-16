@@ -2090,6 +2090,40 @@ app.get("/api/postcoder-addresses", async (req, res) => {
 });
 
 app.get("/address-lookup-test", async (req, res) => {
+  const search = (req.query.search || "").trim();
+  let lookup = null;
+
+  if (search) {
+    try {
+      lookup = await lookupPostcoderAddresses(search);
+    } catch (error) {
+      console.error("Address lookup test page error:", error);
+      lookup = { ok: false, addresses: [], error: "Address lookup failed. Check Render logs." };
+    }
+  }
+
+  const addressButtons = lookup && lookup.ok && lookup.addresses.length
+    ? lookup.addresses.map((address, index) => {
+        const addressJson = escapeHtml(JSON.stringify(address));
+        return `
+          <button type="button" class="address-option" data-address="${addressJson}">
+            <strong>${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</strong>
+            <span>${escapeHtml(address.postcode || "")}</span>
+          </button>
+        `;
+      }).join("")
+    : "";
+
+  const statusMessage = !search
+    ? "Enter a postcode and press Find address."
+    : lookup && lookup.ok && lookup.addresses.length
+      ? `${lookup.addresses.length} address${lookup.addresses.length === 1 ? "" : "es"} found. Choose one below.`
+      : lookup && lookup.error
+        ? lookup.error
+        : "No addresses found. Check the postcode or enter the address manually.";
+
+  const statusClass = search && (!lookup || !lookup.ok || !lookup.addresses.length) ? "status error" : "status";
+
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -2099,28 +2133,31 @@ app.get("/address-lookup-test", async (req, res) => {
         ${sharedStyles()}
         .lookup-grid { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
         .result-list { margin-top: 18px; display: grid; gap: 10px; }
-        .address-option { width: 100%; text-align: left; background: #111827; border: 1px solid #374151; color: #f9fafb; border-radius: 10px; padding: 14px; cursor: pointer; }
+        .address-option { width: 100%; text-align: left; background: #111827; border: 1px solid #374151; color: #f9fafb; border-radius: 10px; padding: 14px; cursor: pointer; display: grid; gap: 4px; }
         .address-option:hover { border-color: #f59e0b; background: #172033; }
+        .address-option span { color: #9ca3af; font-size: 13px; }
         .picked { white-space: pre-line; background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 16px; min-height: 80px; color: #d1d5db; }
         .status { margin-top: 12px; color: #9ca3af; }
         .status.error { color: #fca5a5; }
         .form-preview { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 18px; }
+        .manual-note { color: #9ca3af; font-size: 13px; margin-top: 10px; }
       </style>
     </head>
     <body>
       ${nav(req)}
 
       <h1>Address Lookup Test</h1>
-      <div class="subtitle">Use this page to test your Postcoder API key before we plug it into the booking portal.</div>
+      <div class="subtitle">This version renders the address list on the server, so it does not rely on browser JavaScript to fetch the results.</div>
 
       <div class="panel">
         <h2>Find address</h2>
-        <div class="lookup-grid">
-          <input id="postcode-search" placeholder="Enter postcode, e.g. W3 7AR">
-          <button type="button" onclick="findAddresses()">Find address</button>
-        </div>
-        <div id="lookup-status" class="status"></div>
-        <div id="address-results" class="result-list"></div>
+        <form method="GET" action="/address-lookup-test" class="lookup-grid">
+          <input id="postcode-search" name="search" value="${escapeHtml(search)}" placeholder="Enter postcode, e.g. W3 7AR">
+          <button type="submit">Find address</button>
+        </form>
+        <div class="${statusClass}">${escapeHtml(statusMessage)}</div>
+        <div id="address-results" class="result-list">${addressButtons}</div>
+        <div class="manual-note">If the customer gives a flat number or building name that is not obvious, choose the closest address and adjust the address fields manually.</div>
       </div>
 
       <div class="panel">
@@ -2130,7 +2167,10 @@ app.get("/address-lookup-test", async (req, res) => {
           <input id="address_line_2" placeholder="Address line 2">
           <input id="address_line_3" placeholder="Address line 3">
           <input id="town" placeholder="Town">
+          <input id="county" placeholder="County">
           <input id="postcode" placeholder="Postcode">
+          <input id="latitude" placeholder="Latitude">
+          <input id="longitude" placeholder="Longitude">
           <input id="udprn" placeholder="UDPRN / unique address id">
         </div>
         <br>
@@ -2138,27 +2178,15 @@ app.get("/address-lookup-test", async (req, res) => {
       </div>
 
       <script>
-        function escapeHtmlClient(value) {
-          return String(value || "")
-            .replaceAll("&", "&amp;")
-            .replaceAll("<", "&lt;")
-            .replaceAll(">", "&gt;")
-            .replaceAll('"', "&quot;")
-            .replaceAll("'", "&#039;");
-        }
-
-        function setStatus(message, isError) {
-          const status = document.getElementById("lookup-status");
-          status.textContent = message || "";
-          status.className = isError ? "status error" : "status";
-        }
-
         function chooseAddress(address) {
           document.getElementById("address_line_1").value = address.address_line_1 || "";
           document.getElementById("address_line_2").value = address.address_line_2 || "";
           document.getElementById("address_line_3").value = address.address_line_3 || "";
           document.getElementById("town").value = address.town || "";
+          document.getElementById("county").value = address.county || "";
           document.getElementById("postcode").value = address.postcode || "";
+          document.getElementById("latitude").value = address.latitude || "";
+          document.getElementById("longitude").value = address.longitude || "";
           document.getElementById("udprn").value = address.udprn || "";
 
           const picked = [
@@ -2166,58 +2194,21 @@ app.get("/address-lookup-test", async (req, res) => {
             address.address_line_2,
             address.address_line_3,
             address.town,
+            address.county,
             address.postcode
           ].filter(Boolean).join("\n");
 
           document.getElementById("picked-address").textContent = picked || "Address selected.";
         }
 
-        async function findAddresses() {
-          const search = document.getElementById("postcode-search").value.trim();
-          const results = document.getElementById("address-results");
-          results.innerHTML = "";
-
-          if (!search) {
-            setStatus("Enter a postcode first.", true);
-            return;
-          }
-
-          setStatus("Looking up addresses...", false);
-
-          try {
-            const response = await fetch("/api/postcoder-addresses?search=" + encodeURIComponent(search));
-            const data = await response.json();
-
-            if (!data.ok) {
-              setStatus(data.error || "Address lookup failed.", true);
-              return;
+        document.querySelectorAll(".address-option").forEach(function(button) {
+          button.addEventListener("click", function() {
+            try {
+              chooseAddress(JSON.parse(button.getAttribute("data-address")));
+            } catch (error) {
+              document.getElementById("picked-address").textContent = "Could not load that address into the preview fields.";
             }
-
-            if (!data.addresses || data.addresses.length === 0) {
-              setStatus("No addresses found. Check the postcode or enter address manually.", true);
-              return;
-            }
-
-            setStatus(data.addresses.length + " address" + (data.addresses.length === 1 ? "" : "es") + " found. Choose one below.", false);
-
-            data.addresses.forEach(function(address) {
-              const button = document.createElement("button");
-              button.type = "button";
-              button.className = "address-option";
-              button.innerHTML = escapeHtmlClient(address.summary || address.full_address || "Address");
-              button.addEventListener("click", function() { chooseAddress(address); });
-              results.appendChild(button);
-            });
-          } catch (error) {
-            setStatus("Address lookup failed. Check Render logs.", true);
-          }
-        }
-
-        document.getElementById("postcode-search").addEventListener("keydown", function(event) {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            findAddresses();
-          }
+          });
         });
       </script>
     </body>
