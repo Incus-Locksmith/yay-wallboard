@@ -393,6 +393,73 @@ function invoiceStageOptions(selectedStage = "Draft only") {
   }).join("");
 }
 
+
+const jobStatuses = [
+  { value: "open", label: "Open" },
+  { value: "assigned", label: "Assigned" },
+  { value: "completed", label: "Completed" },
+  { value: "closed", label: "Closed" },
+  { value: "awaiting_payment", label: "Awaiting payment" },
+  { value: "fully_paid_private", label: "Fully paid (private)" },
+  { value: "invoiced_account", label: "Invoiced (Account)" }
+];
+
+const activeJobStatuses = ["open", "assigned", "completed", "awaiting_payment"];
+
+const jobTypes = [
+  "Lockout",
+  "Lock change",
+  "Lock repair",
+  "Fresh lock installation",
+  "Boarding up / temporary security",
+  "Safe opening",
+  "Account job",
+  "Other"
+];
+
+const jobUrgencies = ["Normal", "Urgent", "Emergency"];
+const jobPaymentMethods = ["Unknown", "Cash", "Card", "Bank transfer", "Account"];
+const jobOutcomes = ["Completed", "Cancelled", "No answer", "Customer declined", "Follow-up needed", "Other"];
+
+function optionList(items, selectedValue = "") {
+  return items.map(item => {
+    const value = typeof item === "string" ? item : item.value;
+    const label = typeof item === "string" ? item : item.label;
+    const selected = String(value) === String(selectedValue || "") ? "selected" : "";
+    return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(label)}</option>`;
+  }).join("");
+}
+
+function jobStatusLabel(status) {
+  const found = jobStatuses.find(item => item.value === status);
+  return found ? found.label : (status || "Open");
+}
+
+function jobStatusClass(status) {
+  const clean = String(status || "open").replaceAll("_", "-");
+  return `job-${clean}`;
+}
+
+function jobStatusOptions(selectedStatus = "open") {
+  return optionList(jobStatuses, selectedStatus);
+}
+
+function parseMoneyInput(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const number = Number(String(value).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseOptionalInt(value) {
+  if (!value) return null;
+  const number = Number(value);
+  return Number.isInteger(number) ? number : null;
+}
+
+function jobNumber(id) {
+  return `J${String(id).padStart(5, "0")}`;
+}
+
 function dispatchRank(status) {
   const value = (status || "").toLowerCase();
   if (value.includes("available") && !value.includes("soon")) return 1;
@@ -712,6 +779,20 @@ function sharedStyles() {
     .help { color: #9ca3af; font-size: 14px; margin-top: 8px; }
     .search-form { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
     .copy-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 7px; color: #d1d5db; }
+    .job-open { background: #2563eb; color: white; }
+    .job-assigned { background: #7c3aed; color: white; }
+    .job-completed { background: #f59e0b; color: black; }
+    .job-closed { background: #374151; color: #d1d5db; }
+    .job-awaiting-payment { background: #dc2626; color: white; }
+    .job-fully-paid-private { background: #16a34a; color: white; }
+    .job-invoiced-account { background: #22c55e; color: black; }
+    .job-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+    .job-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .job-card-title { font-weight: bold; font-size: 16px; }
+    .job-card-sub { color: #9ca3af; font-size: 13px; margin-top: 4px; line-height: 1.35; }
+    .big-total { font-size: 30px; font-weight: bold; }
+    @media (max-width: 800px) { .job-grid, .job-grid-3 { grid-template-columns: 1fr; } }
+
   `;
 }
 
@@ -726,6 +807,7 @@ function nav(req) {
     <div class="nav">
       <a href="/">Call Wallboard</a>
       <a href="/reports">Reports</a>
+      <a href="/jobs">Jobs</a>
       <a href="/technicians">Technicians</a>
       <a href="/dispatch">Dispatch</a>
       <a href="/address-lookup-test">Address Lookup</a>
@@ -956,6 +1038,83 @@ async function initDb() {
 
   await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
   await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+
+
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS jobs (
+      id SERIAL PRIMARY KEY,
+      job_number TEXT,
+      customer_name TEXT,
+      customer_phone TEXT,
+      customer_alt_phone TEXT,
+      customer_email TEXT,
+      address_line_1 TEXT,
+      address_line_2 TEXT,
+      address_line_3 TEXT,
+      town TEXT,
+      county TEXT,
+      postcode TEXT,
+      latitude NUMERIC(12,8),
+      longitude NUMERIC(12,8),
+      udprn TEXT,
+      job_type TEXT,
+      job_description TEXT,
+      urgency TEXT DEFAULT 'Normal',
+      source_campaign TEXT,
+      quoted_price NUMERIC(10,2),
+      expected_payment_method TEXT DEFAULT 'Unknown',
+      account_job BOOLEAN DEFAULT FALSE,
+      account_template_id INTEGER,
+      assigned_technician_id INTEGER,
+      eta TEXT,
+      dispatcher_name TEXT,
+      dispatcher_notes TEXT,
+      status TEXT DEFAULT 'open',
+      final_value NUMERIC(10,2),
+      payment_method TEXT,
+      customer_paid BOOLEAN DEFAULT FALSE,
+      materials_used TEXT,
+      materials_cost NUMERIC(10,2),
+      outcome TEXT,
+      tech_notes TEXT,
+      close_notes TEXT,
+      closed_by TEXT,
+      closed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_number TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_alt_phone TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS address_line_3 TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS latitude NUMERIC(12,8);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS longitude NUMERIC(12,8);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS udprn TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_campaign TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS quoted_price NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expected_payment_method TEXT DEFAULT 'Unknown';`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_job BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_template_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_technician_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_notes TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_value NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_paid BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_used TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_cost NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS outcome TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_notes TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS close_notes TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
 
   await seedDefaultInvoiceItems();
   await seedDefaultInvoiceTemplates();
@@ -2086,6 +2245,582 @@ app.get("/api/postcoder-addresses", async (req, res) => {
   } catch (error) {
     console.error("Postcoder API route error:", error);
     res.status(500).json({ ok: false, addresses: [], error: "Address lookup failed. Check Render logs." });
+  }
+});
+
+
+function technicianOptions(technicians, selectedId = "") {
+  return technicians.map(tech => `<option value="${tech.id}" ${String(tech.id) === String(selectedId || "") ? "selected" : ""}>${escapeHtml(tech.name)}${tech.status ? ` — ${escapeHtml(tech.status)}` : ""}</option>`).join("");
+}
+
+function accountTemplateOptions(templates, selectedId = "") {
+  return templates.map(template => `<option value="${template.id}" ${String(template.id) === String(selectedId || "") ? "selected" : ""}>${escapeHtml(template.template_name)}</option>`).join("");
+}
+
+function jobAddressBlock(job) {
+  return [
+    job.address_line_1,
+    job.address_line_2,
+    job.address_line_3,
+    job.town,
+    job.county,
+    job.postcode
+  ].filter(Boolean).map(escapeHtml).join("<br>");
+}
+
+app.get("/jobs", async (req, res) => {
+  try {
+    const selectedStatus = (req.query.status || "active").trim();
+    const search = (req.query.search || "").trim();
+
+    const where = [];
+    const params = [];
+
+    if (selectedStatus && selectedStatus !== "all" && selectedStatus !== "active") {
+      params.push(selectedStatus);
+      where.push(`j.status = $${params.length}`);
+    } else if (selectedStatus === "active") {
+      params.push(activeJobStatuses);
+      where.push(`j.status = ANY($${params.length})`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(
+        COALESCE(j.job_number, '') ILIKE $${params.length}
+        OR COALESCE(j.customer_name, '') ILIKE $${params.length}
+        OR COALESCE(j.customer_phone, '') ILIKE $${params.length}
+        OR COALESCE(j.postcode, '') ILIKE $${params.length}
+        OR COALESCE(j.address_line_1, '') ILIKE $${params.length}
+      )`);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const jobsResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      ${whereSql}
+      ORDER BY j.created_at DESC
+      LIMIT 300
+    `, params);
+
+    const countsResult = await pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`);
+    const counts = Object.fromEntries(countsResult.rows.map(row => [row.status || "open", row.count]));
+    const activeCount = activeJobStatuses.reduce((sum, status) => sum + Number(counts[status] || 0), 0);
+
+    const statusFilterOptions = [
+      { value: "active", label: `Active jobs (${activeCount})` },
+      { value: "all", label: "All jobs" },
+      ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
+    ];
+
+    const rows = jobsResult.rows.map(job => `
+      <tr>
+        <td>
+          <div class="job-card-title"><a href="/jobs/${job.id}/edit">${escapeHtml(job.job_number || jobNumber(job.id))}</a></div>
+          <div class="job-card-sub">Created ${formatDateTime(job.created_at)}<br>By ${escapeHtml(job.dispatcher_name || "Unknown")}</div>
+        </td>
+        <td>
+          <strong>${escapeHtml(job.customer_name || "—")}</strong>
+          <div class="job-card-sub">${escapeHtml(job.customer_phone || "")}</div>
+        </td>
+        <td>${jobAddressBlock(job) || "—"}</td>
+        <td>
+          <strong>${escapeHtml(job.job_type || "—")}</strong>
+          <div class="job-card-sub">${escapeHtml(job.urgency || "Normal")}${job.quoted_price !== null && job.quoted_price !== undefined ? ` · Quoted ${money(job.quoted_price)}` : ""}</div>
+        </td>
+        <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+        <td>
+          <div class="actions">
+            <a href="/jobs/${job.id}/edit">Open / Edit</a>
+            <a href="/jobs/${job.id}/close">Close job</a>
+          </div>
+        </td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Jobs</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Jobs</h1>
+        <div class="subtitle">Live job booking board. Open, assign, complete, close and report on jobs.</div>
+
+        <div class="grid-3">
+          <div class="panel"><div class="muted">Active jobs</div><div class="big-total">${activeCount}</div></div>
+          <div class="panel"><div class="muted">Awaiting payment</div><div class="big-total">${counts.awaiting_payment || 0}</div></div>
+          <div class="panel"><div class="muted">Completed today/overall</div><div class="big-total">${counts.completed || 0}</div></div>
+        </div>
+
+        <div class="panel">
+          <form method="GET" action="/jobs" class="job-grid-3">
+            <select name="status">${optionList(statusFilterOptions, selectedStatus || "active")}</select>
+            <input name="search" value="${escapeHtml(search)}" placeholder="Search job number, customer, phone, postcode">
+            <button type="submit">Filter jobs</button>
+          </form>
+          <br>
+          <a class="button" href="/jobs/new">+ New job booking</a>
+        </div>
+
+        <table>
+          <tr>
+            <th>Job</th><th>Customer</th><th>Address</th><th>Job type</th><th>Technician</th><th>Status</th><th>Actions</th>
+          </tr>
+          ${rows || `<tr><td colspan="7" class="muted">No jobs found.</td></tr>`}
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Jobs page error:", error);
+    res.status(500).send("Jobs page error");
+  }
+});
+
+app.get("/jobs/new", async (req, res) => {
+  try {
+    const search = (req.query.search || "").trim();
+    let lookup = null;
+    if (search) {
+      try {
+        lookup = await lookupPostcoderAddresses(search);
+      } catch (error) {
+        console.error("Job address lookup error:", error);
+        lookup = { ok: false, addresses: [], error: "Address lookup failed. Check Render logs." };
+      }
+    }
+
+    const addresses = lookup && lookup.ok && Array.isArray(lookup.addresses) ? lookup.addresses : [];
+    const addressesJson = JSON.stringify(addresses).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+    const addressOptions = addresses.map((address, index) => `<option value="${index}">${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</option>`).join("");
+
+    const technicians = (await pool.query(`SELECT id, name, status FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const templates = (await pool.query(`SELECT id, template_name, customer_name, customer_address, customer_postcode FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
+    const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+
+    const statusMessage = !search
+      ? "Enter the job postcode first, then choose the correct address."
+      : addresses.length
+        ? `${addresses.length} address${addresses.length === 1 ? "" : "es"} found. Choose the correct address from the dropdown.`
+        : lookup && lookup.error
+          ? lookup.error
+          : "No addresses found. You can still type the address manually.";
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>New Job Booking</title>
+        <style>
+          ${sharedStyles()}
+          .address-select-wrap { margin-top: 16px; padding: 16px; border: 1px solid #374151; background: #111827; border-radius: 12px; }
+          .address-select-wrap label { display: block; margin-bottom: 10px; color: #fbbf24; font-weight: 800; }
+          .address-select { width: 100%; min-height: 52px; background: #030712; border: 2px solid #f59e0b; color: #f9fafb; border-radius: 10px; padding: 12px; font-size: 16px; }
+          label { color: #d1d5db; font-size: 13px; font-weight: bold; margin-bottom: 5px; display: block; }
+          .field input, .field select, .field textarea { width: 100%; box-sizing: border-box; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>New Job Booking</h1>
+        <div class="subtitle">Use this when a dispatcher is booking a job from a telephone call.</div>
+
+        <div class="panel">
+          <h2>1. Find job address</h2>
+          <form method="GET" action="/jobs/new" class="lookup-grid" style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;">
+            <input name="search" value="${escapeHtml(search)}" placeholder="Enter postcode, e.g. W3 7AR">
+            <button type="submit">Find address</button>
+          </form>
+          <div class="help">${escapeHtml(statusMessage)}</div>
+          ${addresses.length ? `
+            <div class="address-select-wrap">
+              <label for="address-select">Select address</label>
+              <select id="address-select" class="address-select">
+                <option value="">Choose an address...</option>
+                ${addressOptions}
+              </select>
+            </div>
+          ` : ""}
+        </div>
+
+        <form method="POST" action="/jobs/create">
+          <div class="panel">
+            <h2>2. Customer details</h2>
+            <div class="job-grid">
+              <div class="field"><label>Customer name</label><input name="customer_name" required></div>
+              <div class="field"><label>Customer phone</label><input name="customer_phone" required></div>
+              <div class="field"><label>Alternative phone</label><input name="customer_alt_phone"></div>
+              <div class="field"><label>Email</label><input name="customer_email" type="email"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>3. Job address</h2>
+            <div class="job-grid">
+              <div class="field"><label>Address line 1</label><input id="address_line_1" name="address_line_1" required></div>
+              <div class="field"><label>Address line 2</label><input id="address_line_2" name="address_line_2"></div>
+              <div class="field"><label>Address line 3</label><input id="address_line_3" name="address_line_3"></div>
+              <div class="field"><label>Town</label><input id="town" name="town"></div>
+              <div class="field"><label>County</label><input id="county" name="county"></div>
+              <div class="field"><label>Postcode</label><input id="postcode" name="postcode" value="${escapeHtml(search)}" required></div>
+              <input id="latitude" name="latitude" type="hidden">
+              <input id="longitude" name="longitude" type="hidden">
+              <input id="udprn" name="udprn" type="hidden">
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>4. Booking details</h2>
+            <div class="job-grid">
+              <div class="field"><label>Job type</label><select name="job_type">${optionList(jobTypes, "Lockout")}</select></div>
+              <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, "Normal")}</select></div>
+              <div class="field"><label>Source / campaign</label><input name="source_campaign" placeholder="Google, account, repeat customer..."></div>
+              <div class="field"><label>Quoted price / start price</label><input name="quoted_price" inputmode="decimal" placeholder="e.g. 75"></div>
+              <div class="field"><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, "Unknown")}</select></div>
+              <div class="field"><label>Account job?</label><select id="account_job" name="account_job"><option value="false">No</option><option value="true">Yes</option></select></div>
+              <div class="field"><label>Account template</label><select id="account_template_id" name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates)}</select></div>
+              <div class="field"><label>Assign technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians)}</select></div>
+              <div class="field"><label>ETA</label><input name="eta" placeholder="e.g. 30-45 mins"></div>
+              <div class="field"><label>Status</label><select name="status">${jobStatusOptions("open")}</select></div>
+            </div>
+            <br>
+            <label>Job description</label>
+            <textarea name="job_description" rows="4" placeholder="What has the customer said? Lock type, access issue, extra details..."></textarea>
+            <br><br>
+            <label>Dispatcher notes</label>
+            <textarea name="dispatcher_notes" rows="3" placeholder="Internal notes for office / technician..."></textarea>
+          </div>
+
+          <button type="submit">Create job booking</button>
+          <a href="/jobs" style="margin-left:12px;">Cancel</a>
+        </form>
+
+        <script>
+          const addresses = ${addressesJson};
+          const templates = ${templatesJson};
+
+          function setValue(id, value) {
+            const element = document.getElementById(id);
+            if (element) element.value = value || "";
+          }
+
+          function chooseAddress(index) {
+            const address = addresses[Number(index)];
+            if (!address) return;
+            setValue("address_line_1", address.address_line_1);
+            setValue("address_line_2", address.address_line_2);
+            setValue("address_line_3", address.address_line_3);
+            setValue("town", address.town);
+            setValue("county", address.county);
+            setValue("postcode", address.postcode);
+            setValue("latitude", address.latitude);
+            setValue("longitude", address.longitude);
+            setValue("udprn", address.udprn);
+          }
+
+          const addressSelect = document.getElementById("address-select");
+          if (addressSelect) addressSelect.addEventListener("change", () => chooseAddress(addressSelect.value));
+
+          const accountTemplate = document.getElementById("account_template_id");
+          const accountJob = document.getElementById("account_job");
+          if (accountTemplate) {
+            accountTemplate.addEventListener("change", () => {
+              if (accountTemplate.value && accountJob) accountJob.value = "true";
+            });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("New job page error:", error);
+    res.status(500).send("New job page error");
+  }
+});
+
+app.post("/jobs/create", async (req, res) => {
+  try {
+    const body = req.body;
+    const result = await pool.query(`
+      INSERT INTO jobs (
+        customer_name, customer_phone, customer_alt_phone, customer_email,
+        address_line_1, address_line_2, address_line_3, town, county, postcode, latitude, longitude, udprn,
+        job_type, job_description, urgency, source_campaign, quoted_price, expected_payment_method,
+        account_job, account_template_id, assigned_technician_id, eta, dispatcher_name, dispatcher_notes, status,
+        created_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,
+        $5,$6,$7,$8,$9,$10,$11,$12,$13,
+        $14,$15,$16,$17,$18,$19,
+        $20,$21,$22,$23,$24,$25,$26,
+        NOW(), NOW()
+      ) RETURNING id
+    `, [
+      body.customer_name,
+      body.customer_phone,
+      body.customer_alt_phone,
+      body.customer_email,
+      body.address_line_1,
+      body.address_line_2,
+      body.address_line_3,
+      body.town,
+      body.county,
+      (body.postcode || "").toUpperCase(),
+      parseMoneyInput(body.latitude),
+      parseMoneyInput(body.longitude),
+      body.udprn,
+      body.job_type,
+      body.job_description,
+      body.urgency || "Normal",
+      body.source_campaign,
+      parseMoneyInput(body.quoted_price),
+      body.expected_payment_method || "Unknown",
+      body.account_job === "true",
+      parseOptionalInt(body.account_template_id),
+      parseOptionalInt(body.assigned_technician_id),
+      body.eta,
+      currentAgentName(req),
+      body.dispatcher_notes,
+      body.status || "open"
+    ]);
+
+    const id = result.rows[0].id;
+    await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2`, [jobNumber(id), id]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Create job error:", error);
+    res.status(500).send("Could not create job");
+  }
+});
+
+app.get("/jobs/:id/edit", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+    const job = jobResult.rows[0];
+    const technicians = (await pool.query(`SELECT id, name, status FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Edit Job</title>
+        <style>${sharedStyles()} label { color:#d1d5db; font-size:13px; font-weight:bold; margin-bottom:5px; display:block; } .field input,.field select,.field textarea{width:100%;box-sizing:border-box;}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>${escapeHtml(job.job_number || jobNumber(job.id))}</h1>
+        <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
+
+        <div class="panel">
+          <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+          <a href="/jobs/${job.id}/close" style="margin-left:15px;">Close job / payment details</a>
+          <a href="/jobs" style="margin-left:15px;">Back to jobs</a>
+        </div>
+
+        <form method="POST" action="/jobs/${job.id}/update">
+          <div class="panel">
+            <h2>Customer</h2>
+            <div class="job-grid">
+              <div class="field"><label>Customer name</label><input name="customer_name" value="${escapeHtml(job.customer_name)}" required></div>
+              <div class="field"><label>Customer phone</label><input name="customer_phone" value="${escapeHtml(job.customer_phone)}" required></div>
+              <div class="field"><label>Alternative phone</label><input name="customer_alt_phone" value="${escapeHtml(job.customer_alt_phone)}"></div>
+              <div class="field"><label>Email</label><input name="customer_email" value="${escapeHtml(job.customer_email)}"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Address</h2>
+            <div class="job-grid">
+              <div class="field"><label>Address line 1</label><input name="address_line_1" value="${escapeHtml(job.address_line_1)}" required></div>
+              <div class="field"><label>Address line 2</label><input name="address_line_2" value="${escapeHtml(job.address_line_2)}"></div>
+              <div class="field"><label>Address line 3</label><input name="address_line_3" value="${escapeHtml(job.address_line_3)}"></div>
+              <div class="field"><label>Town</label><input name="town" value="${escapeHtml(job.town)}"></div>
+              <div class="field"><label>County</label><input name="county" value="${escapeHtml(job.county)}"></div>
+              <div class="field"><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Job details</h2>
+            <div class="job-grid">
+              <div class="field"><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
+              <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
+              <div class="field"><label>Source / campaign</label><input name="source_campaign" value="${escapeHtml(job.source_campaign)}"></div>
+              <div class="field"><label>Quoted price / start price</label><input name="quoted_price" value="${job.quoted_price !== null && job.quoted_price !== undefined ? Number(job.quoted_price).toFixed(2) : ""}"></div>
+              <div class="field"><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
+              <div class="field"><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
+              <div class="field"><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
+              <div class="field"><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
+              <div class="field"><label>ETA</label><input name="eta" value="${escapeHtml(job.eta)}"></div>
+              <div class="field"><label>Status</label><select name="status">${jobStatusOptions(job.status)}</select></div>
+            </div>
+            <br>
+            <label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea>
+            <br><br>
+            <label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea>
+          </div>
+
+          <button type="submit">Save job</button>
+          <a href="/jobs" style="margin-left:12px;">Cancel</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit job page error:", error);
+    res.status(500).send("Edit job page error");
+  }
+});
+
+app.post("/jobs/:id/update", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const body = req.body;
+    await pool.query(`
+      UPDATE jobs SET
+        customer_name=$1, customer_phone=$2, customer_alt_phone=$3, customer_email=$4,
+        address_line_1=$5, address_line_2=$6, address_line_3=$7, town=$8, county=$9, postcode=$10,
+        job_type=$11, job_description=$12, urgency=$13, source_campaign=$14, quoted_price=$15,
+        expected_payment_method=$16, account_job=$17, account_template_id=$18, assigned_technician_id=$19,
+        eta=$20, dispatcher_notes=$21, status=$22, updated_at=NOW()
+      WHERE id=$23
+    `, [
+      body.customer_name,
+      body.customer_phone,
+      body.customer_alt_phone,
+      body.customer_email,
+      body.address_line_1,
+      body.address_line_2,
+      body.address_line_3,
+      body.town,
+      body.county,
+      (body.postcode || "").toUpperCase(),
+      body.job_type,
+      body.job_description,
+      body.urgency || "Normal",
+      body.source_campaign,
+      parseMoneyInput(body.quoted_price),
+      body.expected_payment_method || "Unknown",
+      body.account_job === "true",
+      parseOptionalInt(body.account_template_id),
+      parseOptionalInt(body.assigned_technician_id),
+      body.eta,
+      body.dispatcher_notes,
+      body.status || "open",
+      id
+    ]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Update job error:", error);
+    res.status(500).send("Could not update job");
+  }
+});
+
+app.get("/jobs/:id/close", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
+    if (!result.rows.length) return res.status(404).send("Job not found");
+    const job = result.rows[0];
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Close Job</title><style>${sharedStyles()} label { color:#d1d5db; font-size:13px; font-weight:bold; margin-bottom:5px; display:block; } .field input,.field select,.field textarea{width:100%;box-sizing:border-box;}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Close ${escapeHtml(job.job_number || jobNumber(job.id))}</h1>
+        <div class="subtitle">${escapeHtml(job.customer_name || "")} · ${escapeHtml(job.postcode || "")} · Technician: ${escapeHtml(job.technician_name || "Unassigned")}</div>
+
+        <div class="panel">
+          <h2>Job summary</h2>
+          <p><strong>Address:</strong><br>${jobAddressBlock(job) || "—"}</p>
+          <p><strong>Job:</strong> ${escapeHtml(job.job_type || "—")} ${job.quoted_price !== null && job.quoted_price !== undefined ? `· Quoted ${money(job.quoted_price)}` : ""}</p>
+          <p><strong>Description:</strong><br>${escapeHtml(job.job_description || "—")}</p>
+        </div>
+
+        <form method="POST" action="/jobs/${job.id}/close">
+          <div class="panel">
+            <h2>Close job / payment</h2>
+            <div class="job-grid">
+              <div class="field"><label>Final job value</label><input name="final_value" value="${job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : ""}" inputmode="decimal" required></div>
+              <div class="field"><label>Payment method</label><select name="payment_method">${optionList(jobPaymentMethods, job.payment_method || job.expected_payment_method || "Unknown")}</select></div>
+              <div class="field"><label>Customer paid?</label><select name="customer_paid"><option value="false" ${!job.customer_paid ? "selected" : ""}>No</option><option value="true" ${job.customer_paid ? "selected" : ""}>Yes</option></select></div>
+              <div class="field"><label>Final status</label><select name="status">${jobStatusOptions(job.status || "completed")}</select></div>
+              <div class="field"><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 18"></div>
+              <div class="field"><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || "Completed")}</select></div>
+            </div>
+            <br>
+            <label>Materials used</label>
+            <textarea name="materials_used" rows="3" placeholder="Parts/materials used by the technician">${escapeHtml(job.materials_used)}</textarea>
+            <br><br>
+            <label>Technician notes</label>
+            <textarea name="tech_notes" rows="3">${escapeHtml(job.tech_notes)}</textarea>
+            <br><br>
+            <label>Close notes</label>
+            <textarea name="close_notes" rows="3">${escapeHtml(job.close_notes)}</textarea>
+          </div>
+          <button type="submit">Save close details</button>
+          <a href="/jobs/${job.id}/edit" style="margin-left:12px;">Back to job</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Close job page error:", error);
+    res.status(500).send("Close job page error");
+  }
+});
+
+app.post("/jobs/:id/close", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const body = req.body;
+    await pool.query(`
+      UPDATE jobs SET
+        final_value=$1,
+        payment_method=$2,
+        customer_paid=$3,
+        materials_used=$4,
+        materials_cost=$5,
+        outcome=$6,
+        tech_notes=$7,
+        close_notes=$8,
+        status=$9,
+        closed_by=$10,
+        closed_at=COALESCE(closed_at, NOW()),
+        updated_at=NOW()
+      WHERE id=$11
+    `, [
+      parseMoneyInput(body.final_value),
+      body.payment_method || "Unknown",
+      body.customer_paid === "true",
+      body.materials_used,
+      parseMoneyInput(body.materials_cost),
+      body.outcome,
+      body.tech_notes,
+      body.close_notes,
+      body.status || "completed",
+      currentAgentName(req),
+      id
+    ]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Close job error:", error);
+    res.status(500).send("Could not close job");
   }
 });
 
