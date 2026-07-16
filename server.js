@@ -2404,101 +2404,346 @@ app.get("/jobs/new", async (req, res) => {
     const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 
     const statusMessage = !search
-      ? "Enter the job postcode first, then choose the correct address."
+      ? "Enter a postcode, press Find address, then choose the address from the dropdown."
       : addresses.length
-        ? `${addresses.length} address${addresses.length === 1 ? "" : "es"} found. Choose the correct address from the dropdown.`
+        ? `${addresses.length} address${addresses.length === 1 ? "" : "es"} found. Select the correct address from the dropdown.`
         : lookup && lookup.error
           ? lookup.error
           : "No addresses found. You can still type the address manually.";
+
+    const categoryOptions = [
+      "Locksmith",
+      "Lockout",
+      "Lock change",
+      "Lock repair",
+      "Fresh installation",
+      "Boarding up",
+      "Safe",
+      "Account job",
+      "Other"
+    ];
+
+    const campaignOptions = [
+      "Unknown",
+      "Google",
+      "Google Ads",
+      "Organic",
+      "Repeat customer",
+      "Account customer",
+      "Referral",
+      "Emergency callout",
+      "Other"
+    ];
 
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
-        <title>New Job Booking</title>
+        <title>Create New Job</title>
         <style>
           ${sharedStyles()}
-          .address-select-wrap { margin-top: 16px; padding: 16px; border: 1px solid #374151; background: #111827; border-radius: 12px; }
-          .address-select-wrap label { display: block; margin-bottom: 10px; color: #fbbf24; font-weight: 800; }
-          .address-select { width: 100%; min-height: 52px; background: #030712; border: 2px solid #f59e0b; color: #f9fafb; border-radius: 10px; padding: 12px; font-size: 16px; }
-          label { color: #d1d5db; font-size: 13px; font-weight: bold; margin-bottom: 5px; display: block; }
-          .field input, .field select, .field textarea { width: 100%; box-sizing: border-box; }
+          body { background: #f3f4f6; }
+          h1 { margin-bottom: 8px; }
+          .order-shell {
+            max-width: 1050px;
+            margin: 0 auto 40px;
+          }
+          .order-panel {
+            background: #ffffff;
+            color: #111827;
+            border: 1px solid #d1d5db;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+          }
+          .order-title {
+            padding: 18px 22px;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 18px;
+            font-weight: 800;
+            color: #111827;
+          }
+          .order-body { padding: 22px; }
+          .section-title {
+            margin: 26px 0 14px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #d1d5db;
+            color: #111827;
+            font-size: 15px;
+            font-weight: 800;
+          }
+          .section-title:first-child { margin-top: 0; }
+          .form-grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px 26px;
+          }
+          .form-grid-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 16px 22px;
+          }
+          .field label, .wide-field label, .postcode-lookup label {
+            display: block;
+            color: #374151;
+            font-size: 12px;
+            font-weight: 800;
+            margin-bottom: 7px;
+          }
+          .field input,
+          .field select,
+          .field textarea,
+          .wide-field input,
+          .wide-field select,
+          .wide-field textarea,
+          .postcode-lookup input,
+          .address-select {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 42px;
+            border: 1px solid #bfc7d1;
+            border-radius: 2px;
+            background: #ffffff;
+            color: #111827;
+            padding: 9px 10px;
+            font-size: 14px;
+          }
+          .field textarea, .wide-field textarea { min-height: 110px; resize: vertical; }
+          .wide-field { margin-top: 16px; }
+          .helper-line {
+            color: #6b7280;
+            font-size: 12px;
+            margin-top: 8px;
+          }
+          .divider-text {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #6b7280;
+            font-size: 12px;
+            margin: 14px 0;
+          }
+          .divider-text:before,
+          .divider-text:after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: #d1d5db;
+          }
+          .postcode-row {
+            display: grid;
+            grid-template-columns: minmax(240px, 1fr) auto;
+            gap: 12px;
+            align-items: end;
+            max-width: 700px;
+          }
+          .lookup-button, .create-button {
+            border: 0;
+            border-radius: 4px;
+            background: #2563eb;
+            color: white;
+            font-weight: 800;
+            padding: 11px 16px;
+            cursor: pointer;
+            min-height: 42px;
+          }
+          .create-button {
+            padding: 13px 22px;
+            background: #1f5fbf;
+          }
+          .address-choice {
+            margin: 14px 0 6px;
+            padding: 14px;
+            border: 1px solid #d1d5db;
+            background: #f9fafb;
+          }
+          .address-choice label {
+            color: #111827;
+            font-size: 13px;
+            font-weight: 800;
+          }
+          .address-choice select { margin-top: 8px; }
+          .form-footer {
+            margin: 28px -22px -22px;
+            padding: 16px 22px;
+            background: #f9fafb;
+            border-top: 1px solid #d1d5db;
+            text-align: right;
+          }
+          .customer-line {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 26px;
+          }
+          .phone-line {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 26px;
+          }
+          .tel-wrap { display: grid; grid-template-columns: 58px 1fr; }
+          .tel-prefix {
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #bfc7d1;
+            border-right: 0;
+            color: #6b7280;
+            font-size: 12px;
+            background: #f9fafb;
+          }
+          .tel-wrap input { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+          .muted-light { color: #6b7280; font-size: 12px; }
+          @media (max-width: 800px) {
+            .form-grid-2, .form-grid-3, .customer-line, .phone-line, .postcode-row { grid-template-columns: 1fr; }
+            .order-body { padding: 16px; }
+            .form-footer { margin-left: -16px; margin-right: -16px; margin-bottom: -16px; }
+          }
         </style>
       </head>
       <body>
         ${nav(req)}
-        <h1>New Job Booking</h1>
-        <div class="subtitle">Use this when a dispatcher is booking a job from a telephone call.</div>
+        <div class="order-shell">
+          <h1>Create New Job</h1>
+          <div class="subtitle">Single-page booking form for dispatchers taking jobs by telephone.</div>
 
-        <div class="panel">
-          <h2>1. Find job address</h2>
-          <form method="GET" action="/jobs/new" class="lookup-grid" style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;">
-            <input name="search" value="${escapeHtml(search)}" placeholder="Enter postcode, e.g. W3 7AR">
-            <button type="submit">Find address</button>
-          </form>
-          <div class="help">${escapeHtml(statusMessage)}</div>
-          ${addresses.length ? `
-            <div class="address-select-wrap">
-              <label for="address-select">Select address</label>
-              <select id="address-select" class="address-select">
-                <option value="">Choose an address...</option>
-                ${addressOptions}
-              </select>
+          <div class="order-panel">
+            <div class="order-title">Create New Order</div>
+            <div class="order-body">
+
+              <form method="GET" action="/jobs/new" id="postcodeLookupForm">
+                <div class="section-title">Address Lookup</div>
+                <div class="postcode-row">
+                  <div class="postcode-lookup">
+                    <label>Enter customer postcode</label>
+                    <input name="search" value="${escapeHtml(search)}" placeholder="Enter your Postcode">
+                  </div>
+                  <button class="lookup-button" type="submit">Find your Address</button>
+                </div>
+                <div class="helper-line">${escapeHtml(statusMessage)}</div>
+
+                ${addresses.length ? `
+                  <div class="address-choice">
+                    <label for="address-select">Select address</label>
+                    <select id="address-select" class="address-select">
+                      <option value="">Choose an address...</option>
+                      ${addressOptions}
+                    </select>
+                    <div class="helper-line">The selected address will fill the address fields below.</div>
+                  </div>
+                ` : ""}
+              </form>
+
+              <form method="POST" action="/jobs/create" id="jobForm">
+                <div class="section-title">Job Details</div>
+                <div class="form-grid-2">
+                  <div class="field">
+                    <label>Category</label>
+                    <select name="job_type">${optionList(categoryOptions, "Locksmith")}</select>
+                  </div>
+                  <div class="field">
+                    <label>Campaign</label>
+                    <select name="source_campaign">${optionList(campaignOptions, "Unknown")}</select>
+                  </div>
+                </div>
+
+                <div class="wide-field">
+                  <label>Description</label>
+                  <textarea name="job_description" placeholder="Describe the job while the customer is on the phone. Include lock type, access issue, door type, urgency and anything the technician should know."></textarea>
+                </div>
+
+                <div class="section-title">Customer Details</div>
+                <div class="field" style="max-width: 500px;">
+                  <label>Existing Customer</label>
+                  <select id="existing_customer">
+                    <option value="">--</option>
+                    ${templates.map(template => `<option value="${template.id}">${escapeHtml(template.template_name)} — ${escapeHtml(template.customer_name)}</option>`).join("")}
+                  </select>
+                </div>
+
+                <div class="divider-text">Or Create New Customer</div>
+
+                <div class="customer-line">
+                  <div class="field">
+                    <label>Customer Name</label>
+                    <input id="customer_name" name="customer_name" required>
+                  </div>
+                  <div></div>
+                </div>
+
+                <div class="phone-line" style="margin-top:16px;">
+                  <div class="field">
+                    <label>Customer Phone</label>
+                    <div class="tel-wrap"><div class="tel-prefix">TEL</div><input name="customer_phone" required></div>
+                  </div>
+                  <div class="field">
+                    <label>Email</label>
+                    <input name="customer_email" type="email">
+                  </div>
+                </div>
+
+                <div class="field" style="max-width: 500px; margin-top:16px;">
+                  <label>Alternative Phone</label>
+                  <div class="tel-wrap"><div class="tel-prefix">TEL</div><input name="customer_alt_phone"></div>
+                </div>
+
+                <div class="section-title">Address</div>
+                <div class="wide-field" style="margin-top:0;">
+                  <label>Address Line 1</label>
+                  <input id="address_line_1" name="address_line_1" required>
+                </div>
+                <div class="form-grid-2" style="margin-top:16px;">
+                  <div class="field"><label>Address Line 2</label><input id="address_line_2" name="address_line_2"></div>
+                  <div class="field"><label>Address Line 3</label><input id="address_line_3" name="address_line_3"></div>
+                </div>
+                <div class="form-grid-3" style="margin-top:16px;">
+                  <div class="field"><label>Town</label><input id="town" name="town"></div>
+                  <div class="field"><label>County</label><input id="county" name="county"></div>
+                  <div class="field"><label>Postcode</label><input id="postcode" name="postcode" value="${escapeHtml(search)}" required></div>
+                </div>
+
+                <input id="latitude" name="latitude" type="hidden">
+                <input id="longitude" name="longitude" type="hidden">
+                <input id="udprn" name="udprn" type="hidden">
+
+                <div class="section-title">Dispatch Details</div>
+                <div class="form-grid-3">
+                  <div class="field">
+                    <label>Technician</label>
+                    <select name="assigned_technician_id"><option value="">-</option>${technicianOptions(technicians)}</select>
+                  </div>
+                  <div class="field">
+                    <label>Status</label>
+                    <select name="status">${jobStatusOptions("open")}</select>
+                  </div>
+                  <div class="field">
+                    <label>ETA</label>
+                    <input name="eta" placeholder="e.g. 30-45 mins">
+                  </div>
+                </div>
+
+                <div class="form-grid-3" style="margin-top:16px;">
+                  <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, "Normal")}</select></div>
+                  <div class="field"><label>Quoted / Start Price</label><input name="quoted_price" inputmode="decimal" placeholder="e.g. 75"></div>
+                  <div class="field"><label>Expected Payment Method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, "Unknown")}</select></div>
+                </div>
+
+                <div class="form-grid-2" style="margin-top:16px;">
+                  <div class="field"><label>Account Job?</label><select id="account_job" name="account_job"><option value="false">No</option><option value="true">Yes</option></select></div>
+                  <div class="field"><label>Account Template</label><select id="account_template_id" name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates)}</select></div>
+                </div>
+
+                <div class="wide-field">
+                  <label>Dispatcher Notes</label>
+                  <textarea name="dispatcher_notes" placeholder="Internal office notes. These are not customer-facing."></textarea>
+                </div>
+
+                <div class="form-footer">
+                  <a href="/jobs" style="margin-right:14px;">Cancel</a>
+                  <button class="create-button" type="submit">Create Order</button>
+                </div>
+              </form>
             </div>
-          ` : ""}
+          </div>
         </div>
-
-        <form method="POST" action="/jobs/create">
-          <div class="panel">
-            <h2>2. Customer details</h2>
-            <div class="job-grid">
-              <div class="field"><label>Customer name</label><input name="customer_name" required></div>
-              <div class="field"><label>Customer phone</label><input name="customer_phone" required></div>
-              <div class="field"><label>Alternative phone</label><input name="customer_alt_phone"></div>
-              <div class="field"><label>Email</label><input name="customer_email" type="email"></div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <h2>3. Job address</h2>
-            <div class="job-grid">
-              <div class="field"><label>Address line 1</label><input id="address_line_1" name="address_line_1" required></div>
-              <div class="field"><label>Address line 2</label><input id="address_line_2" name="address_line_2"></div>
-              <div class="field"><label>Address line 3</label><input id="address_line_3" name="address_line_3"></div>
-              <div class="field"><label>Town</label><input id="town" name="town"></div>
-              <div class="field"><label>County</label><input id="county" name="county"></div>
-              <div class="field"><label>Postcode</label><input id="postcode" name="postcode" value="${escapeHtml(search)}" required></div>
-              <input id="latitude" name="latitude" type="hidden">
-              <input id="longitude" name="longitude" type="hidden">
-              <input id="udprn" name="udprn" type="hidden">
-            </div>
-          </div>
-
-          <div class="panel">
-            <h2>4. Booking details</h2>
-            <div class="job-grid">
-              <div class="field"><label>Job type</label><select name="job_type">${optionList(jobTypes, "Lockout")}</select></div>
-              <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, "Normal")}</select></div>
-              <div class="field"><label>Source / campaign</label><input name="source_campaign" placeholder="Google, account, repeat customer..."></div>
-              <div class="field"><label>Quoted price / start price</label><input name="quoted_price" inputmode="decimal" placeholder="e.g. 75"></div>
-              <div class="field"><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, "Unknown")}</select></div>
-              <div class="field"><label>Account job?</label><select id="account_job" name="account_job"><option value="false">No</option><option value="true">Yes</option></select></div>
-              <div class="field"><label>Account template</label><select id="account_template_id" name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates)}</select></div>
-              <div class="field"><label>Assign technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians)}</select></div>
-              <div class="field"><label>ETA</label><input name="eta" placeholder="e.g. 30-45 mins"></div>
-              <div class="field"><label>Status</label><select name="status">${jobStatusOptions("open")}</select></div>
-            </div>
-            <br>
-            <label>Job description</label>
-            <textarea name="job_description" rows="4" placeholder="What has the customer said? Lock type, access issue, extra details..."></textarea>
-            <br><br>
-            <label>Dispatcher notes</label>
-            <textarea name="dispatcher_notes" rows="3" placeholder="Internal notes for office / technician..."></textarea>
-          </div>
-
-          <button type="submit">Create job booking</button>
-          <a href="/jobs" style="margin-left:12px;">Cancel</a>
-        </form>
 
         <script>
           const addresses = ${addressesJson};
@@ -2525,6 +2770,20 @@ app.get("/jobs/new", async (req, res) => {
 
           const addressSelect = document.getElementById("address-select");
           if (addressSelect) addressSelect.addEventListener("change", () => chooseAddress(addressSelect.value));
+
+          const existingCustomer = document.getElementById("existing_customer");
+          if (existingCustomer) {
+            existingCustomer.addEventListener("change", () => {
+              const template = templates.find(item => String(item.id) === String(existingCustomer.value));
+              if (!template) return;
+              setValue("customer_name", template.customer_name || "");
+              setValue("postcode", template.customer_postcode || "");
+              const accountJob = document.getElementById("account_job");
+              const accountTemplate = document.getElementById("account_template_id");
+              if (accountJob) accountJob.value = "true";
+              if (accountTemplate) accountTemplate.value = String(template.id);
+            });
+          }
 
           const accountTemplate = document.getElementById("account_template_id");
           const accountJob = document.getElementById("account_job");
