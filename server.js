@@ -2102,27 +2102,28 @@ app.get("/address-lookup-test", async (req, res) => {
     }
   }
 
-  const addressButtons = lookup && lookup.ok && lookup.addresses.length
-    ? lookup.addresses.map((address, index) => {
-        const addressJson = escapeHtml(JSON.stringify(address));
-        return `
-          <button type="button" class="address-option" data-address="${addressJson}">
-            <strong>${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</strong>
-            <span>${escapeHtml(address.postcode || "")}</span>
-          </button>
-        `;
+  const addresses = lookup && lookup.ok && Array.isArray(lookup.addresses) ? lookup.addresses : [];
+
+  const addressOptions = addresses.length
+    ? addresses.map((address, index) => {
+        return `<option value="${index}">${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</option>`;
       }).join("")
     : "";
 
+  const addressesJson = JSON.stringify(addresses)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026");
+
   const statusMessage = !search
     ? "Enter a postcode and press Find address."
-    : lookup && lookup.ok && lookup.addresses.length
-      ? `${lookup.addresses.length} address${lookup.addresses.length === 1 ? "" : "es"} found. Choose one below.`
+    : addresses.length
+      ? `${addresses.length} address${addresses.length === 1 ? "" : "es"} found. Use the Select address dropdown below.`
       : lookup && lookup.error
         ? lookup.error
         : "No addresses found. Check the postcode or enter the address manually.";
 
-  const statusClass = search && (!lookup || !lookup.ok || !lookup.addresses.length) ? "status error" : "status";
+  const statusClass = search && !addresses.length ? "status error" : "status";
 
   res.send(`
     <!DOCTYPE html>
@@ -2132,22 +2133,28 @@ app.get("/address-lookup-test", async (req, res) => {
       <style>
         ${sharedStyles()}
         .lookup-grid { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
-        .result-list { margin-top: 18px; display: grid; gap: 10px; }
-        .address-option { width: 100%; text-align: left; background: #111827; border: 1px solid #374151; color: #f9fafb; border-radius: 10px; padding: 14px; cursor: pointer; display: grid; gap: 4px; }
-        .address-option:hover { border-color: #f59e0b; background: #172033; }
-        .address-option span { color: #9ca3af; font-size: 13px; }
+        .address-select-wrap { margin-top: 22px; padding: 16px; border: 1px solid #374151; background: #111827; border-radius: 12px; }
+        .address-select-wrap label { display: block; margin-bottom: 10px; color: #fbbf24; font-weight: 800; font-size: 15px; }
+        .address-select { width: 100%; min-height: 52px; background: #030712; border: 2px solid #f59e0b; color: #f9fafb; border-radius: 10px; padding: 12px; font-size: 16px; }
+        .address-select:focus { outline: none; border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18); }
         .picked { white-space: pre-line; background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 16px; min-height: 80px; color: #d1d5db; }
         .status { margin-top: 12px; color: #9ca3af; }
+        .status strong { color: #fbbf24; }
         .status.error { color: #fca5a5; }
         .form-preview { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 18px; }
         .manual-note { color: #9ca3af; font-size: 13px; margin-top: 10px; }
+        .small-debug { color: #6b7280; font-size: 12px; margin-top: 8px; }
+        @media (max-width: 700px) {
+          .lookup-grid { grid-template-columns: 1fr; }
+          .form-preview { grid-template-columns: 1fr; }
+        }
       </style>
     </head>
     <body>
       ${nav(req)}
 
       <h1>Address Lookup Test</h1>
-      <div class="subtitle">This version renders the address list on the server, so it does not rely on browser JavaScript to fetch the results.</div>
+      <div class="subtitle">Dispatcher flow: enter postcode, press Find address, choose the correct address from the dropdown, then the form fields fill in.</div>
 
       <div class="panel">
         <h2>Find address</h2>
@@ -2156,7 +2163,18 @@ app.get("/address-lookup-test", async (req, res) => {
           <button type="submit">Find address</button>
         </form>
         <div class="${statusClass}">${escapeHtml(statusMessage)}</div>
-        <div id="address-results" class="result-list">${addressButtons}</div>
+
+        ${addresses.length ? `
+          <div class="address-select-wrap">
+            <label for="address-select">Select address</label>
+            <select id="address-select" name="address_select" class="address-select">
+              <option value="">Choose an address...</option>
+              ${addressOptions}
+            </select>
+            <div class="small-debug">Dropdown loaded with ${addresses.length} option${addresses.length === 1 ? "" : "s"}.</div>
+          </div>
+        ` : ""}
+
         <div class="manual-note">If the customer gives a flat number or building name that is not obvious, choose the closest address and adjust the address fields manually.</div>
       </div>
 
@@ -2174,20 +2192,33 @@ app.get("/address-lookup-test", async (req, res) => {
           <input id="udprn" placeholder="UDPRN / unique address id">
         </div>
         <br>
-        <div id="picked-address" class="picked">Choose an address above and it will populate these fields.</div>
+        <div id="picked-address" class="picked">Choose an address from the dropdown and it will populate these fields.</div>
       </div>
 
       <script>
-        function chooseAddress(address) {
-          document.getElementById("address_line_1").value = address.address_line_1 || "";
-          document.getElementById("address_line_2").value = address.address_line_2 || "";
-          document.getElementById("address_line_3").value = address.address_line_3 || "";
-          document.getElementById("town").value = address.town || "";
-          document.getElementById("county").value = address.county || "";
-          document.getElementById("postcode").value = address.postcode || "";
-          document.getElementById("latitude").value = address.latitude || "";
-          document.getElementById("longitude").value = address.longitude || "";
-          document.getElementById("udprn").value = address.udprn || "";
+        const addresses = ${addressesJson};
+
+        function setValue(id, value) {
+          const element = document.getElementById(id);
+          if (element) element.value = value || "";
+        }
+
+        function chooseAddress(index) {
+          const address = addresses[Number(index)];
+          if (!address) {
+            document.getElementById("picked-address").textContent = "Choose an address from the dropdown and it will populate these fields.";
+            return;
+          }
+
+          setValue("address_line_1", address.address_line_1);
+          setValue("address_line_2", address.address_line_2);
+          setValue("address_line_3", address.address_line_3);
+          setValue("town", address.town);
+          setValue("county", address.county);
+          setValue("postcode", address.postcode);
+          setValue("latitude", address.latitude);
+          setValue("longitude", address.longitude);
+          setValue("udprn", address.udprn);
 
           const picked = [
             address.address_line_1,
@@ -2201,15 +2232,12 @@ app.get("/address-lookup-test", async (req, res) => {
           document.getElementById("picked-address").textContent = picked || "Address selected.";
         }
 
-        document.querySelectorAll(".address-option").forEach(function(button) {
-          button.addEventListener("click", function() {
-            try {
-              chooseAddress(JSON.parse(button.getAttribute("data-address")));
-            } catch (error) {
-              document.getElementById("picked-address").textContent = "Could not load that address into the preview fields.";
-            }
+        const addressSelect = document.getElementById("address-select");
+        if (addressSelect) {
+          addressSelect.addEventListener("change", function() {
+            chooseAddress(addressSelect.value);
           });
-        });
+        }
       </script>
     </body>
     </html>
