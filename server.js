@@ -170,7 +170,7 @@ function currentAgentName(req) {
 
 async function getActivePortalUsers() {
   const result = await pool.query(`
-    SELECT name, role
+    SELECT name, role, extension_number
     FROM app_users
     WHERE active = TRUE
     ORDER BY name ASC
@@ -178,7 +178,27 @@ async function getActivePortalUsers() {
 
   if (result.rows.length) return result.rows;
 
-  return agentNames.map(name => ({ name, role: "dispatcher" }));
+  return Object.entries(agents)
+    .map(([extension_number, name]) => ({ name, role: "dispatcher", extension_number }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function getWallboardAgents() {
+  const result = await pool.query(`
+    SELECT name, extension_number
+    FROM app_users
+    WHERE active = TRUE
+    AND extension_number IS NOT NULL
+    AND TRIM(extension_number) <> ''
+    ORDER BY name ASC
+  `);
+
+  const mapped = {};
+  result.rows.forEach(user => {
+    mapped[String(user.extension_number).trim()] = user.name;
+  });
+
+  return Object.keys(mapped).length ? mapped : agents;
 }
 
 async function seedDefaultPortalUsers() {
@@ -187,6 +207,7 @@ async function seedDefaultPortalUsers() {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       role TEXT DEFAULT 'dispatcher',
+      extension_number TEXT,
       active BOOLEAN DEFAULT TRUE,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
@@ -194,16 +215,19 @@ async function seedDefaultPortalUsers() {
   `);
 
   await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'dispatcher';`);
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS extension_number TEXT;`);
   await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
 
-  for (const name of agentNames) {
+  for (const [extensionNumber, name] of Object.entries(agents)) {
     await pool.query(`
-      INSERT INTO app_users (name, role, active, created_at, updated_at)
-      VALUES ($1, $2, TRUE, NOW(), NOW())
-      ON CONFLICT (name) DO NOTHING
-    `, [name, name === "Rachel" ? "admin" : "dispatcher"]);
+      INSERT INTO app_users (name, role, extension_number, active, created_at, updated_at)
+      VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+      ON CONFLICT (name) DO UPDATE SET
+        extension_number = COALESCE(app_users.extension_number, EXCLUDED.extension_number),
+        updated_at = NOW()
+    `, [name, name === "Rachel" ? "admin" : "dispatcher", extensionNumber]);
   }
 }
 
@@ -1041,6 +1065,7 @@ function sharedStyles() {
     .distance { font-size: 22px; font-weight: bold; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
     .checkbox-row { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--text); font-size: 16px; }
     .checkbox-row input { width: 18px; height: 18px; }
     .help { color: var(--muted); font-size: 14px; margin-top: 8px; }
@@ -1077,7 +1102,7 @@ function sharedStyles() {
       .sidebar-nav { margin-left: 250px; display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 8px; }
       .sidebar-user { margin-left: 250px; margin-top: 10px; }
       .side-submenu { display: none; }
-      .job-grid, .job-grid-3, .grid-2, .grid-3, .search-form { grid-template-columns: 1fr; }
+      .job-grid, .job-grid-3, .grid-2, .grid-3, .grid-4, .search-form { grid-template-columns: 1fr; }
     }
   `;
 }
@@ -1451,7 +1476,7 @@ app.get("/login", async (req, res) => {
     users = await getActivePortalUsers();
   } catch (err) {
     console.error("Login users error:", err);
-    users = agentNames.map(name => ({ name, role: "dispatcher" }));
+    users = Object.entries(agents).map(([extension_number, name]) => ({ name, role: "dispatcher", extension_number }));
   }
   const options = users.map(user => `<option value="${escapeHtml(user.name)}">${escapeHtml(user.name)}${user.role ? ` · ${escapeHtml(user.role)}` : ""}</option>`).join("");
 
@@ -1621,14 +1646,15 @@ app.get("/call-wallboard", async (req, res) => {
     const lastUpdatedText = lastReceived ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}` : "No calls received yet";
     const pageUpdatedText = `Page refreshed: ${formatDateTimeWithSeconds(new Date())}`;
 
+    const wallboardAgents = await getWallboardAgents();
     const agentStats = {};
-    Object.entries(agents).forEach(([ext, name]) => {
+    Object.entries(wallboardAgents).forEach(([ext, name]) => {
       agentStats[ext] = { ext, name, answered: 0, totalDuration: 0, lastCallTime: null, status: "No active call" };
     });
 
     answeredCalls.forEach(call => {
-      const ext = call.answered_by;
-      if (!agents[ext]) return;
+      const ext = String(call.answered_by || "").trim();
+      if (!wallboardAgents[ext]) return;
       agentStats[ext].answered += 1;
       agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
       const callTime = call.start_time || call.received_at;
@@ -1777,6 +1803,7 @@ app.get("/admin/users", async (req, res) => {
           <div class="job-card-sub">Created ${formatDateTime(user.created_at)}<br>Last updated ${formatDateTime(user.updated_at)}</div>
         </td>
         <td>${escapeHtml(user.role || "dispatcher")}</td>
+        <td>${escapeHtml(user.extension_number || "—")}</td>
         <td>${user.active ? `<span class="pill available">Active</span>` : `<span class="pill off">Removed</span>`}</td>
         <td>
           <div class="actions">
@@ -1812,10 +1839,14 @@ app.get("/admin/users", async (req, res) => {
         <div class="panel">
           <h2>Add new user</h2>
           <form method="POST" action="/admin/users/add">
-            <div class="grid-3">
+            <div class="grid-4">
               <div>
                 <label>Name</label>
                 <input name="name" placeholder="e.g. Sarah" required>
+              </div>
+              <div>
+                <label>Extension number</label>
+                <input name="extension_number" placeholder="e.g. 1018">
               </div>
               <div>
                 <label>Role</label>
@@ -1829,12 +1860,13 @@ app.get("/admin/users", async (req, res) => {
                 <button type="submit">Add user</button>
               </div>
             </div>
+            <div class="help">The extension number connects this user to Yay call data. If Yay sends answered_by as this extension, their answered-call stats will appear on the Call wallboard.</div>
             <div class="help">For now, users still use the shared dashboard password. Proper individual passwords and reset links should be the next security upgrade.</div>
           </form>
         </div>
 
         <table>
-          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>User</th><th>Role</th><th>Extension</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </body>
@@ -1866,10 +1898,14 @@ app.get("/admin/users/:id/edit", async (req, res) => {
 
         <div class="panel">
           <form method="POST" action="/admin/users/${user.id}/edit">
-            <div class="grid-3">
+            <div class="grid-4">
               <div>
                 <label>Name</label>
                 <input name="name" value="${escapeHtml(user.name)}" required>
+              </div>
+              <div>
+                <label>Extension number</label>
+                <input name="extension_number" value="${escapeHtml(user.extension_number || "")}" placeholder="e.g. 1018">
               </div>
               <div>
                 <label>Role</label>
@@ -1887,6 +1923,7 @@ app.get("/admin/users/:id/edit", async (req, res) => {
                 </select>
               </div>
             </div>
+            <div class="help">The extension number links this user to Call wallboard stats.</div>
             <br>
             <button type="submit">Save changes</button>
             <a href="/admin/users" style="margin-left:12px;">Cancel</a>
@@ -1905,14 +1942,15 @@ app.post("/admin/users/:id/edit", async (req, res) => {
   try {
     const name = (req.body.name || "").trim();
     const role = req.body.role || "dispatcher";
+    const extensionNumber = (req.body.extension_number || "").trim();
     const active = req.body.active === "true";
     if (!name) return res.redirect(`/admin/users/${req.params.id}/edit`);
 
     await pool.query(`
       UPDATE app_users
-      SET name = $1, role = $2, active = $3, updated_at = NOW()
-      WHERE id = $4
-    `, [name, role, active, req.params.id]);
+      SET name = $1, role = $2, extension_number = NULLIF($3, ''), active = $4, updated_at = NOW()
+      WHERE id = $5
+    `, [name, role, extensionNumber, active, req.params.id]);
 
     res.redirect("/admin/users");
   } catch (error) {
@@ -1925,13 +1963,18 @@ app.post("/admin/users/add", async (req, res) => {
   try {
     const name = (req.body.name || "").trim();
     const role = req.body.role || "dispatcher";
+    const extensionNumber = (req.body.extension_number || "").trim();
     if (!name) return res.redirect("/admin/users");
 
     await pool.query(`
-      INSERT INTO app_users (name, role, active, created_at, updated_at)
-      VALUES ($1, $2, TRUE, NOW(), NOW())
-      ON CONFLICT (name) DO UPDATE SET role = EXCLUDED.role, active = TRUE, updated_at = NOW()
-    `, [name, role]);
+      INSERT INTO app_users (name, role, extension_number, active, created_at, updated_at)
+      VALUES ($1, $2, NULLIF($3, ''), TRUE, NOW(), NOW())
+      ON CONFLICT (name) DO UPDATE SET
+        role = EXCLUDED.role,
+        extension_number = EXCLUDED.extension_number,
+        active = TRUE,
+        updated_at = NOW()
+    `, [name, role, extensionNumber]);
 
     res.redirect("/admin/users");
   } catch (error) {
@@ -3104,11 +3147,12 @@ app.get("/reports/calls.csv", async (req, res) => {
       ORDER BY start_time DESC
     `, [reportRange.start, reportRange.end]);
 
+    const wallboardAgents = await getWallboardAgents();
     const header = ["Call Time", "From", "To", "Answered By Extension", "Answered By Agent", "Answer Type", "Duration Seconds", "Call Result"];
     const lines = [header.map(csvValue).join(",")];
 
     result.rows.forEach(call => {
-      const agent = agents[call.answered_by] || "";
+      const agent = wallboardAgents[String(call.answered_by || "").trim()] || "";
       const resultText = call.answered_by && agent ? "Answered" : "Missed";
 
       lines.push([
