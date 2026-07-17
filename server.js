@@ -1084,7 +1084,7 @@ function nav(req) {
 
       <div class="sidebar-label">Main menu</div>
       <nav class="sidebar-nav">
-        <a class="side-link${active("/")}" href="/"><span class="side-dot dot-green"></span><span>Dashboard</span></a>
+        <a class="side-link${active("/call-wallboard")}" href="/call-wallboard"><span class="side-dot dot-green"></span><span>Call wallboard</span></a>
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Client orders</span></a>
         <div class="side-group">
           <a class="side-group-title${(path.startsWith("/dispatch") || path.startsWith("/technicians")) ? " active" : ""}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Dispatch & Technicians</span></a>
@@ -1552,7 +1552,7 @@ app.get("/login", async (req, res) => {
 app.post("/login", async (req, res) => {
   const agentName = req.body.agent_name || "";
   const password = req.body.password || "";
-  const next = req.body.next || "/";
+  const next = req.body.next || "/call-wallboard";
 
   let validUser = false;
   try {
@@ -1576,7 +1576,9 @@ app.get("/logout", (req, res) => {
   res.redirect("/login");
 });
 
-app.get("/", async (req, res) => {
+app.get("/", (req, res) => res.redirect("/call-wallboard"));
+
+app.get("/call-wallboard", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT *
@@ -1643,7 +1645,7 @@ app.get("/", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Keys247 Call Wallboard</title>
+        <title>Call wallboard</title>
         <meta http-equiv="refresh" content="5">
         <style>
           ${sharedStyles()}
@@ -1667,14 +1669,14 @@ app.get("/", async (req, res) => {
       </head>
       <body>
         ${nav(req)}
-        <h1>Keys247 Call Wallboard</h1>
+        <h1>Call wallboard</h1>
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
         <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
         <div class="cards">
           <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
           <div class="card"><div class="label">Answered</div><div class="value">${answeredCalls.length}</div></div>
           <div class="card"><div class="label">Missed</div><div class="value">${missedCalls.length}</div></div>
-          <a class="card-link" href="/missed-calls"><div class="card ${missedRateClass}"><div class="label">Miss Rate · click for details</div><div class="value ${missedRateClass}">${missedRate}%</div></div></a>
+          <a class="card-link" href="/call-wallboard/missed-calls"><div class="card ${missedRateClass}"><div class="label">Miss Rate · click for details</div><div class="value ${missedRateClass}">${missedRate}%</div></div></a>
         </div>
         <table>
           <thead>
@@ -1691,7 +1693,7 @@ app.get("/", async (req, res) => {
   }
 });
 
-app.get("/missed-calls", async (req, res) => {
+app.get("/call-wallboard/missed-calls", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT *
@@ -1726,7 +1728,7 @@ app.get("/missed-calls", async (req, res) => {
         <h1>Missed Call Details</h1>
         <div class="subtitle">Inbound customer calls missed in the last 24 hours. Internal and outgoing calls are excluded.</div>
         <div class="page-actions">
-          <a class="action-button dark" href="/">Back to Wallboard</a>
+          <a class="action-button dark" href="/call-wallboard">Back to Call wallboard</a>
         </div>
         <table>
           <thead>
