@@ -150,8 +150,12 @@ function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0");
 }
 
+app.get("/brand-logo.png", (req, res) => {
+  res.sendFile(path.join(__dirname, "brand-logo.png"));
+});
+
 function requireLogin(req, res, next) {
-  const openPaths = ["/login", "/logout", "/webhook/yay"];
+  const openPaths = ["/login", "/logout", "/webhook/yay", "/brand-logo.png"];
   if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/")) return next();
 
   const session = readSession(req);
@@ -697,36 +701,80 @@ async function getTechnicianDispatchLocation(tech) {
 
 function sharedStyles() {
   return `
+    :root {
+      --brand-red: #d93622;
+      --brand-amber: #f4c542;
+      --brand-green: #31b529;
+      --brand-dark: #26323a;
+      --brand-slate: #40515a;
+    }
     body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 32px; }
     a { color: #93c5fd; text-decoration: none; margin-right: 14px; font-weight: bold; }
     h1 { font-size: 40px; margin-bottom: 5px; }
     h2 { margin-top: 0; }
     .subtitle { color: #9ca3af; margin-bottom: 24px; }
-    .nav { margin-bottom: 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    .nav a { margin-right: 0; }
+    .nav { margin-bottom: 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .nav > a,
+    .dropdown-button {
+      margin-right: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 20px;
+      padding: 10px 15px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #26323a 0%, #1f2937 100%);
+      color: #ffffff;
+      border: 1px solid #40515a;
+      box-shadow: inset 0 2px 0 rgba(255,255,255,0.06), 0 6px 16px rgba(0,0,0,0.20);
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+    }
+    .nav > a:hover,
+    .dropdown:hover .dropdown-button {
+      background: linear-gradient(180deg, #31b529 0%, #248f22 100%);
+      color: white;
+      border-color: #4ade40;
+    }
+    .nav > a[href="/jobs"] {
+      background: linear-gradient(180deg, #31b529 0%, #248f22 100%);
+      border-color: #4ade40;
+    }
+    .nav > a[href="/dispatch"] {
+      background: linear-gradient(180deg, #d93622 0%, #a9281b 100%);
+      border-color: #f97362;
+    }
+    .nav > a[href="/address-lookup-test"] {
+      background: linear-gradient(180deg, #f4c542 0%, #c9951e 100%);
+      color: #1f2937;
+      border-color: #facc15;
+    }
     .dropdown { position: relative; display: inline-block; }
-    .dropdown-button { color: #93c5fd; font-weight: bold; cursor: pointer; padding: 0; }
     .dropdown-content {
       display: none;
       position: absolute;
-      top: 20px;
+      top: 48px;
       left: 0;
       background: #1f2937;
-      min-width: 220px;
-      border: 1px solid #374151;
-      border-radius: 10px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+      min-width: 230px;
+      border: 1px solid #40515a;
+      border-radius: 14px;
+      box-shadow: 0 14px 35px rgba(0,0,0,0.42);
       z-index: 9999;
       overflow: hidden;
     }
     .dropdown-content a {
       display: block;
-      padding: 11px 13px;
-      color: #bfdbfe;
+      padding: 12px 14px;
+      color: #f9fafb;
       white-space: nowrap;
       font-size: 14px;
+      margin-right: 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
-    .dropdown-content a:hover { background: #374151; color: white; }
+    .dropdown-content a:hover { background: #31404a; color: white; }
     .dropdown:hover .dropdown-content { display: block; }
     .login-bar { background: #1f2937; border: 1px solid #374151; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; color: #d1d5db; display: flex; justify-content: space-between; align-items: center; }
     .panel { background: #1f2937; border-radius: 14px; padding: 22px; margin-bottom: 28px; }
@@ -1144,30 +1192,126 @@ app.get("/login", (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Dashboard Login</title>
+      <title>Your Dispatch Partner Login</title>
       <style>
-        body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 40px; }
-        .login-box { max-width: 440px; margin: 80px auto; background: #1f2937; border-radius: 16px; padding: 30px; border: 1px solid #374151; }
-        h1 { margin-top: 0; font-size: 36px; }
-        .subtitle { color: #9ca3af; margin-bottom: 25px; }
-        select, input, button { width: 100%; box-sizing: border-box; font-size: 17px; padding: 14px; border-radius: 8px; border: 1px solid #374151; margin-bottom: 14px; }
-        select, input { background: #111827; color: white; }
-        button { background: #2563eb; color: white; border: none; font-weight: bold; cursor: pointer; }
-        .error { background: #dc2626; color: white; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+        :root {
+          --brand-red: #d93622;
+          --brand-amber: #f4c542;
+          --brand-green: #31b529;
+          --brand-dark: #26323a;
+          --brand-slate: #40515a;
+        }
+        * { box-sizing: border-box; }
+        body {
+          font-family: Arial, sans-serif;
+          min-height: 100vh;
+          margin: 0;
+          padding: 34px;
+          background:
+            radial-gradient(circle at top left, rgba(49,181,41,0.22), transparent 30%),
+            radial-gradient(circle at bottom right, rgba(217,54,34,0.18), transparent 28%),
+            linear-gradient(135deg, #111827 0%, #26323a 100%);
+          color: white;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .login-box {
+          width: 100%;
+          max-width: 520px;
+          background: #ffffff;
+          color: var(--brand-dark);
+          border-radius: 24px;
+          padding: 30px;
+          border: 1px solid rgba(255,255,255,0.18);
+          box-shadow: 0 28px 80px rgba(0,0,0,0.35);
+        }
+        .brand-logo {
+          display: block;
+          width: 100%;
+          max-width: 390px;
+          margin: 0 auto 18px;
+        }
+        h1 {
+          margin: 0;
+          font-size: 30px;
+          text-align: center;
+          color: var(--brand-dark);
+        }
+        .subtitle {
+          color: #6b7280;
+          margin: 10px 0 25px;
+          text-align: center;
+          line-height: 1.45;
+        }
+        label {
+          display: block;
+          font-size: 13px;
+          font-weight: 800;
+          margin: 0 0 7px;
+          color: var(--brand-slate);
+        }
+        select, input, button {
+          width: 100%;
+          font-size: 17px;
+          padding: 14px;
+          border-radius: 12px;
+          border: 1px solid #d1d5db;
+          margin-bottom: 15px;
+        }
+        select, input { background: #f9fafb; color: var(--brand-dark); }
+        select:focus, input:focus {
+          outline: none;
+          border-color: var(--brand-green);
+          box-shadow: 0 0 0 4px rgba(49,181,41,0.16);
+        }
+        button {
+          background: linear-gradient(180deg, var(--brand-green), #248f22);
+          color: white;
+          border: none;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 8px 18px rgba(49,181,41,0.28);
+        }
+        button:hover { filter: brightness(1.03); }
+        .error {
+          background: #fee2e2;
+          color: #991b1b;
+          border: 1px solid #fecaca;
+          border-radius: 12px;
+          padding: 12px;
+          margin-bottom: 16px;
+          font-weight: 800;
+        }
+        .traffic-line {
+          height: 6px;
+          border-radius: 999px;
+          overflow: hidden;
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          margin: 4px 0 24px;
+        }
+        .traffic-line span:nth-child(1) { background: var(--brand-red); }
+        .traffic-line span:nth-child(2) { background: var(--brand-amber); }
+        .traffic-line span:nth-child(3) { background: var(--brand-green); }
       </style>
     </head>
     <body>
       <div class="login-box">
-        <h1>Dashboard Login</h1>
-        <div class="subtitle">Choose your name and enter the shared password.</div>
+        <img class="brand-logo" src="/brand-logo.png" alt="Your Dispatch Partner - Home of The Dispatch Office">
+        <div class="traffic-line"><span></span><span></span><span></span></div>
+        <h1>Portal Login</h1>
+        <div class="subtitle">Choose your name and enter your dashboard password.</div>
         ${error ? `<div class="error">Wrong agent or password. Try again.</div>` : ""}
         <form method="POST" action="/login">
           <input type="hidden" name="next" value="${escapeHtml(next)}">
+          <label>Your name</label>
           <select name="agent_name" required>
             <option value="">Choose your name</option>
             ${options}
           </select>
-          <input name="password" type="password" placeholder="Password" required>
+          <label>Password</label>
+          <input name="password" type="password" placeholder="Enter password" required>
           <button type="submit">Log in</button>
         </form>
       </div>
