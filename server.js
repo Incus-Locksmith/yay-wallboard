@@ -2831,14 +2831,14 @@ async function revenueSummaryByTechnician(start, end) {
     SELECT
       COALESCE(t.name, 'Unassigned') AS technician_name,
       COUNT(j.id)::int AS job_count,
-      COALESCE(SUM(COALESCE(j.final_job_value, 0)), 0)::numeric AS income,
+      COALESCE(SUM(COALESCE(j.final_value, 0)), 0)::numeric AS income,
       COALESCE(SUM(COALESCE(j.materials_cost, 0)), 0)::numeric AS material_cost
     FROM jobs j
     LEFT JOIN technicians t ON t.id = j.assigned_technician_id
     WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
     AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
     AND (
-      j.final_job_value IS NOT NULL
+      j.final_value IS NOT NULL
       OR j.materials_cost IS NOT NULL
       OR j.status IN ('fully_paid_private', 'invoiced_account', 'closed')
     )
@@ -3009,8 +3009,8 @@ app.get("/reports/jobs.csv", async (req, res) => {
         job.technician_name,
         job.starting_price,
         job.call_out_agreed,
-        job.lock_start_price,
-        job.final_job_value,
+        job.start_price_locks,
+        job.final_value,
         job.payment_method,
         job.customer_paid ? "Yes" : "No",
         job.materials_used,
