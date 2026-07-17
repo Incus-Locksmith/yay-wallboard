@@ -128,7 +128,7 @@ function readSession(req) {
 
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (!decoded.agentName || !agentNames.includes(decoded.agentName)) return null;
+    if (!decoded.agentName) return null;
 
     const maxAgeMs = 1000 * 60 * 60 * 24 * 7;
     if (!decoded.createdAt || Date.now() - decoded.createdAt > maxAgeMs) return null;
@@ -166,6 +166,45 @@ app.use(requireLogin);
 
 function currentAgentName(req) {
   return req.currentAgent || "";
+}
+
+async function getActivePortalUsers() {
+  const result = await pool.query(`
+    SELECT name, role
+    FROM app_users
+    WHERE active = TRUE
+    ORDER BY name ASC
+  `);
+
+  if (result.rows.length) return result.rows;
+
+  return agentNames.map(name => ({ name, role: "dispatcher" }));
+}
+
+async function seedDefaultPortalUsers() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      role TEXT DEFAULT 'dispatcher',
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'dispatcher';`);
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
+
+  for (const name of agentNames) {
+    await pool.query(`
+      INSERT INTO app_users (name, role, active, created_at, updated_at)
+      VALUES ($1, $2, TRUE, NOW(), NOW())
+      ON CONFLICT (name) DO NOTHING
+    `, [name, name === "Rachel" ? "admin" : "dispatcher"]);
+  }
 }
 
 function escapeHtml(value) {
@@ -1049,6 +1088,7 @@ function nav(req) {
         <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
         <a class="side-link${active("/address-lookup-test")}" href="/address-lookup-test"><span class="side-dot dot-red"></span><span>Address Lookup</span></a>
+        <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
 
         <div class="side-group">
           <a class="side-group-title${active("/invoices")}" href="/invoices"><span class="side-dot dot-amber"></span><span>Invoices</span></a>
@@ -1375,6 +1415,7 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
 
+  await seedDefaultPortalUsers();
   await seedDefaultInvoiceItems();
   await seedDefaultInvoiceTemplates();
 }
@@ -1382,10 +1423,17 @@ async function initDb() {
 /* The rest of this file keeps all your current working routes and adds the invoice upgrade.
    Because this response needs to be copied safely, the complete route set continues below. */
 
-app.get("/login", (req, res) => {
+app.get("/login", async (req, res) => {
   const next = req.query.next || "/";
   const error = req.query.error === "1";
-  const options = agentNames.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+  let users = [];
+  try {
+    users = await getActivePortalUsers();
+  } catch (err) {
+    console.error("Login users error:", err);
+    users = agentNames.map(name => ({ name, role: "dispatcher" }));
+  }
+  const options = users.map(user => `<option value="${escapeHtml(user.name)}">${escapeHtml(user.name)}${user.role ? ` · ${escapeHtml(user.role)}` : ""}</option>`).join("");
 
   res.send(`
     <!DOCTYPE html>
@@ -1494,12 +1542,21 @@ app.get("/login", (req, res) => {
   `);
 });
 
-app.post("/login", (req, res) => {
+app.post("/login", async (req, res) => {
   const agentName = req.body.agent_name || "";
   const password = req.body.password || "";
   const next = req.body.next || "/";
 
-  if (!agentNames.includes(agentName) || password !== authSecret()) {
+  let validUser = false;
+  try {
+    const result = await pool.query(`SELECT id FROM app_users WHERE name = $1 AND active = TRUE`, [agentName]);
+    validUser = result.rows.length > 0;
+  } catch (err) {
+    console.error("Login validation error:", err);
+    validUser = agentNames.includes(agentName);
+  }
+
+  if (!validUser || password !== authSecret()) {
     return res.redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
   }
 
@@ -1523,9 +1580,13 @@ app.get("/", async (req, res) => {
 
     const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
     const recentCalls = result.rows;
-    const answeredCalls = recentCalls.filter(call => call.answered_by && agents[call.answered_by]);
-    const missedCalls = recentCalls.filter(call => !call.answered_by);
-    const reportableCalls = [...answeredCalls, ...missedCalls];
+
+    // Only inbound calls should count towards answered/missed call reporting.
+    // This stops outgoing/internal calls with no answered_by value being treated as missed customer calls.
+    const inboundCalls = recentCalls.filter(call => (call.call_type || "").toLowerCase() === "inbound");
+    const answeredCalls = inboundCalls.filter(call => call.answered_by);
+    const missedCalls = inboundCalls.filter(call => !call.answered_by);
+    const reportableCalls = inboundCalls;
 
     const missedRate = reportableCalls.length ? Math.round((missedCalls.length / reportableCalls.length) * 100) : 0;
 
@@ -1592,6 +1653,9 @@ app.get("/", async (req, res) => {
           .value.soon { color: #fbbf24; }
           .value.bad { color: #ef4444; }
           .value.neutral { color: white; }
+          .card-link { color: inherit; text-decoration: none; display: block; }
+          .card-link:hover { text-decoration: none; transform: translateY(-1px); }
+          .card-link .card { cursor: pointer; }
         </style>
       </head>
       <body>
@@ -1603,7 +1667,7 @@ app.get("/", async (req, res) => {
           <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
           <div class="card"><div class="label">Answered</div><div class="value">${answeredCalls.length}</div></div>
           <div class="card"><div class="label">Missed</div><div class="value">${missedCalls.length}</div></div>
-          <div class="card ${missedRateClass}"><div class="label">Miss Rate</div><div class="value ${missedRateClass}">${missedRate}%</div></div>
+          <a class="card-link" href="/missed-calls"><div class="card ${missedRateClass}"><div class="label">Miss Rate · click for details</div><div class="value ${missedRateClass}">${missedRate}%</div></div></a>
         </div>
         <table>
           <thead>
@@ -1617,6 +1681,182 @@ app.get("/", async (req, res) => {
   } catch (error) {
     console.error("Wallboard error:", error);
     res.status(500).send("Wallboard error. Check Render logs.");
+  }
+});
+
+app.get("/missed-calls", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM calls
+      WHERE start_time >= NOW() - INTERVAL '24 hours'
+      AND LOWER(COALESCE(call_type, '')) = 'inbound'
+      AND COALESCE(answered_by, '') = ''
+      ORDER BY start_time DESC
+    `);
+
+    const rows = result.rows.map(call => `
+      <tr>
+        <td>${formatDateTimeWithSeconds(call.start_time || call.received_at)}</td>
+        <td><a href="tel:${escapeHtml(call.from_number || "")}">${escapeHtml(call.from_number || "—")}</a></td>
+        <td>${escapeHtml(call.to_number || "—")}</td>
+        <td>${escapeHtml(call.call_type || "—")}</td>
+        <td>${escapeHtml(call.answer_type || "—")}</td>
+        <td>${formatSeconds(Number(call.duration_seconds || 0))}</td>
+        <td><code>${escapeHtml(call.uuid || "—")}</code></td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Missed Call Details</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Missed Call Details</h1>
+        <div class="subtitle">Inbound customer calls missed in the last 24 hours. Internal and outgoing calls are excluded.</div>
+        <div class="page-actions">
+          <a class="action-button dark" href="/">Back to Wallboard</a>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Type</th>
+              <th>Answer type</th>
+              <th>Duration</th>
+              <th>UUID</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="7">No missed inbound calls in the last 24 hours.</td></tr>`}</tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Missed calls error:", error);
+    res.status(500).send("Missed calls error. Check Render logs.");
+  }
+});
+
+app.get("/admin/users", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM app_users ORDER BY active DESC, name ASC`);
+
+    const rows = result.rows.map(user => `
+      <tr>
+        <td>
+          <div class="job-card-title">${escapeHtml(user.name)}</div>
+          <div class="job-card-sub">Created ${formatDateTime(user.created_at)}</div>
+        </td>
+        <td>${escapeHtml(user.role || "dispatcher")}</td>
+        <td>${user.active ? `<span class="pill available">Active</span>` : `<span class="pill off">Removed</span>`}</td>
+        <td>
+          ${user.active ? `
+            <form method="POST" action="/admin/users/remove" onsubmit="return confirm('Remove this user from login?');">
+              <input type="hidden" name="id" value="${user.id}">
+              <button class="delete-button small-button" type="submit">Remove</button>
+            </form>
+          ` : `
+            <form method="POST" action="/admin/users/reactivate">
+              <input type="hidden" name="id" value="${user.id}">
+              <button class="small-button" type="submit">Reactivate</button>
+            </form>
+          `}
+        </td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Admin Manager - Users</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Admin Manager</h1>
+        <div class="subtitle">Add or remove portal users. This controls who appears on the login screen.</div>
+
+        <div class="panel">
+          <h2>Add new user</h2>
+          <form method="POST" action="/admin/users/add">
+            <div class="grid-3">
+              <div>
+                <label>Name</label>
+                <input name="name" placeholder="e.g. Sarah" required>
+              </div>
+              <div>
+                <label>Role</label>
+                <select name="role">
+                  <option value="dispatcher">Dispatcher</option>
+                  <option value="manager">Manager</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <div style="display:flex; align-items:end;">
+                <button type="submit">Add user</button>
+              </div>
+            </div>
+            <div class="help">For now, users still use the shared dashboard password. Proper individual passwords and reset links should be the next security upgrade.</div>
+          </form>
+        </div>
+
+        <table>
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Admin users error:", error);
+    res.status(500).send("Admin users error. Check Render logs.");
+  }
+});
+
+app.post("/admin/users/add", async (req, res) => {
+  try {
+    const name = (req.body.name || "").trim();
+    const role = req.body.role || "dispatcher";
+    if (!name) return res.redirect("/admin/users");
+
+    await pool.query(`
+      INSERT INTO app_users (name, role, active, created_at, updated_at)
+      VALUES ($1, $2, TRUE, NOW(), NOW())
+      ON CONFLICT (name) DO UPDATE SET role = EXCLUDED.role, active = TRUE, updated_at = NOW()
+    `, [name, role]);
+
+    res.redirect("/admin/users");
+  } catch (error) {
+    console.error("Add user error:", error);
+    res.status(500).send("Add user error. Check Render logs.");
+  }
+});
+
+app.post("/admin/users/remove", async (req, res) => {
+  try {
+    await pool.query(`UPDATE app_users SET active = FALSE, updated_at = NOW() WHERE id = $1`, [req.body.id]);
+    res.redirect("/admin/users");
+  } catch (error) {
+    console.error("Remove user error:", error);
+    res.status(500).send("Remove user error. Check Render logs.");
+  }
+});
+
+app.post("/admin/users/reactivate", async (req, res) => {
+  try {
+    await pool.query(`UPDATE app_users SET active = TRUE, updated_at = NOW() WHERE id = $1`, [req.body.id]);
+    res.redirect("/admin/users");
+  } catch (error) {
+    console.error("Reactivate user error:", error);
+    res.status(500).send("Reactivate user error. Check Render logs.");
   }
 });
 
