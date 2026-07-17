@@ -435,16 +435,19 @@ function invoiceStageOptions(selectedStage = "Draft only") {
 
 
 const jobStatuses = [
-  { value: "open", label: "Open" },
+  { value: "open", label: "Job awaiting to be assigned" },
   { value: "assigned", label: "Assigned" },
-  { value: "completed", label: "Completed" },
   { value: "closed", label: "Closed" },
   { value: "awaiting_payment", label: "Awaiting payment" },
-  { value: "fully_paid_private", label: "Fully paid (private)" },
-  { value: "invoiced_account", label: "Invoiced (Account)" }
+  { value: "invoiced_account", label: "Invoice sent to Acc Dept" }
 ];
 
-const activeJobStatuses = ["open", "assigned", "completed", "awaiting_payment"];
+const legacyJobStatusLabels = {
+  completed: "Completed",
+  fully_paid_private: "Fully paid (private)"
+};
+
+const activeJobStatuses = ["open", "assigned", "awaiting_payment"];
 
 const jobTypes = [
   "Lockout",
@@ -472,7 +475,9 @@ function optionList(items, selectedValue = "") {
 
 function jobStatusLabel(status) {
   const found = jobStatuses.find(item => item.value === status);
-  return found ? found.label : (status || "Open");
+  if (found) return found.label;
+  if (legacyJobStatusLabels[status]) return legacyJobStatusLabels[status];
+  return status || "Job awaiting to be assigned";
 }
 
 function jobStatusClass(status) {
@@ -797,6 +802,15 @@ function sharedStyles() {
       justify-content: center;
       margin-bottom: 28px;
       box-shadow: 0 14px 26px rgba(0,0,0,0.14);
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .sidebar-logo-card:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 30px rgba(0,0,0,0.18);
+      text-decoration: none;
     }
 
     .sidebar-logo-card img {
@@ -1034,12 +1048,12 @@ function sharedStyles() {
     .copy-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 7px; color: var(--text); }
 
     .job-open { background: #2563eb; color: white; }
-    .job-assigned { background: #7c3aed; color: white; }
-    .job-completed { background: #f59e0b; color: black; }
-    .job-closed { background: #374151; color: #d1d5db; }
-    .job-awaiting-payment { background: var(--brand-red); color: white; }
-    .job-fully-paid-private { background: #16a34a; color: white; }
-    .job-invoiced-account { background: #22c55e; color: black; }
+    .job-assigned { background: #16a34a; color: white; }
+    .job-closed { background: var(--brand-red); color: white; }
+    .job-awaiting-payment { background: #f59e0b; color: black; }
+    .job-invoiced-account { background: #ec4899; color: white; }
+    .job-completed { background: #6b7280; color: white; }
+    .job-fully-paid-private { background: #6b7280; color: white; }
     .job-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
     .job-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
     .job-card-title { font-weight: bold; font-size: 16px; color: var(--text); }
@@ -1078,9 +1092,9 @@ function nav(req) {
 
   return `
     <aside class="sidebar">
-      <div class="sidebar-logo-card">
+      <a class="sidebar-logo-card" href="/call-wallboard" title="Go to Call wallboard / refresh">
         <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;sidebar-fallback-logo&quot;>Your Dispatch Partner<br><span style=&quot;font-size:16px;color:#4b5563;&quot;>The Dispatch Office</span></div>';">
-      </div>
+      </a>
 
       <div class="sidebar-label">Main menu</div>
       <nav class="sidebar-nav">
@@ -1094,7 +1108,6 @@ function nav(req) {
           </div>
         </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
-        <a class="side-link${active("/address-lookup-test")}" href="/address-lookup-test"><span class="side-dot dot-red"></span><span>Address Lookup</span></a>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
 
         <div class="side-group">
@@ -3270,7 +3283,7 @@ app.get("/jobs", async (req, res) => {
         <div class="grid-3">
           <div class="panel"><div class="muted">Active jobs</div><div class="big-total">${activeCount}</div></div>
           <div class="panel"><div class="muted">Awaiting payment</div><div class="big-total">${counts.awaiting_payment || 0}</div></div>
-          <div class="panel"><div class="muted">Completed today/overall</div><div class="big-total">${counts.completed || 0}</div></div>
+          <div class="panel"><div class="muted">Invoice sent to Acc Dept</div><div class="big-total">${counts.invoiced_account || 0}</div></div>
         </div>
 
         <div class="panel">
@@ -4119,7 +4132,12 @@ app.post("/jobs/:id/close", async (req, res) => {
   }
 });
 
-app.get("/address-lookup-test", async (req, res) => {
+app.get("/address-lookup-test", (req, res) => {
+  res.redirect("/jobs/new");
+});
+
+/* Address lookup test page removed from menu. Kept below as inactive reference. */
+app.get("/address-lookup-test-old", async (req, res) => {
   const search = (req.query.search || "").trim();
   let lookup = null;
 
