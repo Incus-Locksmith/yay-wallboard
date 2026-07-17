@@ -1649,15 +1649,15 @@ app.get("/call-wallboard", async (req, res) => {
         <meta http-equiv="refresh" content="5">
         <style>
           ${sharedStyles()}
-          .updated { color: #d1d5db; font-size: 16px; margin-bottom: 30px; }
+          .updated { color: #6b7280; font-size: 16px; margin-bottom: 30px; font-weight: 600; }
           .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }
-          .card { background: #1f2937; border-radius: 14px; padding: 25px; border: 2px solid transparent; }
+          .card { background: #1f2937; border-radius: 14px; padding: 25px; border: 2px solid transparent; box-shadow: 0 14px 30px rgba(17, 24, 39, 0.12); }
           .card.good { border-color: #16a34a; }
           .card.soon { border-color: #f59e0b; }
           .card.bad { border-color: #dc2626; }
-          .card.neutral { border-color: #374151; }
-          .label { color: #9ca3af; font-size: 16px; }
-          .value { font-size: 42px; font-weight: bold; margin-top: 10px; }
+          .card.neutral { border-color: #94a3b8; }
+          .label { color: #e5e7eb; font-size: 16px; font-weight: 700; }
+          .value { color: #ffffff; font-size: 42px; font-weight: bold; margin-top: 10px; }
           .value.good { color: #22c55e; }
           .value.soon { color: #fbbf24; }
           .value.bad { color: #ef4444; }
