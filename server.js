@@ -4653,13 +4653,46 @@ app.get("/tech-checkin/:token", async (req, res) => {
         <html>
         <head>
           <title>Check-In Link Not Found</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
-            body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 30px; }
-            .box { max-width: 520px; margin: 60px auto; background: #1f2937; border-radius: 16px; padding: 28px; border: 1px solid #374151; }
+            :root {
+              --charcoal: #26323A;
+              --charcoal-2: #1E272E;
+              --green: #2EBD2E;
+              --green-dark: #188A18;
+              --red: #D9462E;
+              --amber: #F2C94C;
+              --page: #F5F6F8;
+              --card: #FFFFFF;
+              --border: #E5E7EB;
+              --text: #25313A;
+              --muted: #6B7280;
+            }
+            body {
+              margin: 0;
+              font-family: Arial, sans-serif;
+              background: var(--page);
+              color: var(--text);
+              padding: 20px;
+            }
+            .box {
+              max-width: 560px;
+              margin: 60px auto;
+              background: var(--card);
+              border-radius: 24px;
+              padding: 28px;
+              border: 1px solid var(--border);
+              box-shadow: 0 18px 40px rgba(38, 50, 58, 0.12);
+            }
+            .logo-wrap { text-align: center; margin-bottom: 22px; }
+            .logo-wrap img { max-width: 250px; width: 78%; height: auto; }
+            h1 { margin: 0 0 8px; color: var(--charcoal); }
+            p { color: var(--muted); line-height: 1.5; }
           </style>
         </head>
         <body>
           <div class="box">
+            <div class="logo-wrap"><img src="/brand-logo.png" alt="Your Dispatch Partner"></div>
             <h1>Link not found</h1>
             <p>This technician check-in link is not valid. Ask the office for a new link.</p>
           </div>
@@ -4672,6 +4705,8 @@ app.get("/tech-checkin/:token", async (req, res) => {
       .map(status => `<option ${status === tech.status ? "selected" : ""}>${escapeHtml(status)}</option>`)
       .join("");
 
+    const statusClass = technicianStatusClass(tech.status);
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -4679,76 +4714,146 @@ app.get("/tech-checkin/:token", async (req, res) => {
         <title>Technician Check-In</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
+          :root {
+            --charcoal: #26323A;
+            --charcoal-2: #1E272E;
+            --green: #2EBD2E;
+            --green-dark: #188A18;
+            --red: #D9462E;
+            --red-dark: #B73421;
+            --amber: #F2C94C;
+            --amber-dark: #B98A12;
+            --blue: #2563EB;
+            --page: #F5F6F8;
+            --card: #FFFFFF;
+            --border: #E5E7EB;
+            --text: #25313A;
+            --muted: #6B7280;
+            --soft: #F9FAFB;
+          }
+          * { box-sizing: border-box; }
           body {
             font-family: Arial, sans-serif;
-            background: #111827;
-            color: white;
-            padding: 18px;
+            background: var(--page);
+            color: var(--text);
+            padding: 16px;
             margin: 0;
           }
-          .wrap { max-width: 560px; margin: 0 auto; }
-          .card {
-            background: #1f2937;
-            border: 1px solid #374151;
-            border-radius: 18px;
-            padding: 22px;
+          .wrap { max-width: 620px; margin: 0 auto; }
+          .brand-card {
+            background: var(--charcoal);
+            border-radius: 28px;
+            padding: 20px 20px 22px;
+            margin: 0 0 16px;
+            box-shadow: 0 18px 40px rgba(38, 50, 58, 0.18);
+            color: white;
+          }
+          .logo-panel {
+            background: white;
+            border-radius: 22px;
+            padding: 16px;
+            text-align: center;
             margin-bottom: 18px;
           }
-          h1 { font-size: 32px; margin: 0 0 6px; }
-          h2 { margin-top: 0; }
-          .subtitle { color: #9ca3af; margin-bottom: 18px; line-height: 1.4; }
+          .logo-panel img { max-width: 275px; width: 82%; height: auto; display: inline-block; }
+          .brand-kicker {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: #C8D0D6;
+            margin-bottom: 8px;
+            font-weight: bold;
+          }
+          h1 { font-size: 34px; margin: 0 0 8px; letter-spacing: -0.02em; }
+          h2 { margin: 0 0 16px; color: var(--charcoal); }
+          .subtitle { color: #E5E7EB; margin-bottom: 14px; line-height: 1.45; }
+          .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 22px;
+            margin-bottom: 16px;
+            box-shadow: 0 10px 24px rgba(38, 50, 58, 0.06);
+          }
           .status-pill {
             display: inline-block;
-            padding: 8px 12px;
+            padding: 9px 14px;
             border-radius: 999px;
             font-weight: bold;
             font-size: 14px;
-            background: #2563eb;
+            background: var(--blue);
             color: white;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
+          }
+          .status-available { background: var(--green-dark); }
+          .status-soon { background: var(--amber); color: #111827; }
+          .status-job { background: var(--blue); }
+          .status-off { background: #6B7280; }
+          .last {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 18px;
+            padding: 14px;
+            color: #E5E7EB;
+            line-height: 1.5;
+            font-size: 15px;
           }
           input, select, textarea, button {
             width: 100%;
             box-sizing: border-box;
-            font-size: 18px;
+            font-size: 17px;
             padding: 14px;
-            border-radius: 12px;
-            border: 1px solid #374151;
+            border-radius: 14px;
+            border: 1px solid var(--border);
             margin-bottom: 12px;
           }
           input, select, textarea {
-            background: #111827;
-            color: white;
+            background: #FFFFFF;
+            color: var(--text);
           }
-          textarea { min-height: 90px; }
+          textarea { min-height: 96px; resize: vertical; }
           button {
             border: none;
             color: white;
             font-weight: bold;
             cursor: pointer;
+            transition: transform .12s ease, opacity .12s ease;
           }
+          button:active { transform: scale(0.99); }
           .big-button {
-            font-size: 20px;
+            font-size: 19px;
             padding: 18px;
-            margin-bottom: 14px;
+            margin-bottom: 12px;
+            box-shadow: 0 8px 18px rgba(38, 50, 58, 0.10);
           }
-          .available { background: #16a34a; }
-          .job { background: #2563eb; }
-          .soon { background: #f59e0b; color: black; }
+          .available { background: var(--green-dark); }
+          .job { background: var(--blue); }
+          .soon { background: var(--amber); color: #111827; }
           .off { background: #6b7280; }
-          .manual { background: #374151; }
+          .manual { background: var(--charcoal); }
+          .danger { background: var(--red); }
           .message {
             display: none;
             padding: 14px;
-            border-radius: 12px;
+            border-radius: 16px;
             margin-bottom: 16px;
             line-height: 1.4;
+            font-weight: bold;
           }
-          .message.good { background: #14532d; display: block; }
-          .message.bad { background: #7f1d1d; display: block; }
-          .help { color: #9ca3af; font-size: 14px; line-height: 1.45; }
-          .last { color: #d1d5db; line-height: 1.5; font-size: 15px; }
-          .small { font-size: 13px; color: #9ca3af; }
+          .message.good { background: #DCFCE7; color: #14532D; border: 1px solid #86EFAC; display: block; }
+          .message.bad { background: #FEE2E2; color: #7F1D1D; border: 1px solid #FCA5A5; display: block; }
+          .help {
+            background: var(--soft);
+            border: 1px solid var(--border);
+            border-left: 5px solid var(--amber);
+            border-radius: 16px;
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.45;
+            padding: 14px;
+          }
+          .small { font-size: 13px; color: #C8D0D6; }
+          .field-label { font-size: 13px; color: var(--muted); font-weight: bold; margin: 0 0 6px; }
         </style>
         <script>
           const token = ${JSON.stringify(req.params.token)};
@@ -4836,10 +4941,14 @@ app.get("/tech-checkin/:token", async (req, res) => {
       </head>
       <body>
         <div class="wrap">
-          <div class="card">
+          <div class="brand-card">
+            <div class="logo-panel">
+              <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none';">
+            </div>
+            <div class="brand-kicker">Technician portal</div>
             <h1>${escapeHtml(tech.name)}</h1>
-            <div class="subtitle">Technician check-in</div>
-            <div class="status-pill">${escapeHtml(tech.status || "No status")}</div>
+            <div class="subtitle">Update your status and location for dispatch.</div>
+            <div class="status-pill ${escapeHtml(statusClass)}">${escapeHtml(tech.status || "No status")}</div>
             <div class="last">
               <strong>Last GPS check-in:</strong><br>
               ${escapeHtml(locationFreshnessText(tech.location_checked_in_at))}
@@ -4863,9 +4972,13 @@ app.get("/tech-checkin/:token", async (req, res) => {
 
           <div class="card">
             <h2>Manual details</h2>
+            <div class="field-label">Status</div>
             <select id="status">${statusOptions}</select>
+            <div class="field-label">Current postcode</div>
             <input id="current_postcode" value="${escapeHtml(tech.current_postcode || "")}" placeholder="Current postcode e.g. W3 7AR">
+            <div class="field-label">Available from</div>
             <input id="available_from" value="${escapeHtml(tech.available_from || "")}" placeholder="Available from e.g. 14:30 / 30 mins">
+            <div class="field-label">Notes for dispatch</div>
             <textarea id="notes" placeholder="Notes for dispatch">${escapeHtml(tech.notes || "")}</textarea>
             <button class="manual" onclick="manualUpdate()">Save without GPS</button>
             <button class="available" onclick="updateWithLocation()">Save and update GPS location</button>
@@ -4879,7 +4992,6 @@ app.get("/tech-checkin/:token", async (req, res) => {
     res.status(500).send("Tech check-in page error. Check Render logs.");
   }
 });
-
 app.post("/tech-checkin/:token", async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [req.params.token]);
