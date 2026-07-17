@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname)));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -22,11 +23,9 @@ const agents = {
   "1005": "Christian",
   "1008": "Daniel",
   "1010": "Dawn",
-  "1018": "Emina",
   "1004": "Erika",
   "1009": "Hemen",
   "1015": "Louay",
-  "1001": "Marius",
   "1007": "Michele",
   "1003": "Rachel",
   "1001": "Rose",
@@ -152,12 +151,8 @@ function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0");
 }
 
-app.get("/brand-logo.png", (req, res) => {
-  res.sendFile(path.join(__dirname, "brand-logo.png"));
-});
-
 function requireLogin(req, res, next) {
-  const openPaths = ["/login", "/logout", "/webhook/yay", "/brand-logo.png"];
+  const openPaths = ["/login", "/logout", "/webhook/yay"];
   if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/")) return next();
 
   const session = readSession(req);
@@ -704,91 +699,248 @@ async function getTechnicianDispatchLocation(tech) {
 function sharedStyles() {
   return `
     :root {
-      --brand-red: #d93622;
-      --brand-amber: #f4c542;
-      --brand-green: #31b529;
-      --brand-dark: #26323a;
-      --brand-slate: #40515a;
+      --brand-red: #d9462e;
+      --brand-green: #2ebd2e;
+      --brand-green-dark: #188a18;
+      --brand-amber: #f2c94c;
+      --brand-amber-dark: #b98a12;
+      --charcoal: #26323a;
+      --charcoal-dark: #1e272e;
+      --sidebar-button: #303c45;
+      --bg: #f5f6f8;
+      --card: #ffffff;
+      --border: #e5e7eb;
+      --muted: #6b7280;
+      --text: #2b2f36;
     }
-    body { font-family: Arial, sans-serif; background: #111827; color: white; padding: 32px; }
-    a { color: #93c5fd; text-decoration: none; margin-right: 14px; font-weight: bold; }
-    h1 { font-size: 40px; margin-bottom: 5px; }
-    h2 { margin-top: 0; }
-    .subtitle { color: #9ca3af; margin-bottom: 24px; }
-    .nav { margin-bottom: 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .nav > a,
-    .dropdown-button {
-      margin-right: 0;
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 34px 38px 44px 370px;
+      min-height: 100vh;
+    }
+
+    a { color: var(--brand-green-dark); text-decoration: none; font-weight: bold; }
+    a:hover { text-decoration: underline; }
+
+    h1 { font-size: 38px; margin: 0 0 6px; color: var(--text); letter-spacing: -0.02em; }
+    h2 { margin-top: 0; color: var(--text); }
+    h3 { color: var(--text); }
+    label { color: var(--text); font-weight: bold; display: block; margin-bottom: 7px; }
+    .subtitle { color: var(--muted); margin-bottom: 24px; }
+
+    .sidebar {
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 330px;
+      background: var(--charcoal);
+      color: white;
+      padding: 22px 24px;
+      overflow-y: auto;
+      box-shadow: 8px 0 30px rgba(17, 24, 39, 0.14);
+      z-index: 1000;
+    }
+
+    .sidebar-logo-card {
+      background: #ffffff;
+      border-radius: 22px;
+      min-height: 228px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 28px;
+      box-shadow: 0 14px 26px rgba(0,0,0,0.14);
+    }
+
+    .sidebar-logo-card img {
+      max-width: 245px;
+      max-height: 210px;
+      display: block;
+      object-fit: contain;
+    }
+
+    .sidebar-fallback-logo {
+      color: var(--charcoal);
+      text-align: center;
+      font-size: 24px;
+      line-height: 1.15;
+      font-weight: 900;
+    }
+
+    .sidebar-label {
+      color: #c8d0d6;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin: 0 0 12px 10px;
+      font-weight: bold;
+    }
+
+    .sidebar-nav { display: flex; flex-direction: column; gap: 10px; }
+
+    .side-link,
+    .side-group-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 50px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: var(--sidebar-button);
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .side-link:hover,
+    .side-group-title:hover {
+      text-decoration: none;
+      background: #3a4751;
+      transform: translateY(-1px);
+    }
+
+    .side-link.active {
+      background: #ffffff;
+      color: var(--charcoal);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.14);
+    }
+
+    .side-dot {
+      width: 13px;
+      height: 13px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+    }
+
+    .dot-green { background: var(--brand-green); }
+    .dot-red { background: var(--brand-red); }
+    .dot-amber { background: var(--brand-amber); }
+    .dot-charcoal { background: #94a3b8; }
+
+    .side-group { margin-top: 0; }
+    .side-submenu {
+      margin: 8px 0 4px 30px;
+      padding-left: 13px;
+      border-left: 2px solid rgba(255,255,255,0.16);
+      display: grid;
+      gap: 5px;
+    }
+    .side-submenu a {
+      color: #d8e0e6;
+      font-size: 13px;
+      padding: 7px 8px;
+      border-radius: 10px;
+      display: block;
+      font-weight: bold;
+    }
+    .side-submenu a:hover { background: rgba(255,255,255,0.08); color: white; text-decoration: none; }
+
+    .sidebar-user {
+      margin-top: 26px;
+      background: var(--sidebar-button);
+      border-radius: 18px;
+      padding: 14px 16px;
+      color: #ffffff;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .sidebar-user-label { color: #c8d0d6; font-size: 12px; margin-bottom: 5px; }
+    .sidebar-user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .sidebar-user-name { font-size: 17px; font-weight: 900; }
+    .sidebar-user a { color: var(--brand-amber); font-size: 13px; margin: 0; }
+
+    .page-actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0 22px; }
+    .action-button, a.action-button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 20px;
-      padding: 10px 15px;
-      border-radius: 999px;
-      background: linear-gradient(180deg, #26323a 0%, #1f2937 100%);
-      color: #ffffff;
-      border: 1px solid #40515a;
-      box-shadow: inset 0 2px 0 rgba(255,255,255,0.06), 0 6px 16px rgba(0,0,0,0.20);
-      font-size: 14px;
-      font-weight: 800;
-      letter-spacing: 0.01em;
-      cursor: pointer;
-    }
-    .nav > a:hover,
-    .dropdown:hover .dropdown-button {
-      background: linear-gradient(180deg, #31b529 0%, #248f22 100%);
-      color: white;
-      border-color: #4ade40;
-    }
-    .nav > a[href="/jobs"] {
-      background: linear-gradient(180deg, #31b529 0%, #248f22 100%);
-      border-color: #4ade40;
-    }
-    .nav > a[href="/dispatch"] {
-      background: linear-gradient(180deg, #d93622 0%, #a9281b 100%);
-      border-color: #f97362;
-    }
-    .nav > a[href="/address-lookup-test"] {
-      background: linear-gradient(180deg, #f4c542 0%, #c9951e 100%);
-      color: #1f2937;
-      border-color: #facc15;
-    }
-    .dropdown { position: relative; display: inline-block; }
-    .dropdown-content {
-      display: none;
-      position: absolute;
-      top: 48px;
-      left: 0;
-      background: #1f2937;
-      min-width: 230px;
-      border: 1px solid #40515a;
+      padding: 12px 16px;
       border-radius: 14px;
-      box-shadow: 0 14px 35px rgba(0,0,0,0.42);
-      z-index: 9999;
+      background: var(--brand-green-dark);
+      color: white;
+      text-decoration: none;
+      font-weight: 900;
+      border: none;
+      min-height: 44px;
+    }
+    .action-button.red { background: var(--brand-red); }
+    .action-button.amber { background: var(--brand-amber-dark); }
+    .action-button.dark { background: var(--charcoal); }
+
+    .nav { display: none; }
+    .dropdown, .dropdown-content { display: none; }
+    .login-bar { display: none; }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 14px 30px rgba(17, 24, 39, 0.06);
+    }
+
+    input, select, textarea, button {
+      font-size: 15px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #d1d5db;
+    }
+    input, select, textarea {
+      background: #ffffff;
+      color: var(--text);
+      width: 100%;
+    }
+    textarea { min-height: 95px; }
+    button {
+      background: var(--brand-green-dark);
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: 900;
+    }
+    button:hover { filter: brightness(0.96); }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
       overflow: hidden;
+      box-shadow: 0 14px 30px rgba(17, 24, 39, 0.05);
     }
-    .dropdown-content a {
-      display: block;
-      padding: 12px 14px;
-      color: #f9fafb;
-      white-space: nowrap;
+    th, td {
+      text-align: left;
+      padding: 12px;
+      border-bottom: 1px solid #eef0f3;
       font-size: 14px;
-      margin-right: 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      vertical-align: middle;
+      color: var(--text);
     }
-    .dropdown-content a:hover { background: #31404a; color: white; }
-    .dropdown:hover .dropdown-content { display: block; }
-    .login-bar { background: #1f2937; border: 1px solid #374151; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; color: #d1d5db; display: flex; justify-content: space-between; align-items: center; }
-    .panel { background: #1f2937; border-radius: 14px; padding: 22px; margin-bottom: 28px; }
-    input, select, textarea, button { font-size: 15px; padding: 10px; border-radius: 8px; border: 1px solid #374151; }
-    input, select, textarea { background: #111827; color: white; }
-    button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
-    table { width: 100%; border-collapse: collapse; background: #1f2937; border-radius: 14px; overflow: hidden; }
-    th, td { text-align: left; padding: 12px; border-bottom: 1px solid #374151; font-size: 14px; vertical-align: middle; }
-    th { color: #9ca3af; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+    tr:last-child td { border-bottom: none; }
+    th {
+      color: var(--muted);
+      background: #f9fafb;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     .invoice-table th, .invoice-table td { padding: 11px 10px; font-size: 13px; }
-    .invoice-main { font-weight: bold; font-size: 14px; }
-    .invoice-sub { color: #9ca3af; font-size: 12px; margin-top: 4px; line-height: 1.35; }
+    .invoice-main { font-weight: bold; font-size: 14px; color: var(--text); }
+    .invoice-sub { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.35; }
     .compact-stage { min-width: 245px; }
     .compact-stage-top { margin-bottom: 7px; }
     .compact-stage-form { display: flex; gap: 6px; align-items: center; }
@@ -796,83 +948,128 @@ function sharedStyles() {
     .compact-stage-form button { font-size: 12px; padding: 7px 10px; }
     .actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
     .actions a { margin-right: 0; font-size: 13px; }
-    .delete-link { color: #fca5a5; }
-    .delete-button, .danger { background: #dc2626; }
-    .cancel-button { background: #374151; }
+    .delete-link { color: var(--brand-red); }
+    .delete-button, .danger { background: var(--brand-red); }
+    .cancel-button { background: var(--charcoal); }
     .small-button { font-size: 12px; padding: 7px 10px; }
-    .pill, .status { padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: bold; white-space: nowrap; display: inline-block; }
+
+    .pill, .status {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: bold;
+      white-space: nowrap;
+      display: inline-block;
+    }
     .available { background: #16a34a; color: white; }
     .soon { background: #f59e0b; color: black; }
     .onjob { background: #2563eb; color: white; }
     .off { background: #6b7280; color: white; }
-    .bad { background: #dc2626; color: white; }
-    .neutral, .inactive { background: #374151; color: #d1d5db; }
-    .engaged { background: #dc2626; color: white; }
-    .priority-high { background: #dc2626; color: white; }
+    .bad { background: var(--brand-red); color: white; }
+    .neutral, .inactive { background: #e5e7eb; color: #374151; }
+    .engaged { background: var(--brand-red); color: white; }
+    .priority-high { background: var(--brand-red); color: white; }
     .priority-push { background: #f59e0b; color: black; }
-    .priority-normal { background: #374151; color: #d1d5db; }
-    .priority-low { background: #6b7280; color: white; }
+    .priority-normal { background: #e5e7eb; color: #374151; }
+    .priority-low { background: #9ca3af; color: white; }
+
     .stage-draft { background: #374151; color: #d1d5db; }
     .stage-approval { background: #f59e0b; color: black; }
     .stage-approved { background: #2563eb; color: white; }
     .stage-emailed { background: #16a34a; color: white; }
     .stage-emailed-photos { background: #22c55e; color: black; }
-    .stage-cancelled { background: #dc2626; color: white; }
-    .muted { color: #9ca3af; }
-    .audit { color: #9ca3af; font-size: 12px; line-height: 1.35; margin-top: 6px; }
-    .warning-text { color: #fbbf24; font-weight: bold; }
+    .stage-cancelled { background: var(--brand-red); color: white; }
+
+    .muted { color: var(--muted); }
+    .audit { color: var(--muted); font-size: 12px; line-height: 1.35; margin-top: 6px; }
+    .warning-text { color: var(--brand-amber-dark); font-weight: bold; }
     .distance { font-size: 22px; font-weight: bold; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
-    .checkbox-row { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: #d1d5db; font-size: 16px; }
+    .checkbox-row { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--text); font-size: 16px; }
     .checkbox-row input { width: 18px; height: 18px; }
-    .help { color: #9ca3af; font-size: 14px; margin-top: 8px; }
+    .help { color: var(--muted); font-size: 14px; margin-top: 8px; }
     .search-form { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
-    .copy-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 7px; color: #d1d5db; }
+    .copy-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 7px; color: var(--text); }
+
     .job-open { background: #2563eb; color: white; }
     .job-assigned { background: #7c3aed; color: white; }
     .job-completed { background: #f59e0b; color: black; }
     .job-closed { background: #374151; color: #d1d5db; }
-    .job-awaiting-payment { background: #dc2626; color: white; }
+    .job-awaiting-payment { background: var(--brand-red); color: white; }
     .job-fully-paid-private { background: #16a34a; color: white; }
     .job-invoiced-account { background: #22c55e; color: black; }
     .job-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
     .job-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
-    .job-card-title { font-weight: bold; font-size: 16px; }
-    .job-card-sub { color: #9ca3af; font-size: 13px; margin-top: 4px; line-height: 1.35; }
-    .big-total { font-size: 30px; font-weight: bold; }
-    @media (max-width: 800px) { .job-grid, .job-grid-3 { grid-template-columns: 1fr; } }
+    .job-card-title { font-weight: bold; font-size: 16px; color: var(--text); }
+    .job-card-sub { color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.35; }
+    .big-total { font-size: 30px; font-weight: bold; color: var(--text); }
 
+    .dashboard-card, .metric-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 14px 30px rgba(17, 24, 39, 0.05);
+    }
+
+    @media (max-width: 1000px) {
+      body { padding: 24px; padding-top: 360px; }
+      .sidebar { right: 0; width: 100%; height: 330px; bottom: auto; display: block; overflow-x: auto; }
+      .sidebar-logo-card { position: absolute; left: 20px; top: 20px; width: 220px; height: 180px; min-height: 180px; margin: 0; }
+      .sidebar-logo-card img { max-width: 190px; max-height: 160px; }
+      .sidebar-label { margin-left: 250px; margin-top: 10px; }
+      .sidebar-nav { margin-left: 250px; display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 8px; }
+      .sidebar-user { margin-left: 250px; margin-top: 10px; }
+      .side-submenu { display: none; }
+      .job-grid, .job-grid-3, .grid-2, .grid-3, .search-form { grid-template-columns: 1fr; }
+    }
   `;
 }
 
 function nav(req) {
   const name = currentAgentName(req);
+  const path = req.path || "/";
+  const active = (href) => {
+    if (href === "/") return path === "/" ? " active" : "";
+    return path.startsWith(href) ? " active" : "";
+  };
+
   return `
-    <div class="login-bar">
-      <div>Logged in as <strong>${escapeHtml(name)}</strong></div>
-      <div><a href="/logout">Logout</a></div>
-    </div>
+    <aside class="sidebar">
+      <div class="sidebar-logo-card">
+        <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;sidebar-fallback-logo&quot;>Your Dispatch Partner<br><span style=&quot;font-size:16px;color:#4b5563;&quot;>The Dispatch Office</span></div>';">
+      </div>
 
-    <div class="nav">
-      <a href="/">Call Wallboard</a>
-      <a href="/reports">Reports</a>
-      <a href="/jobs">Jobs</a>
-      <a href="/technicians">Technicians</a>
-      <a href="/dispatch">Dispatch</a>
-      <a href="/address-lookup-test">Address Lookup</a>
+      <div class="sidebar-label">Main menu</div>
+      <nav class="sidebar-nav">
+        <a class="side-link${active("/")}" href="/"><span class="side-dot dot-green"></span><span>Dashboard</span></a>
+        <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Jobs</span></a>
+        <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Dispatch Map</span></a>
+        <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
+        <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+        <a class="side-link${active("/address-lookup-test")}" href="/address-lookup-test"><span class="side-dot dot-red"></span><span>Address Lookup</span></a>
 
-      <div class="dropdown">
-        <a class="dropdown-button" href="/invoices">Invoices</a>
-        <div class="dropdown-content">
-          <a href="/invoices">Active Invoices</a>
-          <a href="/invoices/historic">Historic Invoices</a>
-          <a href="/invoices/new">New Invoice</a>
-          <a href="/invoice-items">Invoice Items</a>
-          <a href="/invoice-templates">Account Templates</a>
+        <div class="side-group">
+          <a class="side-group-title${active("/invoices")}" href="/invoices"><span class="side-dot dot-amber"></span><span>Invoices</span></a>
+          <div class="side-submenu">
+            <a href="/invoices">Active Invoices</a>
+            <a href="/invoices/historic">Historic Invoices</a>
+            <a href="/invoices/new">New Invoice</a>
+            <a href="/invoice-items">Invoice Items</a>
+            <a href="/invoice-templates">Account Templates</a>
+          </div>
+        </div>
+      </nav>
+
+      <div class="sidebar-user">
+        <div class="sidebar-user-label">Logged in as</div>
+        <div class="sidebar-user-row">
+          <div class="sidebar-user-name">${escapeHtml(name)}</div>
+          <a href="/logout">Logout</a>
         </div>
       </div>
-    </div>
+    </aside>
   `;
 }
 
@@ -1197,125 +1394,100 @@ app.get("/login", (req, res) => {
       <title>Your Dispatch Partner Login</title>
       <style>
         :root {
-          --brand-red: #d93622;
-          --brand-amber: #f4c542;
-          --brand-green: #31b529;
-          --brand-dark: #26323a;
-          --brand-slate: #40515a;
+          --brand-red: #d9462e;
+          --brand-green: #2ebd2e;
+          --brand-green-dark: #188a18;
+          --brand-amber: #f2c94c;
+          --charcoal: #26323a;
+          --bg: #f5f6f8;
+          --border: #e5e7eb;
+          --muted: #6b7280;
         }
         * { box-sizing: border-box; }
         body {
           font-family: Arial, sans-serif;
-          min-height: 100vh;
+          background: radial-gradient(circle at top left, rgba(46,189,46,0.14), transparent 30%), var(--bg);
+          color: var(--charcoal);
           margin: 0;
-          padding: 34px;
-          background:
-            radial-gradient(circle at top left, rgba(49,181,41,0.22), transparent 30%),
-            radial-gradient(circle at bottom right, rgba(217,54,34,0.18), transparent 28%),
-            linear-gradient(135deg, #111827 0%, #26323a 100%);
-          color: white;
+          min-height: 100vh;
           display: flex;
           align-items: center;
           justify-content: center;
+          padding: 34px;
         }
-        .login-box {
+        .login-shell {
           width: 100%;
-          max-width: 520px;
-          background: #ffffff;
-          color: var(--brand-dark);
-          border-radius: 24px;
-          padding: 30px;
-          border: 1px solid rgba(255,255,255,0.18);
-          box-shadow: 0 28px 80px rgba(0,0,0,0.35);
+          max-width: 980px;
+          display: grid;
+          grid-template-columns: 1fr 430px;
+          gap: 28px;
+          align-items: stretch;
         }
-        .brand-logo {
-          display: block;
-          width: 100%;
-          max-width: 390px;
-          margin: 0 auto 18px;
+        .brand-panel, .login-box {
+          background: white;
+          border: 1px solid var(--border);
+          border-radius: 28px;
+          box-shadow: 0 24px 60px rgba(17, 24, 39, 0.10);
         }
-        h1 {
-          margin: 0;
-          font-size: 30px;
+        .brand-panel {
+          padding: 34px;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: center;
           text-align: center;
-          color: var(--brand-dark);
         }
-        .subtitle {
-          color: #6b7280;
-          margin: 10px 0 25px;
-          text-align: center;
-          line-height: 1.45;
-        }
-        label {
-          display: block;
-          font-size: 13px;
-          font-weight: 800;
-          margin: 0 0 7px;
-          color: var(--brand-slate);
-        }
+        .brand-panel img { max-width: 100%; max-height: 420px; object-fit: contain; }
+        .brand-fallback { font-size: 42px; font-weight: 900; color: var(--brand-green-dark); }
+        .tagline { margin-top: 18px; color: var(--muted); font-size: 18px; line-height: 1.45; max-width: 420px; }
+        .login-box { padding: 34px; }
+        h1 { margin: 0 0 8px; font-size: 34px; letter-spacing: -0.02em; }
+        .subtitle { color: var(--muted); margin-bottom: 25px; line-height: 1.45; }
+        label { display: block; font-weight: bold; margin-bottom: 7px; }
         select, input, button {
           width: 100%;
           font-size: 17px;
           padding: 14px;
-          border-radius: 12px;
+          border-radius: 13px;
           border: 1px solid #d1d5db;
-          margin-bottom: 15px;
+          margin-bottom: 14px;
         }
-        select, input { background: #f9fafb; color: var(--brand-dark); }
-        select:focus, input:focus {
-          outline: none;
-          border-color: var(--brand-green);
-          box-shadow: 0 0 0 4px rgba(49,181,41,0.16);
-        }
-        button {
-          background: linear-gradient(180deg, var(--brand-green), #248f22);
-          color: white;
-          border: none;
-          font-weight: 900;
-          cursor: pointer;
-          box-shadow: 0 8px 18px rgba(49,181,41,0.28);
-        }
-        button:hover { filter: brightness(1.03); }
-        .error {
-          background: #fee2e2;
-          color: #991b1b;
-          border: 1px solid #fecaca;
-          border-radius: 12px;
-          padding: 12px;
-          margin-bottom: 16px;
-          font-weight: 800;
-        }
-        .traffic-line {
-          height: 6px;
-          border-radius: 999px;
-          overflow: hidden;
-          display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
-          margin: 4px 0 24px;
-        }
-        .traffic-line span:nth-child(1) { background: var(--brand-red); }
-        .traffic-line span:nth-child(2) { background: var(--brand-amber); }
-        .traffic-line span:nth-child(3) { background: var(--brand-green); }
+        select, input { background: #ffffff; color: var(--charcoal); }
+        button { background: var(--brand-green-dark); color: white; border: none; font-weight: 900; cursor: pointer; }
+        button:hover { filter: brightness(0.96); }
+        .error { background: var(--brand-red); color: white; border-radius: 13px; padding: 12px; margin-bottom: 14px; font-weight: bold; }
+        .status-dots { display: flex; gap: 8px; margin-top: 20px; justify-content: center; }
+        .status-dots span { width: 12px; height: 12px; border-radius: 999px; display: block; }
+        .red { background: var(--brand-red); }
+        .amber { background: var(--brand-amber); }
+        .green { background: var(--brand-green); }
+        @media (max-width: 850px) { .login-shell { grid-template-columns: 1fr; } .brand-panel img { max-height: 260px; } }
       </style>
     </head>
     <body>
-      <div class="login-box">
-        <img class="brand-logo" src="/brand-logo.png" alt="Your Dispatch Partner - Home of The Dispatch Office">
-        <div class="traffic-line"><span></span><span></span><span></span></div>
-        <h1>Portal Login</h1>
-        <div class="subtitle">Choose your name and enter your dashboard password.</div>
-        ${error ? `<div class="error">Wrong agent or password. Try again.</div>` : ""}
-        <form method="POST" action="/login">
-          <input type="hidden" name="next" value="${escapeHtml(next)}">
-          <label>Your name</label>
-          <select name="agent_name" required>
-            <option value="">Choose your name</option>
-            ${options}
-          </select>
-          <label>Password</label>
-          <input name="password" type="password" placeholder="Enter password" required>
-          <button type="submit">Log in</button>
-        </form>
+      <div class="login-shell">
+        <div class="brand-panel">
+          <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;brand-fallback&quot;>Your Dispatch Partner</div><div class=&quot;tagline&quot;>Home of The Dispatch Office</div>';">
+          <div class="tagline">From first call to final invoice — live operations control for busy trade callouts.</div>
+          <div class="status-dots"><span class="red"></span><span class="amber"></span><span class="green"></span></div>
+        </div>
+
+        <div class="login-box">
+          <h1>Portal Login</h1>
+          <div class="subtitle">Choose your name and enter the dashboard password.</div>
+          ${error ? `<div class="error">Wrong agent or password. Try again.</div>` : ""}
+          <form method="POST" action="/login">
+            <input type="hidden" name="next" value="${escapeHtml(next)}">
+            <label>Your name</label>
+            <select name="agent_name" required>
+              <option value="">Choose your name</option>
+              ${options}
+            </select>
+            <label>Password</label>
+            <input name="password" type="password" placeholder="Password" required>
+            <button type="submit">Log in</button>
+          </form>
+        </div>
       </div>
     </body>
     </html>
