@@ -987,6 +987,8 @@ function sharedStyles() {
     .compact-stage-form button { font-size: 12px; padding: 7px 10px; }
     .actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
     .actions a { margin-right: 0; font-size: 13px; }
+    .inline-form { display: inline-block; margin: 0 8px 0 0; }
+    .inline-form button { width: auto; }
     .delete-link { color: var(--brand-red); }
     .delete-button, .danger { background: var(--brand-red); }
     .cancel-button { background: var(--charcoal); }
@@ -1083,9 +1085,14 @@ function nav(req) {
       <div class="sidebar-label">Main menu</div>
       <nav class="sidebar-nav">
         <a class="side-link${active("/")}" href="/"><span class="side-dot dot-green"></span><span>Dashboard</span></a>
-        <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Jobs</span></a>
-        <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Dispatch Map</span></a>
-        <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
+        <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Client orders</span></a>
+        <div class="side-group">
+          <a class="side-group-title${(path.startsWith("/dispatch") || path.startsWith("/technicians")) ? " active" : ""}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Dispatch & Technicians</span></a>
+          <div class="side-submenu">
+            <a href="/dispatch">Dispatch Map</a>
+            <a href="/technicians">Technicians</a>
+          </div>
+        </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
         <a class="side-link${active("/address-lookup-test")}" href="/address-lookup-test"><span class="side-dot dot-red"></span><span>Address Lookup</span></a>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
@@ -1752,22 +1759,25 @@ app.get("/admin/users", async (req, res) => {
       <tr>
         <td>
           <div class="job-card-title">${escapeHtml(user.name)}</div>
-          <div class="job-card-sub">Created ${formatDateTime(user.created_at)}</div>
+          <div class="job-card-sub">Created ${formatDateTime(user.created_at)}<br>Last updated ${formatDateTime(user.updated_at)}</div>
         </td>
         <td>${escapeHtml(user.role || "dispatcher")}</td>
         <td>${user.active ? `<span class="pill available">Active</span>` : `<span class="pill off">Removed</span>`}</td>
         <td>
-          ${user.active ? `
-            <form method="POST" action="/admin/users/remove" onsubmit="return confirm('Remove this user from login?');">
-              <input type="hidden" name="id" value="${user.id}">
-              <button class="delete-button small-button" type="submit">Remove</button>
-            </form>
-          ` : `
-            <form method="POST" action="/admin/users/reactivate">
-              <input type="hidden" name="id" value="${user.id}">
-              <button class="small-button" type="submit">Reactivate</button>
-            </form>
-          `}
+          <div class="actions">
+            <a href="/admin/users/${user.id}/edit">Edit</a>
+            ${user.active ? `
+              <form class="inline-form" method="POST" action="/admin/users/remove" onsubmit="return confirm('Remove this user from login?');">
+                <input type="hidden" name="id" value="${user.id}">
+                <button class="delete-button small-button" type="submit">Remove</button>
+              </form>
+            ` : `
+              <form class="inline-form" method="POST" action="/admin/users/reactivate">
+                <input type="hidden" name="id" value="${user.id}">
+                <button class="small-button" type="submit">Reactivate</button>
+              </form>
+            `}
+          </div>
         </td>
       </tr>
     `).join("");
@@ -1782,7 +1792,7 @@ app.get("/admin/users", async (req, res) => {
       <body>
         ${nav(req)}
         <h1>Admin Manager</h1>
-        <div class="subtitle">Add or remove portal users. This controls who appears on the login screen.</div>
+        <div class="subtitle">Add, edit or remove portal users. This controls who appears on the login screen.</div>
 
         <div class="panel">
           <h2>Add new user</h2>
@@ -1809,7 +1819,7 @@ app.get("/admin/users", async (req, res) => {
         </div>
 
         <table>
-          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Action</th></tr></thead>
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </body>
@@ -1818,6 +1828,81 @@ app.get("/admin/users", async (req, res) => {
   } catch (error) {
     console.error("Admin users error:", error);
     res.status(500).send("Admin users error. Check Render logs.");
+  }
+});
+
+app.get("/admin/users/:id/edit", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM app_users WHERE id = $1`, [req.params.id]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).send("User not found");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Edit User</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Edit User</h1>
+        <div class="subtitle">Update this user's display name, role and active status.</div>
+
+        <div class="panel">
+          <form method="POST" action="/admin/users/${user.id}/edit">
+            <div class="grid-3">
+              <div>
+                <label>Name</label>
+                <input name="name" value="${escapeHtml(user.name)}" required>
+              </div>
+              <div>
+                <label>Role</label>
+                <select name="role">
+                  <option value="dispatcher" ${user.role === "dispatcher" ? "selected" : ""}>Dispatcher</option>
+                  <option value="manager" ${user.role === "manager" ? "selected" : ""}>Manager</option>
+                  <option value="admin" ${user.role === "admin" ? "selected" : ""}>Admin</option>
+                </select>
+              </div>
+              <div>
+                <label>Status</label>
+                <select name="active">
+                  <option value="true" ${user.active ? "selected" : ""}>Active</option>
+                  <option value="false" ${!user.active ? "selected" : ""}>Removed</option>
+                </select>
+              </div>
+            </div>
+            <br>
+            <button type="submit">Save changes</button>
+            <a href="/admin/users" style="margin-left:12px;">Cancel</a>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit user page error:", error);
+    res.status(500).send("Edit user page error. Check Render logs.");
+  }
+});
+
+app.post("/admin/users/:id/edit", async (req, res) => {
+  try {
+    const name = (req.body.name || "").trim();
+    const role = req.body.role || "dispatcher";
+    const active = req.body.active === "true";
+    if (!name) return res.redirect(`/admin/users/${req.params.id}/edit`);
+
+    await pool.query(`
+      UPDATE app_users
+      SET name = $1, role = $2, active = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [name, role, active, req.params.id]);
+
+    res.redirect("/admin/users");
+  } catch (error) {
+    console.error("Edit user error:", error);
+    res.status(500).send("Edit user error. The name may already exist. Check Render logs.");
   }
 });
 
@@ -2700,22 +2785,247 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
 /* Existing dispatch, reports and technician routes are preserved below in compact form. */
 
-app.get("/reports", async (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><title>Reports</title><style>${sharedStyles()}</style></head>
-    <body>
-      ${nav(req)}
-      <h1>Reports</h1>
-      <div class="subtitle">Reports are still available. Use CSV downloads below.</div>
-      <div class="panel">
-        <a href="/reports/invoices.csv">Download invoices CSV</a>
-        <a href="/reports/calls.csv">Download calls CSV</a>
+function reportPeriodLinks(selectedRange) {
+  const periods = [
+    { value: "today", label: "Today" },
+    { value: "this_week", label: "This week" },
+    { value: "this_month", label: "This month" },
+    { value: "custom", label: "Custom" }
+  ];
+
+  return periods.map(period => `
+    <a class="action-button ${selectedRange === period.value ? "" : "dark"}" href="/reports?range=${period.value}">${period.label}</a>
+  `).join("");
+}
+
+function miniMetric(title, value, hint = "") {
+  return `
+    <div class="panel">
+      <div class="muted">${escapeHtml(title)}</div>
+      <div class="big-total">${value}</div>
+      ${hint ? `<div class="audit">${escapeHtml(hint)}</div>` : ""}
+    </div>
+  `;
+}
+
+async function jobCountSummary(start, end) {
+  const result = await pool.query(`
+    SELECT
+      COUNT(*)::int AS total_jobs,
+      COUNT(*) FILTER (WHERE status = 'open')::int AS open_jobs,
+      COUNT(*) FILTER (WHERE status = 'assigned')::int AS assigned_jobs,
+      COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_jobs,
+      COUNT(*) FILTER (WHERE status = 'awaiting_payment')::int AS awaiting_payment_jobs,
+      COUNT(*) FILTER (WHERE status = 'fully_paid_private')::int AS fully_paid_private_jobs,
+      COUNT(*) FILTER (WHERE status = 'invoiced_account')::int AS invoiced_account_jobs,
+      COUNT(*) FILTER (WHERE status = 'closed')::int AS closed_jobs
+    FROM jobs
+    WHERE created_at >= $1
+    AND created_at < $2
+  `, [start, end]);
+  return result.rows[0] || {};
+}
+
+async function revenueSummaryByTechnician(start, end) {
+  const result = await pool.query(`
+    SELECT
+      COALESCE(t.name, 'Unassigned') AS technician_name,
+      COUNT(j.id)::int AS job_count,
+      COALESCE(SUM(COALESCE(j.final_job_value, 0)), 0)::numeric AS income,
+      COALESCE(SUM(COALESCE(j.materials_cost, 0)), 0)::numeric AS material_cost
+    FROM jobs j
+    LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+    WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
+    AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
+    AND (
+      j.final_job_value IS NOT NULL
+      OR j.materials_cost IS NOT NULL
+      OR j.status IN ('fully_paid_private', 'invoiced_account', 'closed')
+    )
+    GROUP BY COALESCE(t.name, 'Unassigned')
+    ORDER BY income DESC, technician_name ASC
+  `, [start, end]);
+  return result.rows;
+}
+
+function revenueTable(title, rows) {
+  const totalIncome = rows.reduce((sum, row) => sum + Number(row.income || 0), 0);
+  const totalMaterials = rows.reduce((sum, row) => sum + Number(row.material_cost || 0), 0);
+  const body = rows.map(row => {
+    const income = Number(row.income || 0);
+    const materials = Number(row.material_cost || 0);
+    return `
+      <tr>
+        <td><strong>${escapeHtml(row.technician_name || "Unassigned")}</strong></td>
+        <td>${Number(row.job_count || 0)}</td>
+        <td>${money(income)}</td>
+        <td>${money(materials)}</td>
+        <td><strong>${money(income - materials)}</strong></td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+    <div class="panel">
+      <h2>${escapeHtml(title)}</h2>
+      <div class="grid-3">
+        ${miniMetric("Income", money(totalIncome))}
+        ${miniMetric("Material cost", money(totalMaterials))}
+        ${miniMetric("Income after materials", money(totalIncome - totalMaterials))}
       </div>
-    </body>
-    </html>
-  `);
+      <table>
+        <thead><tr><th>Technician</th><th>Jobs</th><th>Income</th><th>Material cost</th><th>Income after materials</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="5" class="muted">No revenue data for this period yet.</td></tr>`}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+app.get("/reports", async (req, res) => {
+  try {
+    const nowParts = londonDateParts();
+    const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+    const dayRange = { label: "Today", start: today, end: addDays(today, 1) };
+    const weekRange = { label: "This week", start: startOfWeekMonday(today), end: addDays(today, 1) };
+    const monthRange = { label: "This month", start: makeDate(nowParts.year, nowParts.month, 1), end: addDays(today, 1) };
+    const selectedRange = buildReportRange(req.query);
+
+    const [dayCounts, weekCounts, monthCounts, selectedCounts, dayRevenue, weekRevenue, monthRevenue, selectedRevenue] = await Promise.all([
+      jobCountSummary(dayRange.start, dayRange.end),
+      jobCountSummary(weekRange.start, weekRange.end),
+      jobCountSummary(monthRange.start, monthRange.end),
+      jobCountSummary(selectedRange.start, selectedRange.end),
+      revenueSummaryByTechnician(dayRange.start, dayRange.end),
+      revenueSummaryByTechnician(weekRange.start, weekRange.end),
+      revenueSummaryByTechnician(monthRange.start, monthRange.end),
+      revenueSummaryByTechnician(selectedRange.start, selectedRange.end)
+    ]);
+
+    const countSummaryRow = (label, counts) => `
+      <tr>
+        <td><strong>${escapeHtml(label)}</strong></td>
+        <td>${Number(counts.total_jobs || 0)}</td>
+        <td>${Number(counts.open_jobs || 0)}</td>
+        <td>${Number(counts.assigned_jobs || 0)}</td>
+        <td>${Number(counts.completed_jobs || 0)}</td>
+        <td>${Number(counts.awaiting_payment_jobs || 0)}</td>
+        <td>${Number(counts.fully_paid_private_jobs || 0)}</td>
+        <td>${Number(counts.invoiced_account_jobs || 0)}</td>
+        <td>${Number(counts.closed_jobs || 0)}</td>
+      </tr>
+    `;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Reports</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Reports</h1>
+        <div class="subtitle">Job count and revenue reporting. Job counts are based on when the client order was created. Revenue uses the close/update date and final job value.</div>
+
+        <div class="page-actions">
+          ${reportPeriodLinks(selectedRange.range)}
+          <a class="action-button amber" href="/reports/jobs.csv?range=${encodeURIComponent(selectedRange.range)}&from=${encodeURIComponent(selectedRange.fromValue)}&to=${encodeURIComponent(selectedRange.toValue)}">Download jobs CSV</a>
+          <a class="action-button dark" href="/reports/invoices.csv">Invoices CSV</a>
+          <a class="action-button dark" href="/reports/calls.csv">Calls CSV</a>
+        </div>
+
+        <div class="panel">
+          <h2>Custom report range</h2>
+          <form method="GET" action="/reports" class="grid-3">
+            <input type="hidden" name="range" value="custom">
+            <div>
+              <label>From</label>
+              <input type="date" name="from" value="${escapeHtml(selectedRange.fromValue)}">
+            </div>
+            <div>
+              <label>To</label>
+              <input type="date" name="to" value="${escapeHtml(selectedRange.toValue)}">
+            </div>
+            <div style="display:flex; align-items:end;">
+              <button type="submit">Run custom report</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Job count summary</h2>
+          <table>
+            <thead>
+              <tr><th>Period</th><th>Total</th><th>Open</th><th>Assigned</th><th>Completed</th><th>Awaiting payment</th><th>Fully paid private</th><th>Invoiced account</th><th>Closed</th></tr>
+            </thead>
+            <tbody>
+              ${countSummaryRow("Today", dayCounts)}
+              ${countSummaryRow("This week", weekCounts)}
+              ${countSummaryRow("This month", monthCounts)}
+              ${selectedRange.range === "custom" ? countSummaryRow(selectedRange.label, selectedCounts) : ""}
+            </tbody>
+          </table>
+        </div>
+
+        ${revenueTable("Revenue by technician — Today", dayRevenue)}
+        ${revenueTable("Revenue by technician — This week", weekRevenue)}
+        ${revenueTable("Revenue by technician — This month", monthRevenue)}
+        ${selectedRange.range === "custom" ? revenueTable(`Revenue by technician — ${selectedRange.label}`, selectedRevenue) : ""}
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Reports page error:", error);
+    res.status(500).send("Reports page error. Check Render logs.");
+  }
+});
+
+app.get("/reports/jobs.csv", async (req, res) => {
+  try {
+    const reportRange = buildReportRange(req.query);
+    const result = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.created_at >= $1
+      AND j.created_at < $2
+      ORDER BY j.created_at DESC
+    `, [reportRange.start, reportRange.end]);
+
+    const header = [
+      "Job Number", "Created At", "Status", "Customer", "Phone", "Postcode",
+      "Job Type", "Technician", "Starting Price", "Call Out Agreed", "Start Price Of Locks",
+      "Final Job Value", "Payment Method", "Customer Paid", "Materials Used", "Material Cost", "Outcome"
+    ];
+
+    const lines = [header.map(csvValue).join(",")];
+
+    result.rows.forEach(job => {
+      lines.push([
+        job.job_number || jobNumber(job.id),
+        formatDateTime(job.created_at),
+        jobStatusLabel(job.status),
+        job.customer_name,
+        job.customer_phone,
+        job.postcode,
+        job.job_type,
+        job.technician_name,
+        job.starting_price,
+        job.call_out_agreed,
+        job.lock_start_price,
+        job.final_job_value,
+        job.payment_method,
+        job.customer_paid ? "Yes" : "No",
+        job.materials_used,
+        job.materials_cost,
+        job.outcome
+      ].map(csvValue).join(","));
+    });
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="jobs-report-${reportRange.fromValue}-to-${reportRange.toValue}.csv"`);
+    res.send(lines.join("\n"));
+  } catch (error) {
+    console.error("Jobs CSV error:", error);
+    res.status(500).send("Jobs CSV error. Check Render logs.");
+  }
 });
 
 app.get("/reports/invoices.csv", async (req, res) => {
@@ -2949,11 +3259,11 @@ app.get("/jobs", async (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head><title>Jobs</title><style>${sharedStyles()}</style></head>
+      <head><title>Client orders</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
-        <h1>Jobs</h1>
-        <div class="subtitle">Live job booking board. Open, assign, complete, close and report on jobs.</div>
+        <h1>Client orders</h1>
+        <div class="subtitle">Live client order board. Open, assign, complete, close and report on jobs.</div>
 
         <div class="grid-3">
           <div class="panel"><div class="muted">Active jobs</div><div class="big-total">${activeCount}</div></div>
@@ -2968,7 +3278,7 @@ app.get("/jobs", async (req, res) => {
             <button type="submit">Filter jobs</button>
           </form>
           <br>
-          <a class="button" href="/jobs/new">+ New job booking</a>
+          <a class="button" href="/jobs/new">+ New client order</a>
         </div>
 
         <table>
