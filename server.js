@@ -1215,7 +1215,7 @@ function nav(req) {
         </div>
       </div>
 
-      <a class="sidebar-academy-bottom${active("/academy")}" href="/academy">
+      <a class="sidebar-academy-bottom" href="/academy" target="_blank" rel="noopener noreferrer">
         <span class="academy-bottom-icon" aria-hidden="true">🎓</span>
         <span class="academy-bottom-text">
           <span class="academy-bottom-main">Academy</span>
@@ -3009,33 +3009,7 @@ function revenueTable(title, rows) {
 
 
 app.get("/academy", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Academy</title>
-      <style>${sharedStyles()}</style>
-    </head>
-    <body>
-      ${nav(req)}
-      <h1>Academy</h1>
-      <div class="subtitle">Training, onboarding and process guidance for dispatchers and technicians.</div>
-      <div class="panel">
-        <h2>Academy coming soon</h2>
-        <p>This area is ready to hold your training modules, quizzes, process notes and onboarding documents.</p>
-        <p>Suggested sections:</p>
-        <ul>
-          <li>Dispatcher training</li>
-          <li>Technician process</li>
-          <li>Pricing and quoting guidance</li>
-          <li>Customer complaint handling</li>
-          <li>Account jobs and payment rules</li>
-        </ul>
-        <a class="action-button dark" href="/call-wallboard">Back to Call wallboard</a>
-      </div>
-    </body>
-    </html>
-  `);
+  res.redirect("https://locksmith-academy-quiz.onrender.com/");
 });
 
 app.get("/reports", async (req, res) => {
