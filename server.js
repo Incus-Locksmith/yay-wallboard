@@ -901,6 +901,21 @@ function sharedStyles() {
       box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
     }
 
+    .side-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 9px;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--brand-amber);
+      color: #1f2937;
+      font-size: 16px;
+      line-height: 1;
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+    }
+
     .dot-green { background: var(--brand-green); }
     .dot-red { background: var(--brand-red); }
     .dot-amber { background: var(--brand-amber); }
@@ -1133,6 +1148,7 @@ function nav(req) {
           </div>
         </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+        <a class="side-link${active("/academy")}" href="/academy"><span class="side-icon" aria-hidden="true">🎓</span><span>Academy</span></a>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
 
         <div class="side-group">
@@ -1704,19 +1720,12 @@ app.get("/call-wallboard", async (req, res) => {
           .card-link { color: inherit; text-decoration: none; display: block; }
           .card-link:hover { text-decoration: none; transform: translateY(-1px); }
           .card-link .card { cursor: pointer; }
-          .home-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 24px 0; }
-          .home-button { display: inline-flex; align-items: center; gap: 10px; padding: 14px 20px; border-radius: 16px; font-weight: 900; text-decoration: none; box-shadow: 0 12px 24px rgba(17, 24, 39, 0.14); }
-          .home-button.academy { background: #f2c94c; color: #1f2937; border: 2px solid #b98a12; }
-          .home-button.academy:hover { filter: brightness(0.98); transform: translateY(-1px); text-decoration: none; }
         </style>
       </head>
       <body>
         ${nav(req)}
         <h1>Call wallboard</h1>
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
-        <div class="home-actions">
-          <a class="home-button academy" href="/academy">Academy</a>
-        </div>
         <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
         <div class="cards">
           <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
