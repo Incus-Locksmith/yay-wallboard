@@ -952,6 +952,49 @@ function sharedStyles() {
     .sidebar-user-name { font-size: 17px; font-weight: 900; }
     .sidebar-user a { color: var(--brand-amber); font-size: 13px; margin: 0; }
 
+    .sidebar-academy-bottom {
+      margin-top: 48px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 58px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(242,201,76,0.98), rgba(185,138,18,0.98));
+      color: #1f2937;
+      text-decoration: none;
+      font-size: 16px;
+      font-weight: 950;
+      box-shadow: 0 16px 28px rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.18);
+    }
+    .sidebar-academy-bottom:hover {
+      transform: translateY(-1px);
+      text-decoration: none;
+      box-shadow: 0 20px 34px rgba(0,0,0,0.22);
+    }
+    .sidebar-academy-bottom.active {
+      background: #ffffff;
+      color: var(--charcoal);
+      box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+    }
+    .academy-bottom-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--charcoal);
+      color: var(--brand-amber);
+      font-size: 19px;
+      flex: 0 0 auto;
+    }
+    .academy-bottom-text { display: grid; gap: 2px; }
+    .academy-bottom-main { line-height: 1; }
+    .academy-bottom-sub { font-size: 11px; font-weight: 800; color: rgba(31,41,55,0.72); }
+    .sidebar-academy-bottom.active .academy-bottom-sub { color: rgba(38,50,58,0.65); }
+
     .page-actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0 22px; }
     .action-button, a.action-button {
       display: inline-flex;
@@ -1116,6 +1159,8 @@ function sharedStyles() {
       .sidebar-label { margin-left: 250px; margin-top: 10px; }
       .sidebar-nav { margin-left: 250px; display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 8px; }
       .sidebar-user { margin-left: 250px; margin-top: 10px; }
+      .sidebar-academy-bottom { margin-left: 250px; margin-top: 10px; min-height: 52px; padding: 10px 14px; }
+      .academy-bottom-sub { display: none; }
       .side-submenu { display: none; }
       .job-grid, .job-grid-3, .grid-2, .grid-3, .grid-4, .search-form { grid-template-columns: 1fr; }
     }
@@ -1148,7 +1193,6 @@ function nav(req) {
           </div>
         </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
-        <a class="side-link${active("/academy")}" href="/academy"><span class="side-icon" aria-hidden="true">🎓</span><span>Academy</span></a>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
 
         <div class="side-group">
@@ -1170,6 +1214,14 @@ function nav(req) {
           <a href="/logout">Logout</a>
         </div>
       </div>
+
+      <a class="sidebar-academy-bottom${active("/academy")}" href="/academy">
+        <span class="academy-bottom-icon" aria-hidden="true">🎓</span>
+        <span class="academy-bottom-text">
+          <span class="academy-bottom-main">Academy</span>
+          <span class="academy-bottom-sub">Training & onboarding</span>
+        </span>
+      </a>
     </aside>
   `;
 }
