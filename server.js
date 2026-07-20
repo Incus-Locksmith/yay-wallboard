@@ -1704,12 +1704,19 @@ app.get("/call-wallboard", async (req, res) => {
           .card-link { color: inherit; text-decoration: none; display: block; }
           .card-link:hover { text-decoration: none; transform: translateY(-1px); }
           .card-link .card { cursor: pointer; }
+          .home-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 24px 0; }
+          .home-button { display: inline-flex; align-items: center; gap: 10px; padding: 14px 20px; border-radius: 16px; font-weight: 900; text-decoration: none; box-shadow: 0 12px 24px rgba(17, 24, 39, 0.14); }
+          .home-button.academy { background: #f2c94c; color: #1f2937; border: 2px solid #b98a12; }
+          .home-button.academy:hover { filter: brightness(0.98); transform: translateY(-1px); text-decoration: none; }
         </style>
       </head>
       <body>
         ${nav(req)}
         <h1>Call wallboard</h1>
         <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
+        <div class="home-actions">
+          <a class="home-button academy" href="/academy">Academy</a>
+        </div>
         <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
         <div class="cards">
           <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
@@ -2938,6 +2945,37 @@ function revenueTable(title, rows) {
     </div>
   `;
 }
+
+
+app.get("/academy", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Academy</title>
+      <style>${sharedStyles()}</style>
+    </head>
+    <body>
+      ${nav(req)}
+      <h1>Academy</h1>
+      <div class="subtitle">Training, onboarding and process guidance for dispatchers and technicians.</div>
+      <div class="panel">
+        <h2>Academy coming soon</h2>
+        <p>This area is ready to hold your training modules, quizzes, process notes and onboarding documents.</p>
+        <p>Suggested sections:</p>
+        <ul>
+          <li>Dispatcher training</li>
+          <li>Technician process</li>
+          <li>Pricing and quoting guidance</li>
+          <li>Customer complaint handling</li>
+          <li>Account jobs and payment rules</li>
+        </ul>
+        <a class="action-button dark" href="/call-wallboard">Back to Call wallboard</a>
+      </div>
+    </body>
+    </html>
+  `);
+});
 
 app.get("/reports", async (req, res) => {
   try {
