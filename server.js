@@ -7336,106 +7336,149 @@ app.get("/quotations/:id/pdf", async (req, res) => {
     const doc = new PDFDocument({ size: "A4", margin: 0 });
     doc.pipe(res);
 
-    // Letter-style branded header inspired by the supplied sample quote PDF.
-    doc.save();
-    doc.rect(0, 0, 595, 90).fill("#111111");
-    doc.moveTo(0, 86).bezierCurveTo(120, 135, 260, 58, 595, 77).lineTo(595, 105).lineTo(0, 125).closePath().fill("#55cdb0");
-    doc.moveTo(0, 105).bezierCurveTo(150, 150, 310, 70, 595, 90).lineTo(595, 110).lineTo(0, 145).closePath().fill("#ffffff");
-    doc.restore();
-
+    const pageW = 595;
     const left = 50;
-    let y = 165;
+    const bodyW = 495;
+    const footerTop = 730;
 
+    function addQuoteLetterhead() {
+      doc.save();
+      doc.rect(0, 0, pageW, 86).fill("#111111");
+      doc.moveTo(0, 82)
+        .bezierCurveTo(125, 132, 265, 55, pageW, 76)
+        .lineTo(pageW, 104)
+        .lineTo(0, 124)
+        .closePath()
+        .fill("#55cdb0");
+      doc.moveTo(0, 102)
+        .bezierCurveTo(150, 146, 310, 69, pageW, 89)
+        .lineTo(pageW, 110)
+        .lineTo(0, 142)
+        .closePath()
+        .fill("#ffffff");
+      doc.restore();
+    }
+
+    function addQuoteFooter() {
+      doc.save();
+      doc.rect(0, footerTop, pageW, 14).fill("#55cdb0");
+      doc.rect(230, footerTop, 145, 14).fill("#6fb99f");
+      doc.rect(375, footerTop, 220, 14).fill("#7aa08d");
+
+      doc.fillColor("#6b7280").font("Helvetica").fontSize(8.5)
+        .text(`REG: ${company.reg}`, 50, 755)
+        .text(`VAT: ${company.vat}`, 50, 767)
+        .text(`Tel: ${company.tel}`, 240, 761)
+        .text(`${company.name} ${company.footer}`, 390, 753, { width: 155 });
+      doc.restore();
+    }
+
+    function addBrandMark() {
+      const logoPath = path.join(__dirname, company.logo);
+      try {
+        doc.image(logoPath, 410, 620, { width: 130 });
+      } catch (error) {
+        doc.fillColor("#111111")
+          .font("Helvetica-Bold")
+          .fontSize(12)
+          .text(company.displayName, 400, 655, { width: 145, align: "right" });
+      }
+    }
+
+    function addParagraph(text, x, y, options = {}) {
+      const width = options.width || bodyW;
+      const size = options.size || 10;
+      const fontName = options.font || "Helvetica";
+      const lineGap = options.lineGap || 2;
+      doc.font(fontName).fontSize(size).fillColor("#111111");
+      const clean = pdfText(text);
+      doc.text(clean, x, y, { width, lineGap });
+      return y + doc.heightOfString(clean, { width, lineGap }) + (options.after || 0);
+    }
+
+    addQuoteLetterhead();
+
+    let y = 145;
     doc.font("Helvetica").fontSize(10).fillColor("#111111");
     doc.text(pdfText(quote.quote_date || formatDate(quote.created_at)), left, y);
     y += 30;
 
-    doc.text(pdfText(quote.customer_name), left, y, { width: 240 });
-    y += 14;
-    if (quote.customer_address) {
-      doc.text(pdfText(quote.customer_address), left, y, { width: 250 });
-      y += Math.max(42, Math.ceil(pdfText(quote.customer_address).length / 35) * 12);
-    }
-    if (quote.customer_postcode) {
-      doc.text(pdfText(quote.customer_postcode), left, y, { width: 250 });
-      y += 16;
-    }
+    y = addParagraph(quote.customer_name, left, y, { width: 250, after: 4 });
+    if (quote.customer_address) y = addParagraph(quote.customer_address, left, y, { width: 250, after: 2 });
+    if (quote.customer_postcode) y = addParagraph(quote.customer_postcode, left, y, { width: 250, after: 8 });
 
-    y += 14;
-    doc.text("Dear Sirs", left, y);
+    y += 12;
+    doc.font("Helvetica").fontSize(10).text("Dear Sirs", left, y);
     y += 34;
 
-    doc.font("Helvetica-Bold").text("Re:", left, y);
-    doc.font("Helvetica").text(pdfText(quote.site_address || quote.customer_address || "Site address"), left + 68, y, { width: 380 });
-    y += 30;
+    const siteReference = pdfText([quote.site_address, quote.site_postcode].filter(Boolean).join("\n") || quote.customer_address || "Site address");
+    doc.font("Helvetica-Bold").fontSize(10).text("Re:", left, y);
+    doc.font("Helvetica").fontSize(10).text(siteReference, left + 68, y, { width: 380, lineGap: 2 });
+    y += Math.max(22, doc.heightOfString(siteReference, { width: 380, lineGap: 2 })) + 18;
 
-    doc.text("Further to our assessment, we have pleasure in submitting the quote below:", left, y, { width: 495 });
-    y += 30;
+    y = addParagraph("Further to our assessment, we have pleasure in submitting the quote below:", left, y, { width: bodyW, after: 18 });
 
     const tableX = 50;
     const tableW = 495;
-    const descW = 335;
-    const priceW = 160;
-    const rowH = 36;
+    const priceW = 185;
+    const descW = tableW - priceW;
+    const rowH = 35;
 
+    doc.lineWidth(1);
     doc.rect(tableX, y, tableW, 28).stroke();
     doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + 28).stroke();
-    doc.font("Helvetica-Bold").fontSize(10).text("Description", tableX + 8, y + 9, { width: descW - 16 });
-    doc.text("Price range", tableX + descW + 8, y + 9, { width: priceW - 16 });
+    doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111")
+      .text("Description", tableX + 8, y + 9, { width: descW - 16 })
+      .text("Price range", tableX + descW + 8, y + 9, { width: priceW - 16 });
     y += 28;
 
     doc.font("Helvetica").fontSize(10);
     lineItems.forEach(item => {
       const desc = pdfText(item.description);
-      const thisH = Math.max(rowH, 22 + Math.ceil(desc.length / 58) * 12);
+      const priceText = `${money(item.price)} + VAT`;
+      const descH = doc.heightOfString(desc, { width: descW - 16, lineGap: 2 });
+      const priceH = doc.heightOfString(priceText, { width: priceW - 16, lineGap: 2 });
+      const thisH = Math.max(rowH, 20 + Math.max(descH, priceH));
+
       doc.rect(tableX, y, tableW, thisH).stroke();
       doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + thisH).stroke();
-      doc.text(desc, tableX + 8, y + 12, { width: descW - 16 });
-      doc.text(`${money(item.price)} + VAT`, tableX + descW + 8, y + 12, { width: priceW - 16 });
+      doc.text(desc, tableX + 8, y + 11, { width: descW - 16, lineGap: 2 });
+      doc.text(priceText, tableX + descW + 8, y + 11, { width: priceW - 16, lineGap: 2 });
       y += thisH;
     });
 
-    doc.rect(tableX, y, tableW, rowH).stroke();
-    doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + rowH).stroke();
-    doc.font("Helvetica-Bold").text("Total", tableX + 8, y + 12, { width: descW - 16 });
-    doc.text(`${money(quote.subtotal || 0)} + VAT (${money(quote.total || 0)} inc VAT)`, tableX + descW + 8, y + 12, { width: priceW - 16 });
-    y += rowH + 20;
+    const totalText = `${money(quote.subtotal || 0)} + VAT (${money(quote.total || 0)} inc VAT)`;
+    const totalH = Math.max(rowH, 20 + doc.font("Helvetica-Bold").heightOfString(totalText, { width: priceW - 16, lineGap: 2 }));
+    doc.rect(tableX, y, tableW, totalH).stroke();
+    doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + totalH).stroke();
+    doc.font("Helvetica-Bold").fontSize(10).text("Total", tableX + 8, y + 12, { width: descW - 16 });
+    doc.text(totalText, tableX + descW + 8, y + 12, { width: priceW - 16, lineGap: 2 });
+    y += totalH + 20;
 
-    doc.font("Helvetica").fontSize(10).text(pdfText(quote.warranty_text || "We hope the above quote is satisfactory, and the prices above will be honored for 30 days from the date above, 12 months warranty is included on all parts fitted."), left, y, { width: 495 });
-    y += 48;
-    doc.text(pdfText(quote.acceptance_text || "Upon acceptance of the quote and payment of a deposit, we will arrange a convenient appointment with you, so we can carry out the above works."), left, y, { width: 495 });
-    y += 58;
+    const warranty = quote.warranty_text || "We hope the above quote is satisfactory, and the prices above will be honored for 30 days from the date above, 12 months warranty is included on all parts fitted.";
+    y = addParagraph(warranty, left, y, { width: bodyW, after: 18 });
 
+    const acceptance = quote.acceptance_text || "Upon acceptance of the quote and payment of a deposit, we will arrange a convenient appointment with you, so we can carry out the above works.";
+    y = addParagraph(acceptance, left, y, { width: bodyW, after: 30 });
+
+    if (y > 645) y = 645;
+    doc.font("Helvetica").fontSize(10).fillColor("#111111");
     doc.text("Regards,", left, y);
     y += 14;
     doc.text(pdfText(quote.prepared_by || "Daniel van Her"), left, y);
     y += 14;
     doc.text(pdfText(quote.prepared_role || "Head of Operations"), left, y);
-    y += 44;
-    doc.text(`On behalf of | ${company.name}`, left, y);
+    y += 34;
+    if (y > 698) y = 698;
+    doc.text(`On behalf of | ${company.name}`, left, y, { width: 310 });
 
-    // Bottom brand strip and footer details.
-    doc.rect(0, 732, 595, 14).fill("#55cdb0");
-    doc.rect(230, 732, 145, 14).fill("#6fb99f");
-    doc.rect(375, 732, 220, 14).fill("#7aa08d");
-
-    const logoPath = path.join(__dirname, company.logo);
-    try {
-      doc.image(logoPath, 410, 635, { width: 130 });
-    } catch (error) {
-      doc.fillColor("#111111").font("Helvetica-Bold").fontSize(12).text(company.displayName, 400, 660, { width: 145, align: "right" });
-    }
-
-    doc.fillColor("#6b7280").font("Helvetica").fontSize(8.5)
-      .text(`REG: ${company.reg}`, 50, 760)
-      .text(`VAT: ${company.vat}`, 50, 772)
-      .text(`Tel: ${company.tel}`, 240, 766)
-      .text(`${company.name} ${company.footer}`, 390, 758, { width: 150 });
+    addBrandMark();
+    addQuoteFooter();
 
     doc.end();
   } catch (error) {
     console.error("Quotation PDF error:", error);
-    res.status(500).send("Quotation PDF error. Check Render logs.");
+    res.status(500).send(`Quotation PDF error: ${error.message}. Check Render logs.`);
   }
 });
 
