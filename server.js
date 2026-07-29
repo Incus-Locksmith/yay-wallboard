@@ -470,6 +470,39 @@ function invoiceStageOptions(selectedStage = "Draft only") {
 }
 
 
+
+const quotationStatuses = [
+  { value: "quote_requested", label: "Quote requested" },
+  { value: "quote_drafted", label: "Quote drafted" },
+  { value: "quote_sent", label: "Quote sent" },
+  { value: "quote_accepted", label: "Quote accepted" },
+  { value: "quote_declined", label: "Quote declined" },
+  { value: "converted_to_order", label: "Converted to order" },
+  { value: "expired", label: "Expired" }
+];
+
+function quotationStatusLabel(status) {
+  const found = quotationStatuses.find(item => item.value === status);
+  return found ? found.label : (status || "Quote drafted");
+}
+
+function quotationStatusClass(status) {
+  const clean = String(status || "quote_drafted").replaceAll("_", "-");
+  return `quote-${clean}`;
+}
+
+function quotationStatusOptions(selectedStatus = "quote_drafted") {
+  return optionList(quotationStatuses, selectedStatus);
+}
+
+function quoteNumber(id) {
+  return `Q${String(id).padStart(5, "0")}`;
+}
+
+function quoteAddressPlain(quote) {
+  return [quote.site_address, quote.site_postcode].filter(Boolean).join(", ");
+}
+
 const jobStatuses = [
   { value: "open", label: "Job awaiting to be assigned" },
   { value: "assigned", label: "Assigned" },
@@ -1251,6 +1284,13 @@ function sharedStyles() {
     .job-closed { background: var(--brand-red); color: white; }
     .job-awaiting-payment { background: #f59e0b; color: black; }
     .job-invoiced-account { background: #ec4899; color: white; }
+    .quote-quote-requested { background: #dbeafe; color: #1d4ed8; }
+    .quote-quote-drafted { background: #374151; color: white; }
+    .quote-quote-sent { background: #fef3c7; color: #92400e; }
+    .quote-quote-accepted { background: #dcfce7; color: #166534; }
+    .quote-quote-declined { background: #fee2e2; color: #991b1b; }
+    .quote-converted-to-order { background: #ec4899; color: white; }
+    .quote-expired { background: #e5e7eb; color: #374151; }
     .job-completed { background: #6b7280; color: white; }
     .job-fully-paid-private { background: #6b7280; color: white; }
     .dispute-open-dispute { background: #dc2626; color: white; }
@@ -1318,6 +1358,7 @@ function nav(req) {
         <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
 
         <div class="sidebar-label section-label">Finance</div>
+        <a class="side-link${active("/quotations")}" href="/quotations"><span class="side-dot dot-blue"></span><span>Quotations</span></a>
         <div class="side-group">
           <a class="side-group-title${active("/invoices")}" href="/invoices"><span class="side-dot dot-amber"></span><span>Invoices</span></a>
           <div class="side-submenu">
@@ -1659,6 +1700,66 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_assigned_technician_idx ON jobs (assigned_technician_id);`);
+
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quotations (
+      id SERIAL PRIMARY KEY,
+      quote_number TEXT,
+      company_key TEXT DEFAULT 'online',
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_phone TEXT,
+      customer_address TEXT,
+      customer_postcode TEXT,
+      site_address TEXT,
+      site_postcode TEXT,
+      quote_date TEXT,
+      valid_until TEXT,
+      prepared_by TEXT,
+      prepared_role TEXT DEFAULT 'Head of Operations',
+      status TEXT DEFAULT 'quote_drafted',
+      line_items JSONB,
+      subtotal NUMERIC(10,2),
+      vat_amount NUMERIC(10,2),
+      total NUMERIC(10,2),
+      warranty_text TEXT,
+      acceptance_text TEXT,
+      notes TEXT,
+      converted_job_id INTEGER,
+      sent_at TIMESTAMP,
+      accepted_at TIMESTAMP,
+      declined_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS quote_number TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS company_key TEXT DEFAULT 'online';`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_email TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_phone TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_postcode TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS site_address TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS quote_date TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS valid_until TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS prepared_by TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS prepared_role TEXT DEFAULT 'Head of Operations';`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'quote_drafted';`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS line_items JSONB;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS vat_amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS total NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS warranty_text TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS acceptance_text TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS converted_job_id INTEGER;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS declined_at TIMESTAMP;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS quotations_status_idx ON quotations (status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS quotations_created_at_idx ON quotations (created_at);`);
 
 
   await pool.query(`
@@ -6711,6 +6812,551 @@ app.post("/technicians/delete", async (req, res) => {
   } catch (error) {
     console.error("Delete technician error:", error);
     res.status(500).send("Delete technician error. Check Render logs.");
+  }
+});
+
+
+function quotationRows(quotes) {
+  return quotes.map(quote => {
+    const status = quote.status || "quote_drafted";
+    const company = companies[quote.company_key] || companies.online;
+    return `
+      <tr>
+        <td>
+          <strong>${escapeHtml(quote.quote_number || quoteNumber(quote.id))}</strong><br>
+          <span class="muted">${escapeHtml(company.name)}</span>
+        </td>
+        <td>
+          <strong>${escapeHtml(quote.customer_name || "—")}</strong><br>
+          <span class="muted">${escapeHtml(quote.customer_phone || quote.customer_email || "")}</span>
+        </td>
+        <td>
+          <strong>${escapeHtml(quote.site_postcode || quote.customer_postcode || "—")}</strong><br>
+          <span class="muted">${escapeHtml(quote.site_address || "")}</span>
+        </td>
+        <td><span class="pill ${quotationStatusClass(status)}">${escapeHtml(quotationStatusLabel(status))}</span></td>
+        <td>
+          <strong>${money(quote.total || 0)}</strong><br>
+          <span class="muted">ex VAT ${money(quote.subtotal || 0)}</span>
+        </td>
+        <td>${escapeHtml(quote.quote_date || formatDate(quote.created_at))}</td>
+        <td class="action-links">
+          <a href="/quotations/${quote.id}">View</a>
+          <a href="/quotations/${quote.id}/pdf" target="_blank">PDF</a>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+app.get("/quotations", async (req, res) => {
+  try {
+    const statusFilter = req.query.status || "";
+    const search = (req.query.search || "").trim();
+    const params = [];
+    const where = [];
+
+    if (statusFilter) {
+      params.push(statusFilter);
+      where.push(`status = $${params.length}`);
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(
+        quote_number ILIKE $${params.length}
+        OR customer_name ILIKE $${params.length}
+        OR customer_phone ILIKE $${params.length}
+        OR customer_email ILIKE $${params.length}
+        OR site_postcode ILIKE $${params.length}
+        OR site_address ILIKE $${params.length}
+      )`);
+    }
+
+    const result = await pool.query(`
+      SELECT * FROM quotations
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY created_at DESC
+      LIMIT 200
+    `, params);
+
+    const countsResult = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'quote_drafted')::int AS drafted,
+        COUNT(*) FILTER (WHERE status = 'quote_sent')::int AS sent,
+        COUNT(*) FILTER (WHERE status = 'quote_accepted')::int AS accepted,
+        COUNT(*) FILTER (WHERE status = 'converted_to_order')::int AS converted,
+        COALESCE(SUM(COALESCE(total, 0)), 0)::numeric AS total_value
+      FROM quotations
+    `);
+    const counts = countsResult.rows[0] || {};
+
+    res.send(`
+      <html>
+      <head><title>Quotations</title><style>${styles()}</style></head>
+      <body>
+        ${nav(req)}
+        <main class="app-main">
+          <div class="topbar">
+            <div>
+              <h1>Quotations</h1>
+              <div class="subtitle">Create formal quote PDFs, track acceptance and convert accepted quotes into client orders.</div>
+            </div>
+            <a class="button" href="/quotations/new">+ Create quotation</a>
+          </div>
+
+          <div class="dashboard-cards">
+            <div class="card"><h2>Total quotes</h2><div class="number">${Number(counts.total || 0)}</div></div>
+            <div class="card"><h2>Drafted</h2><div class="number">${Number(counts.drafted || 0)}</div></div>
+            <div class="card"><h2>Sent</h2><div class="number">${Number(counts.sent || 0)}</div></div>
+            <div class="card"><h2>Accepted</h2><div class="number">${Number(counts.accepted || 0)}</div></div>
+            <div class="card"><h2>Total value</h2><div class="number">${money(counts.total_value || 0)}</div></div>
+          </div>
+
+          <div class="panel">
+            <form class="filter-form" method="GET" action="/quotations">
+              <input name="search" value="${escapeHtml(search)}" placeholder="Search quote, customer, phone, postcode...">
+              <select name="status"><option value="">All statuses</option>${quotationStatusOptions(statusFilter)}</select>
+              <button type="submit">Filter</button>
+              <a class="button secondary" href="/quotations">Clear</a>
+            </form>
+          </div>
+
+          <div class="panel">
+            <table>
+              <thead><tr><th>Quote</th><th>Customer</th><th>Site</th><th>Status</th><th>Total</th><th>Date</th><th>Action</th></tr></thead>
+              <tbody>${quotationRows(result.rows) || `<tr><td colspan="7" class="muted">No quotations yet.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Quotations page error:", error);
+    res.status(500).send("Quotations page error. Check Render logs.");
+  }
+});
+
+app.get("/quotations/new", async (req, res) => {
+  try {
+    let job = null;
+    if (req.query.job_id) {
+      const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.query.job_id]);
+      job = jobResult.rows[0] || null;
+    }
+
+    const today = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+    const validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+    const preparedBy = currentAgentName(req) || "Daniel van Her";
+
+    const defaultCustomerName = job ? (job.customer_name || "") : "";
+    const defaultPhone = job ? (job.customer_phone || "") : "";
+    const defaultEmail = job ? (job.customer_email || "") : "";
+    const defaultSiteAddress = job ? jobAddressPlain(job) : "";
+    const defaultSitePostcode = job ? (job.postcode || "") : "";
+    const defaultDescription = job ? `${job.job_type || "Works"}${job.job_description ? ` - ${job.job_description}` : ""}` : "";
+
+    function lineBlock(i, description = "", price = "") {
+      return `
+        <div class="line-item-row">
+          <input name="line${i}_description" value="${escapeHtml(description)}" placeholder="Description">
+          <div class="money-input"><span>£</span><input name="line${i}_price" value="${escapeHtml(price)}" placeholder="0.00"></div>
+        </div>
+      `;
+    }
+
+    res.send(`
+      <html>
+      <head><title>Create Quotation</title><style>${styles()}</style></head>
+      <body>
+        ${nav(req)}
+        <main class="app-main">
+          <div class="topbar">
+            <div>
+              <h1>Create quotation</h1>
+              <div class="subtitle">Create a formal quote PDF in the same letter style as your sample.</div>
+            </div>
+            <a class="button secondary" href="/quotations">Back to quotations</a>
+          </div>
+
+          <form method="POST" action="/quotations/create">
+            <input type="hidden" name="source_job_id" value="${job ? job.id : ""}">
+
+            <div class="panel">
+              <h2>Quote details</h2>
+              <div class="grid-3">
+                <select name="company_key" required>
+                  <option value="online">24H Online Services Ltd</option>
+                  <option value="locksmiths">24H Locksmiths Ltd</option>
+                </select>
+                <input name="quote_date" value="${escapeHtml(today)}" placeholder="Quote date">
+                <input name="valid_until" value="${escapeHtml(validUntil)}" placeholder="Valid until">
+              </div>
+              <br>
+              <div class="grid-3">
+                <select name="status">${quotationStatusOptions("quote_drafted")}</select>
+                <input name="prepared_by" value="${escapeHtml(preparedBy)}" placeholder="Prepared by">
+                <input name="prepared_role" value="Head of Operations" placeholder="Role / title">
+              </div>
+            </div>
+
+            <div class="panel">
+              <h2>Customer / account</h2>
+              <div class="grid-3">
+                <input name="customer_name" value="${escapeHtml(defaultCustomerName)}" placeholder="Customer / account name" required>
+                <input name="customer_phone" value="${escapeHtml(defaultPhone)}" placeholder="Customer phone">
+                <input name="customer_email" value="${escapeHtml(defaultEmail)}" placeholder="Customer email">
+              </div>
+              <br>
+              <textarea name="customer_address" placeholder="Office / invoice address"></textarea>
+              <br><br>
+              <input name="customer_postcode" placeholder="Office postcode">
+            </div>
+
+            <div class="panel">
+              <h2>Site / Re line</h2>
+              <div class="grid-2">
+                <input name="site_address" value="${escapeHtml(defaultSiteAddress)}" placeholder="Site address / Re:">
+                <input name="site_postcode" value="${escapeHtml(defaultSitePostcode)}" placeholder="Site postcode">
+              </div>
+            </div>
+
+            <div class="panel">
+              <h2>Quote lines</h2>
+              <div class="help">Enter prices excluding VAT. The PDF will calculate 20% VAT and show the inc VAT total.</div>
+              ${lineBlock(1, defaultDescription, job && job.quoted_price ? job.quoted_price : "")}
+              ${lineBlock(2)}
+              ${lineBlock(3)}
+              ${lineBlock(4)}
+              ${lineBlock(5)}
+            </div>
+
+            <div class="panel">
+              <h2>Quote wording</h2>
+              <textarea name="warranty_text">We hope the above quote is satisfactory, and the prices above will be honored for 30 days from the date above, 12 months warranty is included on all parts fitted.</textarea>
+              <br><br>
+              <textarea name="acceptance_text">Upon acceptance of the quote and payment of a deposit, we will arrange a convenient appointment with you, so we can carry out the above works.</textarea>
+              <br><br>
+              <textarea name="notes" placeholder="Internal notes - not shown on PDF"></textarea>
+            </div>
+
+            <button type="submit">Save quotation and generate PDF</button>
+          </form>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("New quotation page error:", error);
+    res.status(500).send("New quotation page error. Check Render logs.");
+  }
+});
+
+app.post("/quotations/create", async (req, res) => {
+  try {
+    const lineItems = [];
+    for (let i = 1; i <= 5; i += 1) {
+      const description = (req.body[`line${i}_description`] || "").trim();
+      const price = parseMoneyInput(req.body[`line${i}_price`]);
+      if (description && price !== null) lineItems.push({ description, price });
+    }
+
+    const subtotal = lineItems.reduce((sum, item) => sum + Number(item.price || 0), 0);
+    const vatAmount = subtotal * 0.2;
+    const total = subtotal + vatAmount;
+
+    const result = await pool.query(`
+      INSERT INTO quotations (
+        company_key, customer_name, customer_email, customer_phone, customer_address, customer_postcode,
+        site_address, site_postcode, quote_date, valid_until, prepared_by, prepared_role, status,
+        line_items, subtotal, vat_amount, total, warranty_text, acceptance_text, notes, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
+      RETURNING id
+    `, [
+      req.body.company_key || "online",
+      req.body.customer_name,
+      req.body.customer_email,
+      req.body.customer_phone,
+      req.body.customer_address,
+      req.body.customer_postcode,
+      req.body.site_address,
+      req.body.site_postcode,
+      req.body.quote_date,
+      req.body.valid_until,
+      req.body.prepared_by || currentAgentName(req),
+      req.body.prepared_role || "Head of Operations",
+      req.body.status || "quote_drafted",
+      JSON.stringify(lineItems),
+      subtotal.toFixed(2),
+      vatAmount.toFixed(2),
+      total.toFixed(2),
+      req.body.warranty_text,
+      req.body.acceptance_text,
+      req.body.notes
+    ]);
+
+    const id = result.rows[0].id;
+    await pool.query(`UPDATE quotations SET quote_number = $1 WHERE id = $2 AND quote_number IS NULL`, [quoteNumber(id), id]);
+
+    res.redirect(`/quotations/${id}/pdf`);
+  } catch (error) {
+    console.error("Create quotation error:", error);
+    res.status(500).send("Create quotation error. Check Render logs.");
+  }
+});
+
+app.get("/quotations/:id", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
+    const quote = result.rows[0];
+    if (!quote) return res.status(404).send("Quotation not found");
+
+    const lineItems = Array.isArray(quote.line_items) ? quote.line_items : JSON.parse(quote.line_items || "[]");
+    const company = companies[quote.company_key] || companies.online;
+
+    res.send(`
+      <html>
+      <head><title>${escapeHtml(quote.quote_number || quoteNumber(quote.id))}</title><style>${styles()}</style></head>
+      <body>
+        ${nav(req)}
+        <main class="app-main">
+          <div class="topbar">
+            <div>
+              <h1>${escapeHtml(quote.quote_number || quoteNumber(quote.id))}</h1>
+              <div class="subtitle">${escapeHtml(company.name)} · ${escapeHtml(quote.customer_name || "Customer")}</div>
+            </div>
+            <div class="action-links">
+              <a class="button" href="/quotations/${quote.id}/pdf" target="_blank">Open PDF</a>
+              <a class="button secondary" href="/quotations">Back</a>
+            </div>
+          </div>
+
+          <div class="grid-3">
+            ${miniMetric("Status", quotationStatusLabel(quote.status))}
+            ${miniMetric("Total inc VAT", money(quote.total || 0))}
+            ${miniMetric("Valid until", quote.valid_until || "—")}
+          </div>
+
+          <div class="panel">
+            <h2>Quote controls</h2>
+            <form class="compact-stage-form" method="POST" action="/quotations/${quote.id}/status">
+              <select name="status">${quotationStatusOptions(quote.status)}</select>
+              <button type="submit">Update status</button>
+            </form>
+            <br>
+            <div class="action-links">
+              <a class="button" href="/quotations/${quote.id}/pdf" target="_blank">Generate PDF</a>
+              ${quote.converted_job_id ? `<a class="button secondary" href="/jobs/${quote.converted_job_id}/edit">Open converted order</a>` : `<form method="POST" action="/quotations/${quote.id}/convert-to-order" style="display:inline;"><button type="submit">Convert to client order</button></form>`}
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="panel">
+              <h2>Customer</h2>
+              <p><strong>${escapeHtml(quote.customer_name || "—")}</strong></p>
+              <p>${escapeHtml(quote.customer_phone || "")}</p>
+              <p>${escapeHtml(quote.customer_email || "")}</p>
+              <p>${escapeHtml(quote.customer_address || "")}</p>
+            </div>
+            <div class="panel">
+              <h2>Site / Re</h2>
+              <p>${escapeHtml(quote.site_address || "—")}</p>
+              <p>${escapeHtml(quote.site_postcode || "")}</p>
+              <p class="muted">Prepared by ${escapeHtml(quote.prepared_by || "—")}</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Lines</h2>
+            <table>
+              <thead><tr><th>Description</th><th>Price ex VAT</th></tr></thead>
+              <tbody>${lineItems.map(item => `<tr><td>${escapeHtml(item.description)}</td><td>${money(item.price)}</td></tr>`).join("") || `<tr><td colspan="2">No lines</td></tr>`}</tbody>
+              <tfoot><tr><th>Total</th><th>${money(quote.subtotal || 0)} + VAT (${money(quote.total || 0)} inc VAT)</th></tr></tfoot>
+            </table>
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Quotation view error:", error);
+    res.status(500).send("Quotation view error. Check Render logs.");
+  }
+});
+
+app.post("/quotations/:id/status", async (req, res) => {
+  try {
+    const status = req.body.status || "quote_drafted";
+    const updates = [`status = $1`, `updated_at = NOW()`];
+    if (status === "quote_sent") updates.push(`sent_at = COALESCE(sent_at, NOW())`);
+    if (status === "quote_accepted") updates.push(`accepted_at = COALESCE(accepted_at, NOW())`);
+    if (status === "quote_declined") updates.push(`declined_at = COALESCE(declined_at, NOW())`);
+    await pool.query(`UPDATE quotations SET ${updates.join(", ")} WHERE id = $2`, [status, req.params.id]);
+    res.redirect(`/quotations/${req.params.id}`);
+  } catch (error) {
+    console.error("Quotation status update error:", error);
+    res.status(500).send("Quotation status update error. Check Render logs.");
+  }
+});
+
+app.post("/quotations/:id/convert-to-order", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
+    const quote = result.rows[0];
+    if (!quote) return res.status(404).send("Quotation not found");
+
+    const lineItems = Array.isArray(quote.line_items) ? quote.line_items : JSON.parse(quote.line_items || "[]");
+    const description = lineItems.map(item => `${item.description} - ${money(item.price)}`).join("\n");
+
+    const insert = await pool.query(`
+      INSERT INTO jobs (
+        customer_name, customer_phone, customer_email, address_line_1, postcode,
+        job_type, job_description, source_campaign, quoted_price, expected_payment_method,
+        dispatcher_name, status, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'open',NOW(),NOW())
+      RETURNING id
+    `, [
+      quote.customer_name,
+      quote.customer_phone,
+      quote.customer_email,
+      quote.site_address || quote.customer_address,
+      quote.site_postcode || quote.customer_postcode,
+      "Quoted works",
+      description,
+      "Quotation",
+      quote.total,
+      "Unknown",
+      currentAgentName(req)
+    ]);
+
+    const jobId = insert.rows[0].id;
+    await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2 AND job_number IS NULL`, [jobNumber(jobId), jobId]);
+    await pool.query(`UPDATE quotations SET status = 'converted_to_order', converted_job_id = $1, updated_at = NOW() WHERE id = $2`, [jobId, quote.id]);
+
+    res.redirect(`/jobs/${jobId}/edit`);
+  } catch (error) {
+    console.error("Convert quote to order error:", error);
+    res.status(500).send("Convert quote to order error. Check Render logs.");
+  }
+});
+
+app.get("/quotations/:id/pdf", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
+    const quote = result.rows[0];
+    if (!quote) return res.status(404).send("Quotation not found");
+
+    const company = companies[quote.company_key] || companies.online;
+    const lineItems = Array.isArray(quote.line_items) ? quote.line_items : JSON.parse(quote.line_items || "[]");
+    const quoteNo = quote.quote_number || quoteNumber(quote.id);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="quote-${quoteNo}.pdf"`);
+
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
+    doc.pipe(res);
+
+    // Letter-style branded header inspired by the supplied sample quote PDF.
+    doc.save();
+    doc.rect(0, 0, 595, 90).fill("#111111");
+    doc.moveTo(0, 86).bezierCurveTo(120, 135, 260, 58, 595, 77).lineTo(595, 105).lineTo(0, 125).closePath().fill("#55cdb0");
+    doc.moveTo(0, 105).bezierCurveTo(150, 150, 310, 70, 595, 90).lineTo(595, 110).lineTo(0, 145).closePath().fill("#ffffff");
+    doc.restore();
+
+    const left = 50;
+    let y = 165;
+
+    doc.font("Helvetica").fontSize(10).fillColor("#111111");
+    doc.text(pdfText(quote.quote_date || formatDate(quote.created_at)), left, y);
+    y += 30;
+
+    doc.text(pdfText(quote.customer_name), left, y, { width: 240 });
+    y += 14;
+    if (quote.customer_address) {
+      doc.text(pdfText(quote.customer_address), left, y, { width: 250 });
+      y += Math.max(42, Math.ceil(pdfText(quote.customer_address).length / 35) * 12);
+    }
+    if (quote.customer_postcode) {
+      doc.text(pdfText(quote.customer_postcode), left, y, { width: 250 });
+      y += 16;
+    }
+
+    y += 14;
+    doc.text("Dear Sirs", left, y);
+    y += 34;
+
+    doc.font("Helvetica-Bold").text("Re:", left, y);
+    doc.font("Helvetica").text(pdfText(quote.site_address || quote.customer_address || "Site address"), left + 68, y, { width: 380 });
+    y += 30;
+
+    doc.text("Further to our assessment, we have pleasure in submitting the quote below:", left, y, { width: 495 });
+    y += 30;
+
+    const tableX = 50;
+    const tableW = 495;
+    const descW = 335;
+    const priceW = 160;
+    const rowH = 36;
+
+    doc.rect(tableX, y, tableW, 28).stroke();
+    doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + 28).stroke();
+    doc.font("Helvetica-Bold").fontSize(10).text("Description", tableX + 8, y + 9, { width: descW - 16 });
+    doc.text("Price range", tableX + descW + 8, y + 9, { width: priceW - 16 });
+    y += 28;
+
+    doc.font("Helvetica").fontSize(10);
+    lineItems.forEach(item => {
+      const desc = pdfText(item.description);
+      const thisH = Math.max(rowH, 22 + Math.ceil(desc.length / 58) * 12);
+      doc.rect(tableX, y, tableW, thisH).stroke();
+      doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + thisH).stroke();
+      doc.text(desc, tableX + 8, y + 12, { width: descW - 16 });
+      doc.text(`${money(item.price)} + VAT`, tableX + descW + 8, y + 12, { width: priceW - 16 });
+      y += thisH;
+    });
+
+    doc.rect(tableX, y, tableW, rowH).stroke();
+    doc.moveTo(tableX + descW, y).lineTo(tableX + descW, y + rowH).stroke();
+    doc.font("Helvetica-Bold").text("Total", tableX + 8, y + 12, { width: descW - 16 });
+    doc.text(`${money(quote.subtotal || 0)} + VAT (${money(quote.total || 0)} inc VAT)`, tableX + descW + 8, y + 12, { width: priceW - 16 });
+    y += rowH + 20;
+
+    doc.font("Helvetica").fontSize(10).text(pdfText(quote.warranty_text || "We hope the above quote is satisfactory, and the prices above will be honored for 30 days from the date above, 12 months warranty is included on all parts fitted."), left, y, { width: 495 });
+    y += 48;
+    doc.text(pdfText(quote.acceptance_text || "Upon acceptance of the quote and payment of a deposit, we will arrange a convenient appointment with you, so we can carry out the above works."), left, y, { width: 495 });
+    y += 58;
+
+    doc.text("Regards,", left, y);
+    y += 14;
+    doc.text(pdfText(quote.prepared_by || "Daniel van Her"), left, y);
+    y += 14;
+    doc.text(pdfText(quote.prepared_role || "Head of Operations"), left, y);
+    y += 44;
+    doc.text(`On behalf of | ${company.name}`, left, y);
+
+    // Bottom brand strip and footer details.
+    doc.rect(0, 732, 595, 14).fill("#55cdb0");
+    doc.rect(230, 732, 145, 14).fill("#6fb99f");
+    doc.rect(375, 732, 220, 14).fill("#7aa08d");
+
+    const logoPath = path.join(__dirname, company.logo);
+    try {
+      doc.image(logoPath, 410, 635, { width: 130 });
+    } catch (error) {
+      doc.fillColor("#111111").font("Helvetica-Bold").fontSize(12).text(company.displayName, 400, 660, { width: 145, align: "right" });
+    }
+
+    doc.fillColor("#6b7280").font("Helvetica").fontSize(8.5)
+      .text(`REG: ${company.reg}`, 50, 760)
+      .text(`VAT: ${company.vat}`, 50, 772)
+      .text(`Tel: ${company.tel}`, 240, 766)
+      .text(`${company.name} ${company.footer}`, 390, 758, { width: 150 });
+
+    doc.end();
+  } catch (error) {
+    console.error("Quotation PDF error:", error);
+    res.status(500).send("Quotation PDF error. Check Render logs.");
   }
 });
 
