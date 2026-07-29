@@ -540,6 +540,66 @@ function complaintTypeOptions(selectedType = "") {
   return optionList(complaintTypes, selectedType);
 }
 
+
+function disputeJobSnapshot(job) {
+  if (!job) return "";
+  const billPayer = job.offsite_payment
+    ? `${job.bill_payer_name || ""}${job.bill_payer_phone ? ` · ${job.bill_payer_phone}` : ""}`.trim()
+    : `${job.customer_name || ""}${job.customer_phone ? ` · ${job.customer_phone}` : ""}`.trim();
+
+  const rows = [
+    ["Order", job.job_number || jobNumber(job.id)],
+    ["Customer", `${job.customer_name || ""}${job.customer_phone ? ` · ${job.customer_phone}` : ""}`],
+    ["Address", jobAddressPlain(job)],
+    ["Job type", `${job.job_type || ""}${job.source_campaign ? ` · ${job.source_campaign}` : ""}`],
+    ["Technician", job.technician_name || "Unassigned"],
+    ["Status", jobStatusLabel(job.status)],
+    ["ETA", job.eta || ""],
+    ["Payment", `${job.payment_method || job.expected_payment_method || "Unknown"}${job.customer_paid ? " · Paid" : ""}`],
+    ["Final value", money(job.final_value || 0)],
+    ["Materials", `${job.materials_used || ""}${job.materials_cost ? ` · ${money(job.materials_cost)}` : ""}`],
+    ["Bill payer", billPayer],
+    ["Created", formatDateTime(job.created_at)]
+  ];
+
+  return `
+    <div class="panel linked-job-box">
+      <div class="topbar" style="margin-bottom:10px;">
+        <div>
+          <strong>Original job pulled through</strong><br>
+          <span class="muted">These details come from the linked client order. The dispute remains connected to this job.</span>
+        </div>
+        <a class="button secondary small" href="/jobs/${job.id}/edit">Open job</a>
+      </div>
+      <div class="grid-2">
+        ${rows.map(([label, value]) => `
+          <div class="info-block">
+            <strong>${escapeHtml(label)}</strong>
+            <div>${escapeHtml(value || "—")}</div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function disputeComplaintStarter(job) {
+  if (!job) return "";
+  return [
+    `Original job: ${job.job_number || jobNumber(job.id)}`,
+    `Customer: ${job.customer_name || ""}${job.customer_phone ? ` (${job.customer_phone})` : ""}`,
+    `Address: ${jobAddressPlain(job)}`,
+    `Job type: ${job.job_type || ""}`,
+    `Technician: ${job.technician_name || "Unassigned"}`,
+    `Final value: ${money(job.final_value || 0)}`,
+    `Payment method: ${job.payment_method || job.expected_payment_method || "Unknown"}`,
+    `Materials used: ${job.materials_used || ""}${job.materials_cost ? ` (${money(job.materials_cost)})` : ""}`,
+    "",
+    "Complaint / dispute details:",
+    ""
+  ].join("\n");
+}
+
 function optionList(items, selectedValue = "") {
   return items.map(item => {
     const value = typeof item === "string" ? item : item.value;
@@ -6821,6 +6881,10 @@ app.get("/disputes/new", async (req, res) => {
 
     const customerName = linkedJob ? linkedJob.customer_name || "" : "";
     const customerPhone = linkedJob ? linkedJob.customer_phone || "" : "";
+    const suggestedDisputedAmount = linkedJob
+      ? (linkedJob.final_value || linkedJob.call_out_agreed || linkedJob.starting_price || linkedJob.quoted_price || "")
+      : "";
+    const complaintStarter = disputeComplaintStarter(linkedJob);
 
     res.send(`
       <!DOCTYPE html>
@@ -6831,15 +6895,20 @@ app.get("/disputes/new", async (req, res) => {
       </head>
       <body>
         ${nav(req)}
-        <h1>New dispute</h1>
-        <div class="subtitle">Log a complaint, refund request, material-cost dispute or chargeback.</div>
-
-        ${linkedJob ? `
-          <div class="panel linked-job-box">
-            <strong>Linked job:</strong> <a href="/jobs/${linkedJob.id}/edit">${escapeHtml(linkedJob.job_number || jobNumber(linkedJob.id))}</a><br>
-            <span class="muted">${escapeHtml(linkedJob.customer_name || "")} · ${escapeHtml(linkedJob.postcode || "")} · ${escapeHtml(linkedJob.job_type || "")} · ${escapeHtml(linkedJob.technician_name || "Unassigned")}</span>
+        <div class="topbar">
+          <div>
+            <h1>New dispute</h1>
+            <div class="subtitle">Log a complaint, refund request, material-cost dispute or chargeback.</div>
           </div>
-        ` : ""}
+          <a class="button secondary" href="/disputes">Back to disputes</a>
+        </div>
+
+        ${linkedJob ? disputeJobSnapshot(linkedJob) : `
+          <div class="panel">
+            <strong>No job linked yet.</strong><br>
+            <span class="muted">For the best result, open the original job from the Dispatch Board and click <strong>Raise dispute</strong>. That will pull the customer, technician, payment and materials details through automatically.</span>
+          </div>
+        `}
 
         <form method="POST" action="/disputes/save" class="panel">
           <input type="hidden" name="id" value="">
@@ -6857,12 +6926,12 @@ app.get("/disputes/new", async (req, res) => {
           </div>
 
           <div class="grid-3">
-            <div><label>Disputed amount</label><input name="disputed_amount" placeholder="£0.00"></div>
+            <div><label>Disputed amount</label><input name="disputed_amount" value="${escapeHtml(suggestedDisputedAmount || "")}" placeholder="£0.00"></div>
             <div><label>Refund amount</label><input name="refund_amount" placeholder="£0.00"></div>
             <div><label>Chargeback raised?</label><select name="chargeback"><option value="false">No</option><option value="true">Yes</option></select></div>
           </div>
 
-          <div><label>Complaint summary</label><textarea name="complaint_summary" rows="5" placeholder="What is the customer disputing? What happened? What evidence do we have?"></textarea></div>
+          <div><label>Complaint summary</label><textarea name="complaint_summary" rows="8" placeholder="What is the customer disputing? What happened? What evidence do we have?">${escapeHtml(complaintStarter)}</textarea></div>
           <div><label>Resolution notes</label><textarea name="resolution_notes" rows="5" placeholder="Refund agreed, email sent, bank chargeback notes, manager decision, etc."></textarea></div>
 
           <button type="submit">Save dispute</button>
@@ -6873,7 +6942,7 @@ app.get("/disputes/new", async (req, res) => {
     `);
   } catch (error) {
     console.error("New dispute error:", error);
-    res.status(500).send("New dispute error. Check Render logs.");
+    res.status(500).send(`New dispute error: ${escapeHtml(error.message)}. Check Render logs.`);
   }
 });
 
@@ -6881,7 +6950,7 @@ app.get("/disputes/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const result = await pool.query(`
-      SELECT d.*, j.job_number, j.postcode, j.job_type, j.source_campaign, j.final_value, j.materials_used, j.materials_cost,
+      SELECT d.*, j.job_number, j.customer_name AS job_customer_name, j.customer_phone AS job_customer_phone, j.address_line_1, j.address_line_2, j.address_line_3, j.town, j.county, j.postcode, j.job_type, j.source_campaign, j.status AS job_status, j.eta, j.expected_payment_method, j.payment_method, j.customer_paid, j.final_value, j.materials_used, j.materials_cost, j.bill_payer_name, j.bill_payer_phone, j.offsite_payment, j.created_at AS job_created_at,
              t.name AS technician_name
       FROM disputes d
       LEFT JOIN jobs j ON j.id = d.job_id
@@ -6922,12 +6991,15 @@ app.get("/disputes/:id", async (req, res) => {
           <div class="card"><h2>${dispute.chargeback ? "Yes" : "No"}</h2><p>Chargeback</p></div>
         </div>
 
-        ${dispute.job_id ? `
-          <div class="panel linked-job-box">
-            <strong>Linked job:</strong> <a href="/jobs/${dispute.job_id}/edit">${escapeHtml(dispute.job_number || jobNumber(dispute.job_id))}</a><br>
-            <span class="muted">${escapeHtml(dispute.postcode || "")} · ${escapeHtml(dispute.job_type || "")} · Final value ${money(dispute.final_value)} · Materials ${money(dispute.materials_cost)}</span>
-          </div>
-        ` : ""}
+        ${dispute.job_id ? disputeJobSnapshot({
+          ...dispute,
+          id: dispute.job_id,
+          customer_name: dispute.job_customer_name || dispute.customer_name,
+          customer_phone: dispute.job_customer_phone || dispute.customer_phone,
+          status: dispute.job_status,
+          created_at: dispute.job_created_at,
+          technician_name: dispute.technician_name
+        }) : ""}
 
         <form method="POST" action="/disputes/save" class="panel">
           <input type="hidden" name="id" value="${dispute.id}">
