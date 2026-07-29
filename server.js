@@ -153,7 +153,7 @@ function clearSessionCookie(res) {
 
 function requireLogin(req, res, next) {
   const openPaths = ["/login", "/logout", "/webhook/yay"];
-  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/")) return next();
+  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/") || req.path.startsWith("/tech-workspace/")) return next();
 
   const session = readSession(req);
   if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
@@ -1523,10 +1523,14 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS close_notes TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
 
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS jobs_assigned_technician_idx ON jobs (assigned_technician_id);`);
 
   await seedDefaultPortalUsers();
   await seedDefaultInvoiceItems();
@@ -4968,6 +4972,443 @@ app.get("/dispatch", async (req, res) => {
 });
 
 
+
+
+function technicianWorkspaceStyles() {
+  return `
+    :root {
+      --bg:#f3f5f9; --card:#ffffff; --text:#172033; --muted:#64748b; --border:#dfe5ee;
+      --red:#c9342b; --green:#16a34a; --amber:#f59e0b; --blue:#2563eb; --pink:#ec4899;
+      --charcoal:#26323a; --soft:#f8fafc;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family: Arial, Helvetica, sans-serif; }
+    .topbar { height:70px; background:white; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 18px; position:sticky; top:0; z-index:5; }
+    .brand { display:flex; align-items:center; gap:12px; font-weight:800; }
+    .brand-badge { width:38px; height:38px; border-radius:10px; background:var(--red); color:white; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:13px; }
+    .live { display:inline-flex; align-items:center; gap:8px; background:#dcfce7; color:#166534; border-radius:999px; padding:7px 12px; font-weight:800; font-size:13px; }
+    .wrap { max-width:1200px; margin:0 auto; padding:18px; }
+    .briefing { position:fixed; inset:0; background:rgba(0,0,0,.72); display:flex; align-items:center; justify-content:center; z-index:20; padding:20px; }
+    .brief-card { width:min(560px,100%); background:white; border-radius:18px; padding:34px; box-shadow:0 30px 70px rgba(0,0,0,.35); }
+    .brief-pill { display:inline-block; border-radius:999px; padding:8px 16px; background:#fee2e2; color:var(--red); font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.04em; margin-bottom:16px; }
+    .brief-card h1 { margin:0 0 6px; font-size:28px; }
+    .brief-card p { color:#475569; margin:0 0 22px; }
+    .brief-line { border-left:5px solid var(--amber); background:#fff7ed; border-radius:10px; padding:13px 15px; margin:10px 0; line-height:1.35; }
+    .brief-line.red { border-color:var(--red); background:#fee2e2; }
+    .brief-line.green { border-color:var(--green); background:#dcfce7; }
+    .brief-button { display:block; width:100%; background:var(--red); color:white; text-align:center; border:0; border-radius:10px; padding:17px 18px; margin-top:24px; font-weight:900; cursor:pointer; font-size:15px; }
+    .tabs { display:flex; gap:10px; margin:18px 0; flex-wrap:wrap; }
+    .tab { display:inline-flex; align-items:center; gap:8px; padding:11px 16px; border:1px solid var(--border); border-radius:12px; background:white; color:var(--text); text-decoration:none; font-weight:800; }
+    .tab.active { background:var(--charcoal); color:white; border-color:var(--charcoal); }
+    .toolbar { display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:10px; margin:14px 0; }
+    input, select, textarea { width:100%; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:15px; background:white; color:var(--text); }
+    textarea { min-height:95px; resize:vertical; }
+    .button { border:0; border-radius:10px; padding:12px 16px; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; gap:8px; }
+    .button.red { background:var(--red); color:white; }
+    .button.green { background:var(--green); color:white; }
+    .button.dark { background:var(--charcoal); color:white; }
+    .button.amber { background:var(--amber); color:#111827; }
+    .summary-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:18px 0; }
+    .metric { background:white; border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:0 12px 25px rgba(15,23,42,.04); }
+    .metric .label { color:var(--muted); font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.05em; }
+    .metric .value { font-size:30px; font-weight:900; margin-top:8px; color:var(--text); }
+    .job-card { background:white; border:1px solid var(--border); border-radius:16px; padding:18px; margin:14px 0; box-shadow:0 12px 25px rgba(15,23,42,.04); }
+    .job-head { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
+    .job-title { font-size:22px; font-weight:900; margin:0; }
+    .job-sub { color:var(--muted); line-height:1.45; margin-top:5px; }
+    .pill { display:inline-block; border-radius:999px; padding:7px 11px; font-size:12px; font-weight:900; white-space:nowrap; }
+    .job-open { background:var(--blue); color:white; }
+    .job-assigned { background:var(--green); color:white; }
+    .job-closed { background:var(--red); color:white; }
+    .job-awaiting-payment { background:var(--amber); color:#111827; }
+    .job-invoiced-account { background:var(--pink); color:white; }
+    .job-completed, .job-fully-paid-private { background:#64748b; color:white; }
+    .actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:16px; }
+    .panel { background:white; border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:0 12px 25px rgba(15,23,42,.04); margin:14px 0; }
+    .field-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+    .full { grid-column:1/-1; }
+    label { display:block; font-size:13px; font-weight:900; color:#334155; margin-bottom:6px; }
+    table { width:100%; border-collapse:collapse; background:white; border-radius:16px; overflow:hidden; border:1px solid var(--border); }
+    th,td { padding:12px; border-bottom:1px solid var(--border); text-align:left; font-size:14px; }
+    th { background:#f8fafc; color:#64748b; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .empty { background:white; border:1px dashed var(--border); padding:30px; border-radius:16px; text-align:center; color:var(--muted); }
+    .money { font-weight:900; }
+    @media(max-width:760px){
+      .topbar { height:auto; padding:12px; align-items:flex-start; }
+      .wrap { padding:12px; }
+      .toolbar, .summary-grid, .field-grid, .actions { grid-template-columns:1fr; }
+      .brief-card { padding:24px; }
+      table { display:block; overflow-x:auto; }
+    }
+  `;
+}
+
+function technicianPortalShell(title, bodyHtml) {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>${escapeHtml(title)}</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>${technicianWorkspaceStyles()}</style>
+    </head>
+    <body>${bodyHtml}</body>
+    </html>
+  `;
+}
+
+function techJobAddress(job) {
+  return [job.address_line_1, job.address_line_2, job.address_line_3, job.town, job.county, job.postcode]
+    .filter(Boolean)
+    .join(', ');
+}
+
+function techPaymentOptions(selected = '') {
+  return optionList(['Cash', 'Card', 'BACS', 'Cheque', 'Bank transfer', 'Account', 'Other'], selected);
+}
+
+function technicianWorkspaceTabs(token, active) {
+  return `
+    <div class="tabs">
+      <a class="tab ${active === 'jobs' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}">Active jobs</a>
+      <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
+      <a class="tab" href="/tech-checkin/${escapeHtml(token)}">Status check-in</a>
+    </div>
+  `;
+}
+
+async function getTechnicianByToken(token) {
+  const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [token]);
+  return result.rows[0];
+}
+
+app.get('/tech-workspace/:token', async (req, res) => {
+  try {
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+
+    const statusFilter = (req.query.status || '').trim();
+    const postcode = (req.query.postcode || '').trim();
+    const phone = (req.query.phone || '').trim();
+
+    const values = [tech.id];
+    let where = `WHERE j.assigned_technician_id = $1 AND COALESCE(j.status, 'open') NOT IN ('closed', 'invoiced_account')`;
+    if (statusFilter) { values.push(statusFilter); where += ` AND j.status = $${values.length}`; }
+    if (postcode) { values.push(`%${postcode}%`); where += ` AND COALESCE(j.postcode, '') ILIKE $${values.length}`; }
+    if (phone) { values.push(`%${phone}%`); where += ` AND COALESCE(j.customer_phone, '') ILIKE $${values.length}`; }
+
+    const jobs = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      ${where}
+      ORDER BY
+        CASE COALESCE(j.status, 'open')
+          WHEN 'assigned' THEN 1
+          WHEN 'open' THEN 2
+          WHEN 'awaiting_payment' THEN 3
+          ELSE 4
+        END,
+        j.created_at DESC
+    `, values)).rows;
+
+    const today = new Date();
+    const greeting = today.getHours() < 12 ? 'Good morning' : today.getHours() < 17 ? 'Good afternoon' : 'Good evening';
+    const briefingLines = [
+      `<div class="brief-line red"><strong>${jobs.length} active job${jobs.length === 1 ? '' : 's'}</strong> assigned to you.</div>`,
+      `<div class="brief-line">Remember to press <strong>On site</strong> when you arrive.</div>`,
+      `<div class="brief-line green">Close jobs with final value, payment method and materials used.</div>`
+    ].join('');
+
+    const jobCards = jobs.map(job => `
+      <div class="job-card">
+        <div class="job-head">
+          <div>
+            <h2 class="job-title">${escapeHtml(job.postcode || job.job_number || 'Job')}</h2>
+            <div class="job-sub">
+              ${escapeHtml(job.job_type || 'Job')} ${job.source_campaign ? `· ${escapeHtml(job.source_campaign)}` : ''}<br>
+              ${escapeHtml(job.customer_name || 'Customer')} ${job.customer_phone ? `· <a href="tel:${escapeHtml(job.customer_phone)}">${escapeHtml(job.customer_phone)}</a>` : ''}<br>
+              ${escapeHtml(techJobAddress(job) || 'Address not set')}<br>
+              ${job.eta ? `ETA: ${escapeHtml(job.eta)}<br>` : ''}
+              ${job.job_description ? `<strong>Job notes:</strong> ${escapeHtml(job.job_description)}<br>` : ''}
+              ${job.dispatcher_notes ? `<strong>Office notes:</strong> ${escapeHtml(job.dispatcher_notes)}` : ''}
+            </div>
+          </div>
+          <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+        </div>
+        <div class="actions">
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/onsite">
+            <button class="button red" type="submit">On site</button>
+          </form>
+          <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
+        </div>
+      </div>
+    `).join('');
+
+    const body = `
+      <div class="briefing" id="briefing">
+        <div class="brief-card">
+          <div class="brief-pill">Technician briefing — ${escapeHtml(formatDate(new Date()))}</div>
+          <h1>${greeting}, ${escapeHtml(tech.name)}.</h1>
+          <p>Here is what needs your attention before you start.</p>
+          ${briefingLines}
+          <button class="brief-button" onclick="document.getElementById('briefing').style.display='none'">Start shift — view jobs</button>
+        </div>
+      </div>
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● ${escapeHtml(tech.status || 'Available')}</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <h1>Your active jobs</h1>
+        <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}">
+          <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Postcode">
+          <input name="phone" value="${escapeHtml(phone)}" placeholder="Phone">
+          <select name="status"><option value="">All statuses</option>${jobStatusOptions(statusFilter)}</select>
+          <button class="button dark" type="submit">Filter</button>
+        </form>
+        ${jobCards || `<div class="empty">No active jobs assigned to you.</div>`}
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Technician Workspace', body));
+  } catch (error) {
+    console.error('Technician workspace error:', error);
+    res.status(500).send('Technician workspace error. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
+  try {
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+
+    await pool.query(`
+      UPDATE jobs
+      SET status = 'assigned', onsite_at = NOW(), tech_updated_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND assigned_technician_id = $2
+    `, [req.params.id, tech.id]);
+
+    await pool.query(`
+      UPDATE technicians
+      SET status = 'On job', updated_by = $1, updated_at = NOW()
+      WHERE id = $2
+    `, [`${tech.name} workspace`, tech.id]);
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+  } catch (error) {
+    console.error('Technician on-site error:', error);
+    res.status(500).send('Technician on-site error. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
+  try {
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+
+    const result = await pool.query(`SELECT * FROM jobs WHERE id = $1 AND assigned_technician_id = $2`, [req.params.id, tech.id]);
+    const job = result.rows[0];
+    if (!job) return res.status(404).send(technicianPortalShell('Job not found', `<div class="wrap"><div class="empty">Job not found for this technician.</div></div>`));
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to jobs</a>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <div class="panel">
+          <h1>Close job</h1>
+          <p class="job-sub"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> · ${escapeHtml(job.job_type || '')} · ${escapeHtml(job.customer_name || '')}</p>
+          <p class="job-sub">${escapeHtml(techJobAddress(job) || '')}</p>
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">
+            <div class="field-grid">
+              <div><label>Final job value</label><input name="final_value" value="${job.final_value || ''}" placeholder="£"></div>
+              <div><label>Payment method</label><select name="payment_method">${techPaymentOptions(job.payment_method || '')}</select></div>
+              <div><label>Customer paid?</label><select name="customer_paid"><option value="yes" ${job.customer_paid ? 'selected' : ''}>Yes</option><option value="no" ${!job.customer_paid ? 'selected' : ''}>No</option></select></div>
+              <div><label>New status</label><select name="status">
+                <option value="closed">Closed</option>
+                <option value="awaiting_payment">Awaiting payment</option>
+                <option value="invoiced_account">Invoice sent to Acc Dept</option>
+              </select></div>
+              <div class="full"><label>Materials used</label><textarea name="materials_used" placeholder="e.g. Euro cylinder, night latch, screws">${escapeHtml(job.materials_used || '')}</textarea></div>
+              <div><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost || ''}" placeholder="£"></div>
+              <div><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || 'Completed')}</select></div>
+              <div class="full"><label>Technician notes</label><textarea name="tech_notes" placeholder="Any notes for the office">${escapeHtml(job.tech_notes || '')}</textarea></div>
+            </div>
+            <br>
+            <button class="button green" type="submit">Submit close job</button>
+          </form>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Close job', body));
+  } catch (error) {
+    console.error('Technician close page error:', error);
+    res.status(500).send('Technician close page error. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
+  try {
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+
+    const finalValue = parseMoneyInput(req.body.final_value);
+    const materialsCost = parseMoneyInput(req.body.materials_cost);
+    const allowedStatuses = ['closed', 'awaiting_payment', 'invoiced_account'];
+    const newStatus = allowedStatuses.includes(req.body.status) ? req.body.status : 'closed';
+
+    await pool.query(`
+      UPDATE jobs
+      SET final_value = $1,
+          payment_method = $2,
+          customer_paid = $3,
+          materials_used = $4,
+          materials_cost = $5,
+          outcome = $6,
+          tech_notes = $7,
+          status = $8,
+          closed_by = $9,
+          closed_at = COALESCE(closed_at, NOW()),
+          tech_updated_at = NOW(),
+          tech_close_submitted_by = $9,
+          updated_at = NOW()
+      WHERE id = $10 AND assigned_technician_id = $11
+    `, [
+      finalValue,
+      req.body.payment_method || '',
+      req.body.customer_paid === 'yes',
+      req.body.materials_used || '',
+      materialsCost,
+      req.body.outcome || '',
+      req.body.tech_notes || '',
+      newStatus,
+      tech.name,
+      req.params.id,
+      tech.id
+    ]);
+
+    await pool.query(`
+      UPDATE technicians
+      SET status = CASE WHEN status = 'On job' THEN 'Available' ELSE status END,
+          updated_by = $1,
+          updated_at = NOW()
+      WHERE id = $2
+    `, [`${tech.name} closed job`, tech.id]);
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
+  } catch (error) {
+    console.error('Technician close submit error:', error);
+    res.status(500).send('Technician close submit error. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/summary', async (req, res) => {
+  try {
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+
+    const period = req.query.period || 'today';
+    let start = new Date();
+    let end = new Date();
+    start.setHours(0,0,0,0);
+    end.setHours(23,59,59,999);
+    if (period === 'week') {
+      const day = start.getDay() || 7;
+      start.setDate(start.getDate() - day + 1);
+    } else if (period === 'month') {
+      start = new Date(start.getFullYear(), start.getMonth(), 1);
+    } else if (period === 'custom') {
+      if (req.query.start) start = new Date(req.query.start + 'T00:00:00');
+      if (req.query.end) end = new Date(req.query.end + 'T23:59:59');
+    }
+
+    const rows = (await pool.query(`
+      SELECT * FROM jobs
+      WHERE assigned_technician_id = $1
+        AND COALESCE(closed_at, updated_at, created_at) BETWEEN $2 AND $3
+        AND (final_value IS NOT NULL OR materials_cost IS NOT NULL OR status IN ('closed','awaiting_payment','invoiced_account'))
+      ORDER BY COALESCE(closed_at, updated_at, created_at) DESC
+    `, [tech.id, start, end])).rows;
+
+    const totalIncome = rows.reduce((sum, row) => sum + Number(row.final_value || 0), 0);
+    const totalMaterials = rows.reduce((sum, row) => sum + Number(row.materials_cost || 0), 0);
+    const net = totalIncome - totalMaterials;
+    const paidCount = rows.filter(row => row.customer_paid).length;
+
+    const payments = {};
+    rows.forEach(row => {
+      const key = row.payment_method || 'Unknown';
+      payments[key] = (payments[key] || 0) + Number(row.final_value || 0);
+    });
+
+    const paymentRows = Object.entries(payments).sort((a,b)=>b[1]-a[1]).map(([method,total]) => `
+      <tr><td>${escapeHtml(method)}</td><td class="money">${money(total)}</td></tr>
+    `).join('');
+
+    const jobRows = rows.map(job => `
+      <tr>
+        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+        <td>${escapeHtml(job.postcode || '')}</td>
+        <td>${escapeHtml(job.job_type || '')}</td>
+        <td>${escapeHtml(job.payment_method || '')}</td>
+        <td class="money">${money(job.final_value || 0)}</td>
+        <td class="money">${money(job.materials_cost || 0)}</td>
+        <td>${formatDateTime(job.closed_at || job.updated_at || job.created_at)}</td>
+      </tr>
+    `).join('');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Summary</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'summary')}
+        <h1>Income summary</h1>
+        <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}/summary">
+          <select name="period">
+            <option value="today" ${period === 'today' ? 'selected' : ''}>Today</option>
+            <option value="week" ${period === 'week' ? 'selected' : ''}>This week</option>
+            <option value="month" ${period === 'month' ? 'selected' : ''}>This month</option>
+            <option value="custom" ${period === 'custom' ? 'selected' : ''}>Custom range</option>
+          </select>
+          <input name="start" type="date" value="${escapeHtml(req.query.start || '')}">
+          <input name="end" type="date" value="${escapeHtml(req.query.end || '')}">
+          <button class="button dark" type="submit">Filter</button>
+        </form>
+        <div class="summary-grid">
+          <div class="metric"><div class="label">Jobs</div><div class="value">${rows.length}</div></div>
+          <div class="metric"><div class="label">Income</div><div class="value">${money(totalIncome)}</div></div>
+          <div class="metric"><div class="label">Materials</div><div class="value">${money(totalMaterials)}</div></div>
+          <div class="metric"><div class="label">After materials</div><div class="value">${money(net)}</div></div>
+        </div>
+        <div class="panel">
+          <h2>Payment methods</h2>
+          <table><thead><tr><th>Payment method</th><th>Total</th></tr></thead><tbody>${paymentRows || `<tr><td colspan="2">No payment data for this range.</td></tr>`}</tbody></table>
+        </div>
+        <div class="panel">
+          <h2>Materials used / closed jobs</h2>
+          <table><thead><tr><th>Status</th><th>Postcode</th><th>Job type</th><th>Payment</th><th>Income</th><th>Materials</th><th>Closed/Updated</th></tr></thead><tbody>${jobRows || `<tr><td colspan="7">No jobs for this range.</td></tr>`}</tbody></table>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Technician Summary', body));
+  } catch (error) {
+    console.error('Technician summary error:', error);
+    res.status(500).send('Technician summary error. Check Render logs.');
+  }
+});
+
 app.get("/tech-checkin/:token", async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [req.params.token]);
@@ -5458,7 +5899,7 @@ app.get("/technicians", async (req, res) => {
               <button type="submit">Edit</button>
             </form>
             <br><br>
-            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a>
+            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Workspace link</a>
           </td>
         </tr>
       `;
@@ -5551,6 +5992,13 @@ app.get("/technicians/edit", async (req, res) => {
           <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-checkin/${tech.checkin_token || ""}`}">
           <br><br>
           <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician check-in page</a>
+          <br><br>
+          <h2>Technician Workspace Link</h2>
+          <div class="help">This is the technician's active jobs, close-job and income summary portal.</div>
+          <br>
+          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace/${tech.checkin_token || ""}`}">
+          <br><br>
+          <a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician workspace</a>
         </div>
 
         <div class="panel">
