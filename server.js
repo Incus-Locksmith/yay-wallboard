@@ -5111,8 +5111,10 @@ app.get('/tech-workspace/:token', async (req, res) => {
     const postcode = (req.query.postcode || '').trim();
     const phone = (req.query.phone || '').trim();
 
-    const values = [tech.id];
-    let where = `WHERE j.assigned_technician_id = $1 AND COALESCE(j.status, 'open') NOT IN ('closed', 'invoiced_account')`;
+    // Match by this technician ID, and also by any duplicate technician record with the same name.
+    // This protects us if a technician was added twice or a job was assigned to an older Ruben/Michele/etc record.
+    const values = [tech.id, tech.name];
+    let where = `WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))) AND COALESCE(j.status, 'open') NOT IN ('closed', 'invoiced_account')`;
     if (statusFilter) { values.push(statusFilter); where += ` AND j.status = $${values.length}`; }
     if (postcode) { values.push(`%${postcode}%`); where += ` AND COALESCE(j.postcode, '') ILIKE $${values.length}`; }
     if (phone) { values.push(`%${phone}%`); where += ` AND COALESCE(j.customer_phone, '') ILIKE $${values.length}`; }
@@ -5187,7 +5189,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
           <select name="status"><option value="">All statuses</option>${jobStatusOptions(statusFilter)}</select>
           <button class="button dark" type="submit">Filter</button>
         </form>
-        ${jobCards || `<div class="empty">No active jobs assigned to you.</div>`}
+        ${jobCards || `<div class="empty"><strong>No active jobs assigned to ${escapeHtml(tech.name)}.</strong><br><br>If you have just assigned a job, check the Client order edit page and make sure the technician dropdown is set to ${escapeHtml(tech.name)} and the status is not Closed or Invoice sent to Acc Dept.</div>`}
       </div>
     `;
 
@@ -5208,8 +5210,9 @@ app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
     await pool.query(`
       UPDATE jobs
       SET status = 'assigned', onsite_at = NOW(), tech_updated_at = NOW(), updated_at = NOW()
-      WHERE id = $1 AND assigned_technician_id = $2
-    `, [req.params.id, tech.id]);
+      WHERE id = $1
+        AND (assigned_technician_id = $2 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)))
+    `, [req.params.id, tech.id, tech.name]);
 
     await pool.query(`
       UPDATE technicians
@@ -5231,7 +5234,11 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
 
-    const result = await pool.query(`SELECT * FROM jobs WHERE id = $1 AND assigned_technician_id = $2`, [req.params.id, tech.id]);
+    const result = await pool.query(`
+      SELECT * FROM jobs
+      WHERE id = $1
+        AND (assigned_technician_id = $2 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)))
+    `, [req.params.id, tech.id, tech.name]);
     const job = result.rows[0];
     if (!job) return res.status(404).send(technicianPortalShell('Job not found', `<div class="wrap"><div class="empty">Job not found for this technician.</div></div>`));
 
@@ -5302,7 +5309,8 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
           tech_updated_at = NOW(),
           tech_close_submitted_by = $9,
           updated_at = NOW()
-      WHERE id = $10 AND assigned_technician_id = $11
+      WHERE id = $10
+        AND (assigned_technician_id = $11 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($12)))
     `, [
       finalValue,
       req.body.payment_method || '',
@@ -5314,7 +5322,8 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       newStatus,
       tech.name,
       req.params.id,
-      tech.id
+      tech.id,
+      tech.name
     ]);
 
     await pool.query(`
@@ -5356,11 +5365,11 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
 
     const rows = (await pool.query(`
       SELECT * FROM jobs
-      WHERE assigned_technician_id = $1
-        AND COALESCE(closed_at, updated_at, created_at) BETWEEN $2 AND $3
+      WHERE (assigned_technician_id = $1 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)))
+        AND COALESCE(closed_at, updated_at, created_at) BETWEEN $3 AND $4
         AND (final_value IS NOT NULL OR materials_cost IS NOT NULL OR status IN ('closed','awaiting_payment','invoiced_account'))
       ORDER BY COALESCE(closed_at, updated_at, created_at) DESC
-    `, [tech.id, start, end])).rows;
+    `, [tech.id, tech.name, start, end])).rows;
 
     const totalIncome = rows.reduce((sum, row) => sum + Number(row.final_value || 0), 0);
     const totalMaterials = rows.reduce((sum, row) => sum + Number(row.materials_cost || 0), 0);
