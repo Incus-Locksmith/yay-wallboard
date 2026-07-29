@@ -264,6 +264,18 @@ function formatSeconds(seconds) {
   return `${mins}m ${secs}s`;
 }
 
+
+function formatDate(date) {
+  if (!date) return "—";
+  return new Date(date).toLocaleDateString("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric"
+  });
+}
+
 function formatDateTime(date) {
   if (!date) return "—";
   return new Date(date).toLocaleString("en-GB", {
