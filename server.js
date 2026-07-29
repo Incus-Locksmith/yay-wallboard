@@ -1537,7 +1537,7 @@ async function initDb() {
    Because this response needs to be copied safely, the complete route set continues below. */
 
 app.get("/login", async (req, res) => {
-  const next = req.query.next || "/";
+  const next = req.query.next || "/start-shift";
   const error = req.query.error === "1";
   let users = [];
   try {
@@ -1674,12 +1674,265 @@ app.post("/login", async (req, res) => {
   }
 
   setSessionCookie(res, agentName);
-  res.redirect(next);
+  const safeNext = String(next || "");
+  if (safeNext && safeNext !== "/" && safeNext !== "/call-wallboard" && safeNext !== "/start-shift") {
+    return res.redirect(safeNext);
+  }
+  res.redirect("/start-shift");
 });
 
 app.get("/logout", (req, res) => {
   clearSessionCookie(res);
   res.redirect("/login");
+});
+
+app.get("/start-shift", async (req, res) => {
+  try {
+    const agentName = currentAgentName(req) || "there";
+
+    const openUnassignedResult = await pool.query(`
+      SELECT job_number, postcode, job_type, created_at
+      FROM jobs
+      WHERE status = 'open'
+        AND assigned_technician_id IS NULL
+      ORDER BY created_at ASC
+      LIMIT 5
+    `);
+
+    const openUnassignedCount = await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM jobs
+      WHERE status = 'open'
+        AND assigned_technician_id IS NULL
+    `);
+
+    const assignedResult = await pool.query(`
+      SELECT j.job_number, j.postcode, j.job_type, j.created_at, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.status = 'assigned'
+      ORDER BY j.created_at ASC
+      LIMIT 5
+    `);
+
+    const assignedCount = await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM jobs
+      WHERE status = 'assigned'
+    `);
+
+    const paymentResult = await pool.query(`
+      SELECT job_number, postcode, job_type, customer_name, status, final_value, created_at
+      FROM jobs
+      WHERE status IN ('awaiting_payment', 'invoiced_account')
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC
+      LIMIT 5
+    `);
+
+    const paymentCount = await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM jobs
+      WHERE status IN ('awaiting_payment', 'invoiced_account')
+    `);
+
+    const todayRevenueResult = await pool.query(`
+      SELECT
+        COUNT(*)::int AS finished_count,
+        COALESCE(SUM(COALESCE(final_value, 0)), 0)::numeric AS revenue,
+        COALESCE(SUM(COALESCE(materials_cost, 0)), 0)::numeric AS material_cost
+      FROM jobs
+      WHERE created_at >= date_trunc('day', NOW())
+        AND final_value IS NOT NULL
+    `);
+
+    const weekJobsResult = await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM jobs
+      WHERE created_at >= date_trunc('week', NOW())
+    `);
+
+    const missedTodayResult = await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM calls
+      WHERE start_time >= date_trunc('day', NOW())
+        AND LOWER(COALESCE(call_type, '')) = 'inbound'
+        AND COALESCE(answered_by, '') = ''
+    `);
+
+    const techResult = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%available%' AND LOWER(COALESCE(status, '')) NOT LIKE '%soon%')::int AS available,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%job%')::int AS on_job,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%soon%')::int AS soon
+      FROM technicians
+      WHERE active = TRUE
+    `);
+
+    const openRows = openUnassignedResult.rows;
+    const assignedRows = assignedResult.rows;
+    const paymentRows = paymentResult.rows;
+    const revenue = todayRevenueResult.rows[0] || {};
+    const tech = techResult.rows[0] || {};
+
+    const lineList = (rows, emptyText, formatter) => {
+      if (!rows.length) return `<div class="brief-small">${escapeHtml(emptyText)}</div>`;
+      return rows.map(formatter).join("");
+    };
+
+    const openList = lineList(openRows, "No unassigned open jobs.", job => `
+      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · waiting to assign</div>
+    `);
+
+    const assignedList = lineList(assignedRows, "No assigned jobs waiting for completion.", job => `
+      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.technician_name || 'Technician assigned')}</div>
+    `);
+
+    const paymentList = lineList(paymentRows, "No payment or accounts items waiting.", job => `
+      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(jobStatusLabel(job.status))}${job.final_value !== null && job.final_value !== undefined ? ` · ${money(job.final_value)}` : ''}</div>
+    `);
+
+    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hour12: false }).format(new Date()));
+    const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+    const todayLabel = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+    }).format(new Date());
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Start shift</title>
+        <style>
+          :root {
+            --red: #d9462e;
+            --green: #22a851;
+            --amber: #f59e0b;
+            --charcoal: #26323a;
+            --muted: #637083;
+            --bg: #f5f6f8;
+            --border: #e5e7eb;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            color: #1f2937;
+            background:
+              linear-gradient(rgba(17,24,39,0.68), rgba(17,24,39,0.68)),
+              radial-gradient(circle at top left, rgba(34,168,81,0.14), transparent 34%),
+              #1f2937;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 28px;
+          }
+          .brief-card {
+            width: min(620px, 100%);
+            background: white;
+            border-radius: 24px;
+            padding: 34px;
+            box-shadow: 0 28px 90px rgba(0,0,0,0.36);
+            border: 1px solid rgba(255,255,255,0.65);
+          }
+          .logo-row { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+          .logo-row img { width: 78px; height: 78px; object-fit: contain; border-radius: 16px; background: #fff; }
+          .brief-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #fee2e2;
+            color: var(--red);
+            border-radius: 999px;
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .brief-pill::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: var(--red); display: inline-block; }
+          h1 { margin: 18px 0 6px; font-size: 31px; line-height: 1.1; letter-spacing: -0.02em; color: #1f2937; }
+          .intro { color: var(--muted); margin: 0 0 24px; line-height: 1.45; }
+          .brief-item {
+            border-radius: 14px;
+            padding: 15px 17px;
+            margin: 12px 0;
+            border-left: 5px solid;
+          }
+          .brief-red { background: #fde9e7; border-left-color: var(--red); }
+          .brief-amber { background: #fff3e1; border-left-color: var(--amber); }
+          .brief-green { background: #e7f7ed; border-left-color: var(--green); }
+          .brief-title { font-weight: 900; margin-bottom: 7px; color: #1f2937; }
+          .brief-line { color: #334155; font-size: 14px; line-height: 1.45; margin: 3px 0; }
+          .brief-small { color: #64748b; font-size: 14px; }
+          .start-button {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 26px;
+            width: 100%;
+            background: var(--red);
+            color: white;
+            border: 0;
+            border-radius: 12px;
+            padding: 16px 20px;
+            text-decoration: none;
+            font-weight: 900;
+            box-shadow: 0 12px 26px rgba(217,70,46,0.22);
+          }
+          .secondary-link { display: block; text-align: center; margin-top: 14px; color: #64748b; font-size: 13px; text-decoration: none; }
+          @media (max-width: 560px) {
+            body { padding: 16px; align-items: flex-start; }
+            .brief-card { padding: 24px; margin-top: 20px; }
+            .logo-row { justify-content: center; }
+            .logo-row img { width: 92px; height: 92px; }
+            h1 { font-size: 26px; }
+          }
+        </style>
+      </head>
+      <body>
+        <main class="brief-card">
+          <div class="logo-row">
+            <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none';">
+            <div>
+              <div class="brief-pill">Operations briefing — ${escapeHtml(todayLabel)}</div>
+              <h1>${escapeHtml(greeting)}, ${escapeHtml(agentName)}.</h1>
+              <p class="intro">Here’s what needs attention before you start your shift.</p>
+            </div>
+          </div>
+
+          <section class="brief-item brief-red">
+            <div class="brief-title">${Number(openUnassignedCount.rows[0]?.count || 0)} open job${Number(openUnassignedCount.rows[0]?.count || 0) === 1 ? "" : "s"} waiting to be assigned</div>
+            ${openList}
+          </section>
+
+          <section class="brief-item brief-amber">
+            <div class="brief-title">${Number(assignedCount.rows[0]?.count || 0)} assigned job${Number(assignedCount.rows[0]?.count || 0) === 1 ? "" : "s"} awaiting completion</div>
+            ${assignedList}
+          </section>
+
+          <section class="brief-item brief-amber">
+            <div class="brief-title">${Number(paymentCount.rows[0]?.count || 0)} payment / accounts item${Number(paymentCount.rows[0]?.count || 0) === 1 ? "" : "s"} needing attention</div>
+            ${paymentList}
+          </section>
+
+          <section class="brief-item brief-green">
+            <div class="brief-title">Today’s revenue: ${money(revenue.revenue || 0)}</div>
+            <div class="brief-line">${Number(revenue.finished_count || 0)} job${Number(revenue.finished_count || 0) === 1 ? "" : "s"} with value today · materials ${money(revenue.material_cost || 0)} · ${Number(weekJobsResult.rows[0]?.count || 0)} orders created this week</div>
+            <div class="brief-line">Technicians: ${Number(tech.available || 0)} available · ${Number(tech.on_job || 0)} on job · ${Number(tech.soon || 0)} available soon · ${Number(missedTodayResult.rows[0]?.count || 0)} missed inbound call${Number(missedTodayResult.rows[0]?.count || 0) === 1 ? "" : "s"} today</div>
+          </section>
+
+          <a class="start-button" href="/call-wallboard">Start shift — enter portal</a>
+          <a class="secondary-link" href="/jobs">Go straight to Client orders</a>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Start shift error:", error);
+    res.redirect("/call-wallboard");
+  }
 });
 
 app.get("/", (req, res) => res.redirect("/call-wallboard"));
