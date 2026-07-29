@@ -6816,6 +6816,78 @@ app.post("/technicians/delete", async (req, res) => {
 });
 
 
+
+async function ensureQuotationsSchemaOnly() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quotations (
+      id SERIAL PRIMARY KEY,
+      quote_number TEXT,
+      company_key TEXT DEFAULT 'online',
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_phone TEXT,
+      customer_address TEXT,
+      customer_postcode TEXT,
+      site_address TEXT,
+      site_postcode TEXT,
+      quote_date TEXT,
+      valid_until TEXT,
+      prepared_by TEXT,
+      prepared_role TEXT DEFAULT 'Head of Operations',
+      status TEXT DEFAULT 'quote_drafted',
+      line_items JSONB,
+      subtotal NUMERIC(10,2),
+      vat_amount NUMERIC(10,2),
+      total NUMERIC(10,2),
+      warranty_text TEXT,
+      acceptance_text TEXT,
+      notes TEXT,
+      converted_job_id INTEGER,
+      source_job_id INTEGER,
+      sent_at TIMESTAMP,
+      accepted_at TIMESTAMP,
+      declined_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  const columns = [
+    [`quote_number`, `TEXT`],
+    [`company_key`, `TEXT DEFAULT 'online'`],
+    [`customer_name`, `TEXT`],
+    [`customer_email`, `TEXT`],
+    [`customer_phone`, `TEXT`],
+    [`customer_address`, `TEXT`],
+    [`customer_postcode`, `TEXT`],
+    [`site_address`, `TEXT`],
+    [`site_postcode`, `TEXT`],
+    [`quote_date`, `TEXT`],
+    [`valid_until`, `TEXT`],
+    [`prepared_by`, `TEXT`],
+    [`prepared_role`, `TEXT DEFAULT 'Head of Operations'`],
+    [`status`, `TEXT DEFAULT 'quote_drafted'`],
+    [`line_items`, `JSONB`],
+    [`subtotal`, `NUMERIC(10,2)`],
+    [`vat_amount`, `NUMERIC(10,2)`],
+    [`total`, `NUMERIC(10,2)`],
+    [`warranty_text`, `TEXT`],
+    [`acceptance_text`, `TEXT`],
+    [`notes`, `TEXT`],
+    [`converted_job_id`, `INTEGER`],
+    [`source_job_id`, `INTEGER`],
+    [`sent_at`, `TIMESTAMP`],
+    [`accepted_at`, `TIMESTAMP`],
+    [`declined_at`, `TIMESTAMP`],
+    [`created_at`, `TIMESTAMP DEFAULT NOW()`],
+    [`updated_at`, `TIMESTAMP DEFAULT NOW()`]
+  ];
+  for (const [name, type] of columns) {
+    await pool.query(`ALTER TABLE quotations ADD COLUMN IF NOT EXISTS ${name} ${type};`);
+  }
+  await pool.query(`CREATE INDEX IF NOT EXISTS quotations_status_idx ON quotations (status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS quotations_created_at_idx ON quotations (created_at);`);
+}
+
 function quotationRows(quotes) {
   return quotes.map(quote => {
     const status = quote.status || "quote_drafted";
@@ -6851,6 +6923,7 @@ function quotationRows(quotes) {
 
 app.get("/quotations", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const statusFilter = req.query.status || "";
     const search = (req.query.search || "").trim();
     const params = [];
@@ -6886,7 +6959,7 @@ app.get("/quotations", async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'quote_sent')::int AS sent,
         COUNT(*) FILTER (WHERE status = 'quote_accepted')::int AS accepted,
         COUNT(*) FILTER (WHERE status = 'converted_to_order')::int AS converted,
-        COALESCE(SUM(COALESCE(total, 0)), 0)::numeric AS total_value
+        COALESCE(SUM(COALESCE("total", 0)), 0)::numeric AS total_value
       FROM quotations
     `);
     const counts = countsResult.rows[0] || {};
@@ -6934,12 +7007,13 @@ app.get("/quotations", async (req, res) => {
     `);
   } catch (error) {
     console.error("Quotations page error:", error);
-    res.status(500).send("Quotations page error. Check Render logs.");
+    res.status(500).send(`Quotations page error: ${escapeHtml(error.message)}. Check Render logs.`);
   }
 });
 
 app.get("/quotations/new", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     let job = null;
     if (req.query.job_id) {
       const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.query.job_id]);
@@ -7055,6 +7129,7 @@ app.get("/quotations/new", async (req, res) => {
 
 app.post("/quotations/create", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const lineItems = [];
     for (let i = 1; i <= 5; i += 1) {
       const description = (req.body[`line${i}_description`] || "").trim();
@@ -7108,6 +7183,7 @@ app.post("/quotations/create", async (req, res) => {
 
 app.get("/quotations/:id", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
     const quote = result.rows[0];
     if (!quote) return res.status(404).send("Quotation not found");
@@ -7187,6 +7263,7 @@ app.get("/quotations/:id", async (req, res) => {
 
 app.post("/quotations/:id/status", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const status = req.body.status || "quote_drafted";
     const updates = [`status = $1`, `updated_at = NOW()`];
     if (status === "quote_sent") updates.push(`sent_at = COALESCE(sent_at, NOW())`);
@@ -7202,6 +7279,7 @@ app.post("/quotations/:id/status", async (req, res) => {
 
 app.post("/quotations/:id/convert-to-order", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
     const quote = result.rows[0];
     if (!quote) return res.status(404).send("Quotation not found");
@@ -7243,6 +7321,7 @@ app.post("/quotations/:id/convert-to-order", async (req, res) => {
 
 app.get("/quotations/:id/pdf", async (req, res) => {
   try {
+    await ensureQuotationsSchemaOnly();
     const result = await pool.query(`SELECT * FROM quotations WHERE id = $1`, [req.params.id]);
     const quote = result.rows[0];
     if (!quote) return res.status(404).send("Quotation not found");
