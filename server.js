@@ -4539,89 +4539,279 @@ app.get("/jobs/:id/summary", async (req, res) => {
 app.get("/jobs/:id/edit", async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
+    const jobResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name, t.phone AS technician_phone, t.checkin_token AS technician_token
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
     if (!jobResult.rows.length) return res.status(404).send("Job not found");
     const job = jobResult.rows[0];
-    const technicians = (await pool.query(`SELECT id, name, status FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
     const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
+    const summary = jobTechnicianSummary(job);
+    const customerTel = phoneHref(job.customer_phone);
+    const payerTel = phoneHref(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
+    const techWorkspaceUrl = job.technician_token ? `/tech-workspace/${job.technician_token}` : "";
+
+    const activityItems = [
+      { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
+      { label: "Current status", value: jobStatusLabel(job.status) },
+      { label: "Technician", value: job.technician_name || "Unassigned" },
+      { label: "Last updated", value: formatDateTime(job.updated_at) },
+      { label: "Closed", value: job.closed_at ? `${formatDateTime(job.closed_at)} by ${job.closed_by || "Unknown"}` : "Not closed yet" }
+    ];
 
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Edit Job</title>
-        <style>${sharedStyles()} label { color:#d1d5db; font-size:13px; font-weight:bold; margin-bottom:5px; display:block; } .field input,.field select,.field textarea{width:100%;box-sizing:border-box;}</style>
+        <title>Job Control Panel</title>
+        <style>
+          ${sharedStyles()}
+          .job-control-shell { max-width: 1560px; margin: 0 auto; }
+          .job-control-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 18px;
+            margin-bottom: 22px;
+          }
+          .job-control-title { display: flex; flex-direction: column; gap: 6px; }
+          .job-control-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+          .job-control-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.55fr) minmax(330px, 0.85fr);
+            gap: 22px;
+            align-items: start;
+          }
+          .control-card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 22px;
+            padding: 22px;
+            box-shadow: 0 14px 30px rgba(17, 24, 39, 0.06);
+            margin-bottom: 22px;
+          }
+          .control-card h2 { margin: 0 0 16px; font-size: 22px; }
+          .summary-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px; }
+          .summary-kpi {
+            background: #f9fafb;
+            border: 1px solid #edf0f3;
+            border-radius: 18px;
+            padding: 16px;
+          }
+          .summary-kpi .kpi-label { color: #6b7280; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.06em; }
+          .summary-kpi .kpi-value { color: #25313a; font-size: 22px; font-weight: 950; margin-top: 6px; word-break: break-word; }
+          .job-info-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+          .info-block { background: #fbfcfd; border: 1px solid #eef0f3; border-radius: 16px; padding: 15px; }
+          .info-block strong { display: block; color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 7px; }
+          .info-block span, .info-block div { color: #25313a; font-weight: 800; line-height: 1.45; }
+          .quick-form { display: grid; gap: 10px; margin-bottom: 14px; }
+          .quick-form-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+          .quick-form label, .control-card label { color: #25313a; font-size: 13px; font-weight: 900; margin-bottom: 6px; }
+          .quick-form select, .quick-form input { width: 100%; }
+          .money-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+          .money-box { border-radius: 16px; padding: 15px; border: 1px solid #eef0f3; background: #fbfcfd; }
+          .money-box .money-label { color: #6b7280; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.05em; }
+          .money-box .money-value { margin-top: 6px; color: #25313a; font-size: 20px; font-weight: 950; }
+          .tech-summary-box { width: 100%; min-height: 210px; border: 1px solid #d1d5db; border-radius: 16px; padding: 14px; background: #111827; color: #e5e7eb; line-height: 1.55; font-size: 14px; white-space: pre-wrap; }
+          .activity-list { display: grid; gap: 10px; }
+          .activity-item { display: grid; grid-template-columns: 14px 1fr; gap: 10px; align-items: start; padding: 10px 0; border-bottom: 1px solid #eef0f3; }
+          .activity-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--brand-green); margin-top: 4px; }
+          .activity-label { color: #25313a; font-weight: 950; }
+          .activity-value { color: #6b7280; font-size: 13px; margin-top: 2px; }
+          .edit-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+          .edit-form-grid .wide { grid-column: 1 / -1; }
+          .edit-form-grid input, .edit-form-grid select, .edit-form-grid textarea { width: 100%; }
+          .copy-mini { background:#26323a; color:white; border:none; border-radius:12px; font-weight:900; padding:11px 14px; cursor:pointer; }
+          .muted-note { color:#6b7280; font-size:13px; line-height:1.4; }
+          .pill-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+          @media (max-width: 1180px) {
+            .job-control-grid { grid-template-columns: 1fr; }
+            .summary-kpis, .money-grid, .edit-form-grid, .job-info-grid { grid-template-columns: 1fr; }
+            .job-control-header { flex-direction: column; }
+            .job-control-actions { justify-content: flex-start; }
+          }
+        </style>
       </head>
       <body>
         ${nav(req)}
-        <h1>${escapeHtml(job.job_number || jobNumber(job.id))}</h1>
-        <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
+        <div class="job-control-shell">
+          <div class="job-control-header">
+            <div class="job-control-title">
+              <h1>${escapeHtml(job.job_number || jobNumber(job.id))} Control Panel</h1>
+              <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
+              <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>${job.urgency ? `<span class="pill stage-draft">${escapeHtml(job.urgency)}</span>` : ""}</div>
+            </div>
+            <div class="job-control-actions">
+              <a class="action-button" href="/jobs/${job.id}/summary">Technician summary</a>
+              <a class="action-button amber" href="/jobs/${job.id}/close">Close / payment</a>
+              <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
+            </div>
+          </div>
 
-        <div class="panel">
-          <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
-          <a href="/jobs/${job.id}/summary" style="margin-left:15px;">Technician summary</a>
-          <a href="/jobs/${job.id}/close" style="margin-left:15px;">Close job / payment details</a>
-          <a href="/jobs" style="margin-left:15px;">Back to jobs</a>
+          <div class="summary-kpis">
+            <div class="summary-kpi"><div class="kpi-label">Customer</div><div class="kpi-value">${escapeHtml(job.customer_name || "—")}</div></div>
+            <div class="summary-kpi"><div class="kpi-label">Postcode</div><div class="kpi-value">${escapeHtml(job.postcode || "—")}</div></div>
+            <div class="summary-kpi"><div class="kpi-label">Technician</div><div class="kpi-value">${escapeHtml(job.technician_name || "Unassigned")}</div></div>
+            <div class="summary-kpi"><div class="kpi-label">ETA</div><div class="kpi-value">${escapeHtml(job.eta || "—")}</div></div>
+          </div>
+
+          <div class="job-control-grid">
+            <main>
+              <div class="control-card">
+                <h2>Job summary</h2>
+                <div class="job-info-grid">
+                  <div class="info-block"><strong>Customer phone</strong><span><a href="${escapeHtml(customerTel)}">${escapeHtml(job.customer_phone || "—")}</a></span></div>
+                  <div class="info-block"><strong>Bill payer</strong><span>${escapeHtml(job.offsite_payment ? (job.bill_payer_name || "—") : (job.customer_name || "—"))}${(job.offsite_payment ? job.bill_payer_phone : job.customer_phone) ? ` · <a href="${escapeHtml(payerTel)}">${escapeHtml(job.offsite_payment ? job.bill_payer_phone : job.customer_phone)}</a>` : ""}</span></div>
+                  <div class="info-block"><strong>Address</strong><div>${jobAddressBlock(job) || "—"}</div></div>
+                  <div class="info-block"><strong>Job</strong><span>${escapeHtml(job.job_type || "—")} · ${escapeHtml(job.source_campaign || "No campaign")}</span><div class="muted-note">${escapeHtml(job.job_description || "No description entered.")}</div></div>
+                </div>
+              </div>
+
+              <div class="control-card">
+                <h2>Money & payment</h2>
+                <div class="money-grid">
+                  <div class="money-box"><div class="money-label">Starting price</div><div class="money-value">${money(job.starting_price || job.quoted_price || 0)}</div></div>
+                  <div class="money-box"><div class="money-label">Call out agreed</div><div class="money-value">${money(job.call_out_agreed || 0)}</div></div>
+                  <div class="money-box"><div class="money-label">Start price of locks</div><div class="money-value">${money(job.start_price_locks || 0)}</div></div>
+                  <div class="money-box"><div class="money-label">Final value</div><div class="money-value">${job.final_value !== null && job.final_value !== undefined ? money(job.final_value) : "—"}</div></div>
+                  <div class="money-box"><div class="money-label">Payment method</div><div class="money-value">${escapeHtml(job.payment_method || job.expected_payment_method || "Unknown")}</div></div>
+                  <div class="money-box"><div class="money-label">Materials cost</div><div class="money-value">${job.materials_cost !== null && job.materials_cost !== undefined ? money(job.materials_cost) : "—"}</div></div>
+                </div>
+              </div>
+
+              <div class="control-card">
+                <h2>Edit full order details</h2>
+                <form method="POST" action="/jobs/${job.id}/update">
+                  <div class="edit-form-grid">
+                    <div><label>Customer name</label><input name="customer_name" value="${escapeHtml(job.customer_name)}" required></div>
+                    <div><label>Customer phone</label><input name="customer_phone" value="${escapeHtml(job.customer_phone)}" required></div>
+                    <div><label>Email</label><input name="customer_email" value="${escapeHtml(job.customer_email)}"></div>
+                    <div><label>Alternative phone</label><input name="customer_alt_phone" value="${escapeHtml(job.customer_alt_phone)}"></div>
+                    <div><label>Address line 1</label><input name="address_line_1" value="${escapeHtml(job.address_line_1)}" required></div>
+                    <div><label>Address line 2</label><input name="address_line_2" value="${escapeHtml(job.address_line_2)}"></div>
+                    <div><label>Address line 3</label><input name="address_line_3" value="${escapeHtml(job.address_line_3)}"></div>
+                    <div><label>Town</label><input name="town" value="${escapeHtml(job.town)}"></div>
+                    <div><label>County</label><input name="county" value="${escapeHtml(job.county)}"></div>
+                    <div><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
+                    <div><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
+                    <div><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
+                    <div><label>Source / campaign</label><input name="source_campaign" value="${escapeHtml(job.source_campaign)}"></div>
+                    <div><label>Starting price £</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
+                    <div><label>Call out agreed £</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
+                    <div><label>Start price of locks £</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
+                    <div><label>Quoted / overall price notes £</label><input name="quoted_price" value="${job.quoted_price !== null && job.quoted_price !== undefined ? Number(job.quoted_price).toFixed(2) : ""}"></div>
+                    <div><label>Offsite payment?</label><select name="offsite_payment"><option value="false" ${!job.offsite_payment ? "selected" : ""}>No</option><option value="true" ${job.offsite_payment ? "selected" : ""}>Yes</option></select></div>
+                    <div><label>Bill payer name</label><input name="bill_payer_name" value="${escapeHtml(job.bill_payer_name)}"></div>
+                    <div><label>Bill payer telephone</label><input name="bill_payer_phone" value="${escapeHtml(job.bill_payer_phone)}"></div>
+                    <div><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
+                    <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
+                    <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
+                    <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
+                    <div><label>ETA</label><input name="eta" value="${escapeHtml(job.eta)}"></div>
+                    <div><label>Status</label><select name="status">${jobStatusOptions(job.status)}</select></div>
+                    <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
+                    <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
+                  </div>
+                  <br>
+                  <button type="submit">Save full order details</button>
+                </form>
+              </div>
+            </main>
+
+            <aside>
+              <div class="control-card">
+                <h2>Quick actions</h2>
+                <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-status">
+                  <label>Change status</label>
+                  <div class="quick-form-row">
+                    <select name="status">${jobStatusOptions(job.status)}</select>
+                    <button type="submit">Update</button>
+                  </div>
+                </form>
+                <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-assign">
+                  <label>Assign / change technician</label>
+                  <div class="quick-form-row">
+                    <select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select>
+                    <button type="submit">Assign</button>
+                  </div>
+                </form>
+                <div class="page-actions">
+                  <a class="action-button amber" href="/jobs/${job.id}/close">Close job</a>
+                  <a class="action-button dark" href="/dispatch?postcode=${encodeURIComponent(job.postcode || "")}">Open map</a>
+                  ${techWorkspaceUrl ? `<a class="action-button" href="${escapeHtml(techWorkspaceUrl)}" target="_blank" rel="noopener noreferrer">Tech workspace</a>` : ""}
+                </div>
+              </div>
+
+              <div class="control-card">
+                <h2>Copy technician summary</h2>
+                <textarea id="techSummary" class="tech-summary-box" readonly>${escapeHtml(summary)}</textarea>
+                <br><br>
+                <button class="copy-mini" type="button" onclick="copySummary()">Copy summary</button>
+              </div>
+
+              <div class="control-card">
+                <h2>Activity / history</h2>
+                <div class="activity-list">
+                  ${activityItems.map(item => `
+                    <div class="activity-item">
+                      <span class="activity-dot"></span>
+                      <div><div class="activity-label">${escapeHtml(item.label)}</div><div class="activity-value">${escapeHtml(item.value)}</div></div>
+                    </div>
+                  `).join("")}
+                </div>
+                <p class="muted-note">This is a basic history view for now. A full audit trail can be added later.</p>
+              </div>
+            </aside>
+          </div>
         </div>
-
-        <form method="POST" action="/jobs/${job.id}/update">
-          <div class="panel">
-            <h2>Customer</h2>
-            <div class="job-grid">
-              <div class="field"><label>Customer name</label><input name="customer_name" value="${escapeHtml(job.customer_name)}" required></div>
-              <div class="field"><label>Customer phone</label><input name="customer_phone" value="${escapeHtml(job.customer_phone)}" required></div>
-              <div class="field"><label>Alternative phone</label><input name="customer_alt_phone" value="${escapeHtml(job.customer_alt_phone)}"></div>
-              <div class="field"><label>Email</label><input name="customer_email" value="${escapeHtml(job.customer_email)}"></div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <h2>Address</h2>
-            <div class="job-grid">
-              <div class="field"><label>Address line 1</label><input name="address_line_1" value="${escapeHtml(job.address_line_1)}" required></div>
-              <div class="field"><label>Address line 2</label><input name="address_line_2" value="${escapeHtml(job.address_line_2)}"></div>
-              <div class="field"><label>Address line 3</label><input name="address_line_3" value="${escapeHtml(job.address_line_3)}"></div>
-              <div class="field"><label>Town</label><input name="town" value="${escapeHtml(job.town)}"></div>
-              <div class="field"><label>County</label><input name="county" value="${escapeHtml(job.county)}"></div>
-              <div class="field"><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <h2>Job details</h2>
-            <div class="job-grid">
-              <div class="field"><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
-              <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
-              <div class="field"><label>Source / campaign</label><input name="source_campaign" value="${escapeHtml(job.source_campaign)}"></div>
-              <div class="field"><label>Starting price</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
-              <div class="field"><label>Call out agreed</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
-              <div class="field"><label>Start price of locks</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
-              <div class="field"><label>Quoted / overall price notes</label><input name="quoted_price" value="${job.quoted_price !== null && job.quoted_price !== undefined ? Number(job.quoted_price).toFixed(2) : ""}"></div>
-              <div class="field"><label>Offsite payment?</label><select name="offsite_payment"><option value="false" ${!job.offsite_payment ? "selected" : ""}>No</option><option value="true" ${job.offsite_payment ? "selected" : ""}>Yes</option></select></div>
-              <div class="field"><label>Bill payer name</label><input name="bill_payer_name" value="${escapeHtml(job.bill_payer_name)}"></div>
-              <div class="field"><label>Bill payer telephone</label><input name="bill_payer_phone" value="${escapeHtml(job.bill_payer_phone)}"></div>
-              <div class="field"><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
-              <div class="field"><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
-              <div class="field"><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
-              <div class="field"><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-              <div class="field"><label>ETA</label><input name="eta" value="${escapeHtml(job.eta)}"></div>
-              <div class="field"><label>Status</label><select name="status">${jobStatusOptions(job.status)}</select></div>
-            </div>
-            <br>
-            <label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea>
-            <br><br>
-            <label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea>
-          </div>
-
-          <button type="submit">Save job</button>
-          <a href="/jobs" style="margin-left:12px;">Cancel</a>
-        </form>
+        <script>
+          function copySummary() {
+            const box = document.getElementById("techSummary");
+            box.focus();
+            box.select();
+            document.execCommand("copy");
+            alert("Technician summary copied.");
+          }
+        </script>
       </body>
       </html>
     `);
   } catch (error) {
     console.error("Edit job page error:", error);
-    res.status(500).send("Edit job page error");
+    res.status(500).send("Edit job page error. Check Render logs.");
+  }
+});
+
+app.post("/jobs/:id/quick-status", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = req.body.status || "open";
+    await pool.query(`UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`, [status, id]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Quick status update error:", error);
+    res.status(500).send("Could not update job status");
+  }
+});
+
+app.post("/jobs/:id/quick-assign", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const technicianId = parseOptionalInt(req.body.assigned_technician_id);
+    await pool.query(`
+      UPDATE jobs
+      SET assigned_technician_id = $1,
+          status = CASE WHEN $1 IS NOT NULL AND status = 'open' THEN 'assigned' ELSE status END,
+          updated_at = NOW()
+      WHERE id = $2
+    `, [technicianId, id]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Quick assign error:", error);
+    res.status(500).send("Could not assign technician");
   }
 });
 
