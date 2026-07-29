@@ -5077,6 +5077,24 @@ function technicianWorkspaceTabs(token, active) {
   `;
 }
 
+
+async function ensureTechnicianWorkspaceSchema() {
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_technician_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_value NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_paid BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_used TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_cost NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS outcome TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_notes TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+}
+
 async function getTechnicianByToken(token) {
   const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [token]);
   return result.rows[0];
@@ -5084,6 +5102,7 @@ async function getTechnicianByToken(token) {
 
 app.get('/tech-workspace/:token', async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
@@ -5175,12 +5194,13 @@ app.get('/tech-workspace/:token', async (req, res) => {
     res.send(technicianPortalShell('Technician Workspace', body));
   } catch (error) {
     console.error('Technician workspace error:', error);
-    res.status(500).send('Technician workspace error. Check Render logs.');
+    res.status(500).send('Technician workspace error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
   }
 });
 
 app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
@@ -5206,6 +5226,7 @@ app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
 
 app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
@@ -5250,12 +5271,13 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
     res.send(technicianPortalShell('Close job', body));
   } catch (error) {
     console.error('Technician close page error:', error);
-    res.status(500).send('Technician close page error. Check Render logs.');
+    res.status(500).send('Technician close page error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
   }
 });
 
 app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
@@ -5306,12 +5328,13 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
   } catch (error) {
     console.error('Technician close submit error:', error);
-    res.status(500).send('Technician close submit error. Check Render logs.');
+    res.status(500).send('Technician close submit error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
   }
 });
 
 app.get('/tech-workspace/:token/summary', async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
@@ -5405,7 +5428,7 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
     res.send(technicianPortalShell('Technician Summary', body));
   } catch (error) {
     console.error('Technician summary error:', error);
-    res.status(500).send('Technician summary error. Check Render logs.');
+    res.status(500).send('Technician summary error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
   }
 });
 
