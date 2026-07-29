@@ -3590,6 +3590,9 @@ function jobTechnicianSummary(job) {
 app.get("/jobs", async (req, res) => {
   try {
     const selectedStatus = (req.query.status || "active").trim();
+    const selectedTechnician = (req.query.technician || "all").trim();
+    const selectedCampaign = (req.query.campaign || "all").trim();
+    const selectedDate = (req.query.date || "all").trim();
     const search = (req.query.search || "").trim();
 
     const where = [];
@@ -3603,6 +3606,26 @@ app.get("/jobs", async (req, res) => {
       where.push(`j.status = ANY($${params.length})`);
     }
 
+    if (selectedTechnician && selectedTechnician !== "all") {
+      params.push(Number(selectedTechnician));
+      where.push(`j.assigned_technician_id = $${params.length}`);
+    }
+
+    if (selectedCampaign && selectedCampaign !== "all") {
+      params.push(selectedCampaign);
+      where.push(`COALESCE(j.source_campaign, '') = $${params.length}`);
+    }
+
+    if (selectedDate === "today") {
+      where.push(`DATE(j.created_at) = CURRENT_DATE`);
+    } else if (selectedDate === "yesterday") {
+      where.push(`DATE(j.created_at) = CURRENT_DATE - INTERVAL '1 day'`);
+    } else if (selectedDate === "week") {
+      where.push(`j.created_at >= date_trunc('week', NOW())`);
+    } else if (selectedDate === "month") {
+      where.push(`j.created_at >= date_trunc('month', NOW())`);
+    }
+
     if (search) {
       params.push(`%${search}%`);
       where.push(`(
@@ -3611,94 +3634,304 @@ app.get("/jobs", async (req, res) => {
         OR COALESCE(j.customer_phone, '') ILIKE $${params.length}
         OR COALESCE(j.postcode, '') ILIKE $${params.length}
         OR COALESCE(j.address_line_1, '') ILIKE $${params.length}
+        OR COALESCE(j.job_type, '') ILIKE $${params.length}
+        OR COALESCE(j.source_campaign, '') ILIKE $${params.length}
       )`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const jobsResult = await pool.query(`
-      SELECT j.*, t.name AS technician_name
-      FROM jobs j
-      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
-      ${whereSql}
-      ORDER BY j.created_at DESC
-      LIMIT 300
-    `, params);
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult] = await Promise.all([
+      pool.query(`
+        SELECT j.*, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        ${whereSql}
+        ORDER BY
+          CASE j.status
+            WHEN 'open' THEN 1
+            WHEN 'assigned' THEN 2
+            WHEN 'awaiting_payment' THEN 3
+            WHEN 'invoiced_account' THEN 4
+            WHEN 'closed' THEN 5
+            ELSE 9
+          END,
+          j.created_at DESC
+        LIMIT 300
+      `, params),
+      pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE status = 'closed' AND DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE`),
+      pool.query(`SELECT id, name, status, priority, location_checked_in_at FROM technicians WHERE active = TRUE ORDER BY name ASC`),
+      pool.query(`SELECT DISTINCT COALESCE(source_campaign, '') AS campaign FROM jobs WHERE COALESCE(source_campaign, '') <> '' ORDER BY campaign ASC LIMIT 80`),
+      pool.query(`
+        SELECT
+          COALESCE(SUM(final_value), 0) AS income,
+          COALESCE(SUM(materials_cost), 0) AS materials,
+          COALESCE(SUM(final_value) FILTER (WHERE status = 'awaiting_payment'), 0) AS awaiting_payment,
+          COUNT(*) FILTER (WHERE DATE(created_at) = CURRENT_DATE)::int AS created_today,
+          COUNT(*) FILTER (WHERE status = 'closed' AND DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE)::int AS closed_today
+        FROM jobs
+        WHERE DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE
+           OR DATE(created_at) = CURRENT_DATE
+      `),
+      pool.query(`
+        SELECT j.id, j.job_number, j.status, j.postcode, j.job_type, j.customer_name, j.dispatcher_name, j.updated_at, j.created_at, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        ORDER BY COALESCE(j.updated_at, j.created_at) DESC
+        LIMIT 8
+      `)
+    ]);
 
-    const countsResult = await pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`);
     const counts = Object.fromEntries(countsResult.rows.map(row => [row.status || "open", row.count]));
     const activeCount = activeJobStatuses.reduce((sum, status) => sum + Number(counts[status] || 0), 0);
+    const closedToday = Number(closedTodayResult.rows[0]?.count || 0);
+    const revenue = revenueResult.rows[0] || {};
 
     const statusFilterOptions = [
-      { value: "active", label: `Active jobs (${activeCount})` },
-      { value: "all", label: "All jobs" },
+      { value: "active", label: `Active orders (${activeCount})` },
+      { value: "all", label: "All orders" },
       ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
     ];
 
-    const rows = jobsResult.rows.map(job => `
-      <tr>
-        <td>
-          <div class="job-card-title"><a href="/jobs/${job.id}/edit">${escapeHtml(job.job_number || jobNumber(job.id))}</a></div>
-          <div class="job-card-sub">Created ${formatDateTime(job.created_at)}<br>By ${escapeHtml(job.dispatcher_name || "Unknown")}</div>
-        </td>
-        <td>
-          <strong>${escapeHtml(job.customer_name || "—")}</strong>
-          <div class="job-card-sub">${escapeHtml(job.customer_phone || "")}</div>
-        </td>
-        <td>${jobAddressBlock(job) || "—"}</td>
-        <td>
-          <strong>${escapeHtml(job.job_type || "—")}</strong>
-          <div class="job-card-sub">${escapeHtml(job.urgency || "Normal")}${job.starting_price !== null && job.starting_price !== undefined ? ` · Start ${money(job.starting_price)}` : (job.quoted_price !== null && job.quoted_price !== undefined ? ` · Quoted ${money(job.quoted_price)}` : "")}</div>
-        </td>
-        <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
-        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
-        <td>
-          <div class="actions">
-            <a href="/jobs/${job.id}/edit">Open / Edit</a>
-            <a href="/jobs/${job.id}/summary">Technician summary</a>
-            <a href="/jobs/${job.id}/close">Close job</a>
+    const technicianOptions = [
+      { value: "all", label: "All technicians" },
+      ...techniciansResult.rows.map(tech => ({ value: String(tech.id), label: tech.name }))
+    ];
+
+    const campaignOptions = [
+      { value: "all", label: "All campaigns" },
+      ...campaignsResult.rows.map(row => ({ value: row.campaign, label: row.campaign }))
+    ];
+
+    const dateOptions = [
+      { value: "all", label: "All dates" },
+      { value: "today", label: "Today" },
+      { value: "yesterday", label: "Yesterday" },
+      { value: "week", label: "This week" },
+      { value: "month", label: "This month" }
+    ];
+
+    const statusCards = [
+      { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue" },
+      { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green" },
+      { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber" },
+      { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink" },
+      { label: "Closed today", value: closedToday, className: "board-red" }
+    ];
+
+    function technicianBadgeClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (value.includes("available") && !value.includes("soon")) return "tech-green";
+      if (value.includes("soon") || value.includes("job")) return "tech-amber";
+      if (value.includes("off") || value.includes("holiday") || value.includes("sick") || value.includes("issue") || value.includes("do not")) return "tech-red";
+      return "tech-grey";
+    }
+
+    const technicianStrip = techniciansResult.rows.slice(0, 12).map(tech => `
+      <div class="tech-chip">
+        <span class="tech-dot ${technicianBadgeClass(tech.status)}"></span>
+        <span class="tech-name">${escapeHtml(tech.name)}</span>
+        <span class="tech-status">${escapeHtml(tech.status || "Unknown")}</span>
+      </div>
+    `).join("");
+
+    const rows = jobsResult.rows.map(job => {
+      const customerPhone = job.customer_phone ? `<a class="phone-link" href="${phoneHref(job.customer_phone)}">${escapeHtml(job.customer_phone)}</a>` : "";
+      return `
+        <tr>
+          <td><span class="board-status ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+          <td><strong>${escapeHtml(job.postcode || "—")}</strong><div class="small-muted">${escapeHtml(job.job_number || jobNumber(job.id))}</div></td>
+          <td>${escapeHtml(job.job_type || "—")}</td>
+          <td>${escapeHtml(job.source_campaign || "—")}</td>
+          <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+          <td>${escapeHtml(job.dispatcher_name || "Unknown")}</td>
+          <td><strong>${escapeHtml(job.customer_name || "—")}</strong><div class="small-muted">${customerPhone}</div></td>
+          <td>${formatDateTime(job.created_at)}</td>
+          <td><a class="view-button" href="/jobs/${job.id}/edit">View</a></td>
+        </tr>
+      `;
+    }).join("");
+
+    const recentFeed = recentResult.rows.map(job => {
+      const status = jobStatusLabel(job.status);
+      const who = job.technician_name || job.dispatcher_name || "Office";
+      return `
+        <div class="feed-row">
+          <span class="feed-dot ${jobStatusClass(job.status)}"></span>
+          <div>
+            <strong>${escapeHtml(who)}</strong> · ${escapeHtml(status)}
+            <div class="small-muted">${escapeHtml(job.postcode || job.job_number || jobNumber(job.id))} ${job.job_type ? `· ${escapeHtml(job.job_type)}` : ""}</div>
           </div>
-        </td>
-      </tr>
+        </div>
+      `;
+    }).join("");
+
+    const cardHtml = statusCards.map(card => `
+      <a class="board-card ${card.className}" href="/jobs?status=${encodeURIComponent(card.label === "Closed today" ? "closed" : card.label === "Job awaiting to be assigned" ? "open" : card.label === "Invoice sent to Acc Dept" ? "invoiced_account" : card.label === "Awaiting payment" ? "awaiting_payment" : "assigned")}">
+        <div class="board-card-label">${escapeHtml(card.label)}</div>
+        <div class="board-card-number">${card.value}</div>
+      </a>
     `).join("");
 
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head><title>Dispatch Board</title><style>${sharedStyles()}</style></head>
+      <head>
+        <title>Dispatch Board</title>
+        <style>
+          ${sharedStyles()}
+          .dispatch-board { max-width: 1500px; }
+          .board-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 22px; }
+          .board-actions { display: flex; gap: 12px; align-items: center; }
+          .board-actions .primary-action { background: var(--brand-green-dark); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
+          .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
+          .status-card-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 16px; margin: 20px 0 18px; }
+          .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; min-height: 110px; padding: 20px 20px 16px 24px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
+          .board-card:before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; }
+          .board-card:after { content: ""; position: absolute; right: -28px; top: -34px; width: 110px; height: 110px; border-radius: 999px; opacity: 0.10; }
+          .board-card-label { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; min-height: 34px; max-width: 160px; }
+          .board-card-number { color: #111827; font-size: 40px; font-weight: 900; margin-top: 12px; }
+          .board-blue:before, .board-blue:after { background: #2563eb; }
+          .board-green:before, .board-green:after { background: #16a34a; }
+          .board-red:before, .board-red:after { background: #dc2626; }
+          .board-amber:before, .board-amber:after { background: #f59e0b; }
+          .board-pink:before, .board-pink:after { background: #db2777; }
+          .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 16px 18px; margin-bottom: 18px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
+          .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
+          .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
+          .tech-chip { display: flex; align-items: center; gap: 8px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 999px; padding: 8px 12px; }
+          .tech-dot { width: 11px; height: 11px; border-radius: 999px; display: inline-block; }
+          .tech-green { background: #16a34a; }
+          .tech-amber { background: #f59e0b; }
+          .tech-red { background: #dc2626; }
+          .tech-grey { background: #94a3b8; }
+          .tech-name { color: #111827; font-size: 13px; font-weight: 900; }
+          .tech-status { color: #64748b; font-size: 12px; }
+          .board-filter-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 16px; margin-bottom: 18px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
+          .board-filters { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; }
+          .board-filters input, .board-filters select { min-height: 44px; border: 1px solid #d1d5db; background: #f9fafb; color: #111827; border-radius: 12px; padding: 10px 12px; }
+          .board-filters button { min-height: 44px; border-radius: 12px; padding: 10px 16px; background: #2563eb; }
+          .board-content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; align-items: start; }
+          .orders-panel, .control-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
+          .panel-heading { padding: 18px 20px; border-bottom: 1px solid #eef0f3; display: flex; justify-content: space-between; align-items: center; }
+          .panel-heading h2 { margin: 0; color: #111827; font-size: 21px; }
+          .panel-heading .muted { font-size: 13px; }
+          .dispatch-table { width: 100%; border-collapse: collapse; margin: 0; }
+          .dispatch-table th { background: #f1f5f9; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 12px 14px; }
+          .dispatch-table td { padding: 13px 14px; border-bottom: 1px solid #eef0f3; color: #25313a; font-size: 14px; vertical-align: middle; }
+          .dispatch-table tr:hover td { background: #f8fafc; }
+          .board-status { display: inline-block; border-radius: 999px; padding: 6px 10px; color: white; font-size: 12px; font-weight: 900; white-space: nowrap; }
+          .small-muted { color: #667085; font-size: 12px; line-height: 1.35; margin-top: 3px; }
+          .phone-link { color: #2563eb; font-weight: 800; text-decoration: none; }
+          .view-button { display: inline-block; background: var(--charcoal); color: white; border-radius: 10px; padding: 7px 12px; text-decoration: none; font-weight: 900; font-size: 12px; }
+          .control-card { margin: 18px; padding: 16px; background: #f9fafb; border: 1px solid #eef0f3; border-radius: 16px; }
+          .control-card-label { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; }
+          .control-card-value { color: #111827; font-size: 28px; font-weight: 900; margin-top: 6px; }
+          .control-card.green { border-left: 6px solid #16a34a; }
+          .control-card.amber { border-left: 6px solid #f59e0b; }
+          .control-card.red { border-left: 6px solid #dc2626; }
+          .feed-row { display: flex; gap: 10px; padding: 12px 18px; border-top: 1px solid #eef0f3; color: #25313a; }
+          .feed-dot { width: 10px; height: 10px; border-radius: 999px; margin-top: 5px; flex: 0 0 10px; }
+          .feed-dot.job-open { background: #2563eb; }
+          .feed-dot.job-assigned { background: #16a34a; }
+          .feed-dot.job-awaiting-payment { background: #f59e0b; }
+          .feed-dot.job-invoiced-account { background: #db2777; }
+          .feed-dot.job-closed { background: #dc2626; }
+          @media (max-width: 1200px) {
+            .status-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .board-content-grid { grid-template-columns: 1fr; }
+            .board-filters { grid-template-columns: 1fr; }
+            .dispatch-table { display: block; overflow-x: auto; }
+          }
+        </style>
+      </head>
       <body>
         ${nav(req)}
-        <h1>Dispatch Board</h1>
-        <div class="subtitle">Live client order board. Open, assign, complete, close and report on jobs.</div>
+        <main class="dispatch-board">
+          <div class="board-topbar">
+            <div>
+              <h1>Dispatch Board</h1>
+              <div class="subtitle">Live client orders, technician status, payments and dispatch actions.</div>
+            </div>
+            <div class="board-actions">
+              <a class="primary-action" href="/jobs/new">+ Create Order</a>
+              <a class="secondary-action" href="/jobs">Refresh Board</a>
+            </div>
+          </div>
 
-        <div class="grid-3">
-          <div class="panel"><div class="muted">Active jobs</div><div class="big-total">${activeCount}</div></div>
-          <div class="panel"><div class="muted">Awaiting payment</div><div class="big-total">${counts.awaiting_payment || 0}</div></div>
-          <div class="panel"><div class="muted">Invoice sent to Acc Dept</div><div class="big-total">${counts.invoiced_account || 0}</div></div>
-        </div>
+          <section class="status-card-grid">
+            ${cardHtml}
+          </section>
 
-        <div class="panel">
-          <form method="GET" action="/jobs" class="job-grid-3">
-            <select name="status">${optionList(statusFilterOptions, selectedStatus || "active")}</select>
-            <input name="search" value="${escapeHtml(search)}" placeholder="Search job number, customer, phone, postcode">
-            <button type="submit">Filter jobs</button>
-          </form>
-          <br>
-          <a class="button" href="/jobs/new">+ Create order</a>
-        </div>
+          <section class="tech-strip">
+            <div class="tech-strip-title">Technician availability</div>
+            <div class="tech-chip-row">${technicianStrip || `<span class="muted">No active technicians found.</span>`}</div>
+          </section>
 
-        <table>
-          <tr>
-            <th>Job</th><th>Customer</th><th>Address</th><th>Job type</th><th>Technician</th><th>Status</th><th>Actions</th>
-          </tr>
-          ${rows || `<tr><td colspan="7" class="muted">No jobs found.</td></tr>`}
-        </table>
+          <section class="board-filter-panel">
+            <form method="GET" action="/jobs" class="board-filters">
+              <input name="search" value="${escapeHtml(search)}" placeholder="Search order, phone, postcode, customer, category...">
+              <select name="status">${optionList(statusFilterOptions, selectedStatus || "active")}</select>
+              <select name="technician">${optionList(technicianOptions, selectedTechnician || "all")}</select>
+              <select name="campaign">${optionList(campaignOptions, selectedCampaign || "all")}</select>
+              <select name="date">${optionList(dateOptions, selectedDate || "all")}</select>
+              <button type="submit">Apply</button>
+            </form>
+          </section>
+
+          <section class="board-content-grid">
+            <div class="orders-panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Live client orders</h2>
+                  <div class="muted">Showing ${jobsResult.rows.length} order${jobsResult.rows.length === 1 ? "" : "s"}</div>
+                </div>
+              </div>
+              <table class="dispatch-table">
+                <tr>
+                  <th>Status</th>
+                  <th>Postcode</th>
+                  <th>Category</th>
+                  <th>Campaign</th>
+                  <th>Technician</th>
+                  <th>Dispatcher</th>
+                  <th>Customer</th>
+                  <th>Created</th>
+                  <th>Action</th>
+                </tr>
+                ${rows || `<tr><td colspan="9" class="muted">No orders found.</td></tr>`}
+              </table>
+            </div>
+
+            <aside class="control-panel">
+              <div class="panel-heading"><h2>Today's control panel</h2></div>
+              <div class="control-card green">
+                <div class="control-card-label">Income</div>
+                <div class="control-card-value">${money(revenue.income || 0)}</div>
+                <div class="small-muted">${Number(revenue.closed_today || 0)} closed today</div>
+              </div>
+              <div class="control-card amber">
+                <div class="control-card-label">Materials</div>
+                <div class="control-card-value">${money(revenue.materials || 0)}</div>
+                <div class="small-muted">Recorded against closed/updated jobs today</div>
+              </div>
+              <div class="control-card red">
+                <div class="control-card-label">Awaiting payment</div>
+                <div class="control-card-value">${money(revenue.awaiting_payment || 0)}</div>
+                <div class="small-muted">Orders currently marked awaiting payment</div>
+              </div>
+              <div class="panel-heading"><h2>Recent activity</h2></div>
+              ${recentFeed || `<div class="feed-row"><span class="muted">No recent activity.</span></div>`}
+            </aside>
+          </section>
+        </main>
       </body>
       </html>
     `);
   } catch (error) {
     console.error("Jobs page error:", error);
-    res.status(500).send("Jobs page error");
+    res.status(500).send(`Dispatch Board error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
   }
 });
 
