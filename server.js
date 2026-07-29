@@ -874,6 +874,9 @@ function sharedStyles() {
     }
 
     .sidebar-nav { display: flex; flex-direction: column; gap: 10px; }
+    .sidebar-nav-sectioned .sidebar-label { margin: 14px 6px 2px; }
+    .sidebar-nav-sectioned .sidebar-label:first-child { margin-top: 0; }
+    .section-label { border-top: 1px solid rgba(255,255,255,0.10); padding-top: 14px; }
 
     .side-link,
     .side-group-title {
@@ -931,6 +934,7 @@ function sharedStyles() {
     .dot-green { background: var(--brand-green); }
     .dot-red { background: var(--brand-red); }
     .dot-amber { background: var(--brand-amber); }
+    .dot-blue { background: #2563eb; }
     .dot-charcoal { background: #94a3b8; }
 
     .side-group { margin-top: 0; }
@@ -1193,30 +1197,31 @@ function nav(req) {
         <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=&quot;sidebar-fallback-logo&quot;>Your Dispatch Partner<br><span style=&quot;font-size:16px;color:#4b5563;&quot;>The Dispatch Office</span></div>';">
       </a>
 
-      <div class="sidebar-label">Main menu</div>
-      <nav class="sidebar-nav">
+      <nav class="sidebar-nav sidebar-nav-sectioned">
+        <div class="sidebar-label">Operations</div>
         <a class="side-link${active("/call-wallboard")}" href="/call-wallboard"><span class="side-dot dot-green"></span><span>Call wallboard</span></a>
-        <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Client orders</span></a>
-        <div class="side-group">
-          <a class="side-group-title${(path.startsWith("/dispatch") || path.startsWith("/technicians")) ? " active" : ""}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Dispatch & Technicians</span></a>
-          <div class="side-submenu">
-            <a href="/dispatch">Dispatch Map</a>
-            <a href="/technicians">Technicians</a>
-          </div>
-        </div>
-        <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
-        <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
+        <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
+        <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
+        <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
 
+        <div class="sidebar-label section-label">Team</div>
+        <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
+
+        <div class="sidebar-label section-label">Finance</div>
         <div class="side-group">
           <a class="side-group-title${active("/invoices")}" href="/invoices"><span class="side-dot dot-amber"></span><span>Invoices</span></a>
           <div class="side-submenu">
-            <a href="/invoices">Active Invoices</a>
-            <a href="/invoices/historic">Historic Invoices</a>
-            <a href="/invoices/new">New Invoice</a>
-            <a href="/invoice-items">Invoice Items</a>
-            <a href="/invoice-templates">Account Templates</a>
+            <a href="/invoices">Active invoices</a>
+            <a href="/invoices/historic">Historic invoices</a>
+            <a href="/invoices/new">New invoice</a>
+            <a href="/invoice-items">Invoice items</a>
+            <a href="/invoice-templates">Account templates</a>
           </div>
         </div>
+        <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+
+        <div class="sidebar-label section-label">Admin</div>
+        <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
       </nav>
 
       <div class="sidebar-user">
@@ -1940,7 +1945,7 @@ app.get("/start-shift", async (req, res) => {
           </section>
 
           <a class="start-button" href="/call-wallboard">Start shift — enter portal</a>
-          <a class="secondary-link" href="/jobs">Go straight to Client orders</a>
+          <a class="secondary-link" href="/jobs">Go straight to Dispatch Board</a>
         </main>
       </body>
       </html>
@@ -3660,10 +3665,10 @@ app.get("/jobs", async (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head><title>Client orders</title><style>${sharedStyles()}</style></head>
+      <head><title>Dispatch Board</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
-        <h1>Client orders</h1>
+        <h1>Dispatch Board</h1>
         <div class="subtitle">Live client order board. Open, assign, complete, close and report on jobs.</div>
 
         <div class="grid-3">
@@ -3679,7 +3684,7 @@ app.get("/jobs", async (req, res) => {
             <button type="submit">Filter jobs</button>
           </form>
           <br>
-          <a class="button" href="/jobs/new">+ New client order</a>
+          <a class="button" href="/jobs/new">+ Create order</a>
         </div>
 
         <table>
