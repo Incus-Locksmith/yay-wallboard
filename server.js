@@ -3781,12 +3781,28 @@ app.get("/jobs", async (req, res) => {
         <title>Dispatch Board</title>
         <style>
           ${sharedStyles()}
-          .dispatch-board { max-width: 1500px; }
-          .board-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 22px; }
-          .board-actions { display: flex; gap: 12px; align-items: center; }
+          .dispatch-board {
+            width: 100%;
+            max-width: 1680px;
+            margin: 0 auto;
+          }
+          .board-topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 20px;
+            margin-bottom: 22px;
+            padding-right: 4px;
+          }
+          .board-actions { display: flex; gap: 12px; align-items: center; flex: 0 0 auto; }
           .board-actions .primary-action { background: var(--brand-green-dark); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
-          .status-card-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 16px; margin: 20px 0 18px; }
+          .status-card-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(175px, 1fr));
+            gap: 18px;
+            margin: 22px 0 20px;
+          }
           .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; min-height: 110px; padding: 20px 20px 16px 24px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
           .board-card:before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; }
           .board-card:after { content: ""; position: absolute; right: -28px; top: -34px; width: 110px; height: 110px; border-radius: 999px; opacity: 0.10; }
@@ -3797,7 +3813,7 @@ app.get("/jobs", async (req, res) => {
           .board-red:before, .board-red:after { background: #dc2626; }
           .board-amber:before, .board-amber:after { background: #f59e0b; }
           .board-pink:before, .board-pink:after { background: #db2777; }
-          .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 16px 18px; margin-bottom: 18px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
+          .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px 20px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
           .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
           .tech-chip { display: flex; align-items: center; gap: 8px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 999px; padding: 8px 12px; }
@@ -3808,18 +3824,18 @@ app.get("/jobs", async (req, res) => {
           .tech-grey { background: #94a3b8; }
           .tech-name { color: #111827; font-size: 13px; font-weight: 900; }
           .tech-status { color: #64748b; font-size: 12px; }
-          .board-filter-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 16px; margin-bottom: 18px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
-          .board-filters { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; }
+          .board-filter-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
+          .board-filters { display: grid; grid-template-columns: minmax(320px, 2.2fr) minmax(165px, 1fr) minmax(165px, 1fr) minmax(165px, 1fr) minmax(150px, .9fr) auto; gap: 14px; align-items: center; }
           .board-filters input, .board-filters select { min-height: 44px; border: 1px solid #d1d5db; background: #f9fafb; color: #111827; border-radius: 12px; padding: 10px 12px; }
           .board-filters button { min-height: 44px; border-radius: 12px; padding: 10px 16px; background: #2563eb; }
-          .board-content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; align-items: start; }
+          .board-content-grid { display: grid; grid-template-columns: minmax(760px, 1fr) minmax(330px, 370px); gap: 22px; align-items: start; }
           .orders-panel, .control-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
           .panel-heading { padding: 18px 20px; border-bottom: 1px solid #eef0f3; display: flex; justify-content: space-between; align-items: center; }
           .panel-heading h2 { margin: 0; color: #111827; font-size: 21px; }
           .panel-heading .muted { font-size: 13px; }
           .dispatch-table { width: 100%; border-collapse: collapse; margin: 0; }
-          .dispatch-table th { background: #f1f5f9; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 12px 14px; }
-          .dispatch-table td { padding: 13px 14px; border-bottom: 1px solid #eef0f3; color: #25313a; font-size: 14px; vertical-align: middle; }
+          .dispatch-table th { background: #f1f5f9; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 13px 16px; }
+          .dispatch-table td { padding: 14px 16px; border-bottom: 1px solid #eef0f3; color: #25313a; font-size: 14px; vertical-align: middle; }
           .dispatch-table tr:hover td { background: #f8fafc; }
           .board-status { display: inline-block; border-radius: 999px; padding: 6px 10px; color: white; font-size: 12px; font-weight: 900; white-space: nowrap; }
           .small-muted { color: #667085; font-size: 12px; line-height: 1.35; margin-top: 3px; }
@@ -3838,6 +3854,10 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-awaiting-payment { background: #f59e0b; }
           .feed-dot.job-invoiced-account { background: #db2777; }
           .feed-dot.job-closed { background: #dc2626; }
+          @media (max-width: 1500px) {
+            .status-card-grid { grid-template-columns: repeat(3, minmax(175px, 1fr)); }
+            .board-content-grid { grid-template-columns: minmax(0, 1fr) 330px; }
+          }
           @media (max-width: 1200px) {
             .status-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
             .board-content-grid { grid-template-columns: 1fr; }
