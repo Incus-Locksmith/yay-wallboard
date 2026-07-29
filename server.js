@@ -6966,7 +6966,7 @@ app.get("/quotations", async (req, res) => {
 
     res.send(`
       <html>
-      <head><title>Quotations</title><style>${styles()}</style></head>
+      <head><title>Quotations</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
         <main class="app-main">
@@ -7042,7 +7042,7 @@ app.get("/quotations/new", async (req, res) => {
 
     res.send(`
       <html>
-      <head><title>Create Quotation</title><style>${styles()}</style></head>
+      <head><title>Create Quotation</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
         <main class="app-main">
@@ -7193,7 +7193,7 @@ app.get("/quotations/:id", async (req, res) => {
 
     res.send(`
       <html>
-      <head><title>${escapeHtml(quote.quote_number || quoteNumber(quote.id))}</title><style>${styles()}</style></head>
+      <head><title>${escapeHtml(quote.quote_number || quoteNumber(quote.id))}</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
         <main class="app-main">
