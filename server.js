@@ -1352,6 +1352,7 @@ function nav(req) {
         <a class="side-link${active("/call-wallboard")}" href="/call-wallboard"><span class="side-dot dot-green"></span><span>Call wallboard</span></a>
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
+        <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
         <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
 
         <div class="sidebar-label section-label">Team</div>
@@ -5378,6 +5379,230 @@ app.get("/address-lookup-test-old", async (req, res) => {
     </body>
     </html>
   `);
+});
+
+
+app.get("/customers", async (req, res) => {
+  try {
+    await ensureSchema();
+    const search = (req.query.search || "").trim();
+    const params = [];
+    let where = "WHERE COALESCE(j.customer_name, '') <> '' OR COALESCE(j.customer_phone, '') <> ''";
+
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      where += ` AND LOWER(CONCAT_WS(' ', j.customer_name, j.customer_phone, j.customer_email, j.postcode, j.address_line_1, j.town, j.source_campaign)) LIKE $${params.length}`;
+    }
+
+    const jobsResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      ${where}
+      ORDER BY j.created_at DESC
+      LIMIT 1500
+    `, params);
+
+    const customers = new Map();
+    for (const job of jobsResult.rows) {
+      const phoneKey = String(job.customer_phone || "").replace(/[^0-9]/g, "");
+      const nameKey = String(job.customer_name || "").trim().toLowerCase();
+      const key = phoneKey || `${nameKey}|${String(job.postcode || "").trim().toLowerCase()}` || `job-${job.id}`;
+      if (!customers.has(key)) {
+        customers.set(key, {
+          key,
+          name: job.customer_name || "Unknown customer",
+          phone: job.customer_phone || "",
+          email: job.customer_email || "",
+          lastPostcode: job.postcode || "",
+          lastAddress: jobAddressPlain(job),
+          lastJobAt: job.created_at,
+          jobs: [],
+          totalValue: 0,
+          openJobs: 0,
+          disputesHint: 0,
+          campaigns: new Set(),
+          postcodes: new Set()
+        });
+      }
+      const customer = customers.get(key);
+      customer.jobs.push(job);
+      if (!customer.name || customer.name === "Unknown customer") customer.name = job.customer_name || customer.name;
+      if (!customer.phone) customer.phone = job.customer_phone || "";
+      if (!customer.email) customer.email = job.customer_email || "";
+      if (!customer.lastPostcode) customer.lastPostcode = job.postcode || "";
+      if (!customer.lastAddress) customer.lastAddress = jobAddressPlain(job);
+      if (job.final_value) customer.totalValue += Number(job.final_value || 0);
+      if (!["closed", "invoiced_account"].includes(job.status)) customer.openJobs += 1;
+      if (job.source_campaign) customer.campaigns.add(job.source_campaign);
+      if (job.postcode) customer.postcodes.add(job.postcode);
+    }
+
+    const list = Array.from(customers.values()).sort((a, b) => new Date(b.lastJobAt || 0) - new Date(a.lastJobAt || 0));
+    const totalJobs = list.reduce((sum, c) => sum + c.jobs.length, 0);
+    const totalValue = list.reduce((sum, c) => sum + c.totalValue, 0);
+    const repeatCustomers = list.filter(c => c.jobs.length > 1).length;
+
+    const rows = list.map(customer => {
+      const phoneQuery = encodeURIComponent(customer.phone || "");
+      const nameQuery = encodeURIComponent(customer.name || "");
+      const postcodeList = Array.from(customer.postcodes).slice(0, 3).join(", ");
+      const campaigns = Array.from(customer.campaigns).slice(0, 3).join(", ");
+      return `
+        <tr>
+          <td><strong>${escapeHtml(customer.name || "Unknown")}</strong><br><span class="muted">${customer.phone ? `<a href="${escapeHtml(phoneHref(customer.phone))}">${escapeHtml(customer.phone)}</a>` : "No phone"}${customer.email ? ` · ${escapeHtml(customer.email)}` : ""}</span></td>
+          <td>${customer.jobs.length}<br><span class="muted">${customer.openJobs} active</span></td>
+          <td>${money(customer.totalValue)}<br><span class="muted">closed value</span></td>
+          <td>${escapeHtml(postcodeList || customer.lastPostcode || "—")}</td>
+          <td>${escapeHtml(campaigns || "—")}</td>
+          <td>${formatDateTime(customer.lastJobAt)}</td>
+          <td><a class="action-button" href="/customers/history?phone=${phoneQuery}&name=${nameQuery}">View history</a></td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <html>
+        <head><title>Customers</title><style>${sharedStyles()}</style></head>
+        <body>${nav(req)}<main class="app-main">
+          <div class="page-header">
+            <div>
+              <h1>Customers</h1>
+              <div class="subtitle">Search customers by name, phone, email, postcode or campaign and view full job history.</div>
+            </div>
+            <a class="action-button good" href="/jobs/new">+ Create order</a>
+          </div>
+
+          <div class="dashboard-grid cols-3">
+            <div class="metric-card"><div class="metric-label">Customers found</div><div class="metric-value">${list.length}</div></div>
+            <div class="metric-card"><div class="metric-label">Jobs in view</div><div class="metric-value">${totalJobs}</div></div>
+            <div class="metric-card"><div class="metric-label">Repeat customers</div><div class="metric-value">${repeatCustomers}</div></div>
+          </div>
+
+          <div class="panel">
+            <form class="search-form" method="GET" action="/customers">
+              <input name="search" value="${escapeHtml(search)}" placeholder="Search name, phone, postcode, email, campaign...">
+              <button class="action-button" type="submit">Search</button>
+              <a class="secondary-button" href="/customers">Clear</a>
+            </form>
+          </div>
+
+          <div class="panel">
+            <h2>Customer list</h2>
+            <table>
+              <thead><tr><th>Customer</th><th>Jobs</th><th>Value</th><th>Postcodes</th><th>Campaigns</th><th>Last job</th><th>Action</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="7">No customers found yet.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </main></body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Customers page error:", error);
+    res.status(500).send(`Customers page error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+app.get("/customers/history", async (req, res) => {
+  try {
+    await ensureSchema();
+    const phone = (req.query.phone || "").trim();
+    const name = (req.query.name || "").trim();
+
+    if (!phone && !name) {
+      return res.redirect("/customers");
+    }
+
+    const params = [];
+    let where = "";
+    if (phone) {
+      params.push(String(phone).replace(/[^0-9]/g, ""));
+      where = `regexp_replace(COALESCE(j.customer_phone, ''), '[^0-9]', '', 'g') = $1`;
+    } else {
+      params.push(name.toLowerCase());
+      where = `LOWER(COALESCE(j.customer_name, '')) = $1`;
+    }
+
+    const jobsResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE ${where}
+      ORDER BY j.created_at DESC
+    `, params);
+
+    const jobs = jobsResult.rows;
+    const first = jobs[0] || {};
+    const totalValue = jobs.reduce((sum, job) => sum + Number(job.final_value || 0), 0);
+    const materialCost = jobs.reduce((sum, job) => sum + Number(job.materials_cost || 0), 0);
+    const activeJobs = jobs.filter(job => !["closed", "invoiced_account"].includes(job.status)).length;
+    const addresses = [...new Set(jobs.map(jobAddressPlain).filter(Boolean))].slice(0, 8);
+    const campaigns = [...new Set(jobs.map(j => j.source_campaign).filter(Boolean))].slice(0, 8);
+
+    const rows = jobs.map(job => `
+      <tr>
+        <td><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong><br><span class="muted">${formatDateTime(job.created_at)}</span></td>
+        <td><span class="board-status ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+        <td>${escapeHtml(job.postcode || "—")}<br><span class="muted">${escapeHtml(job.job_type || "—")}</span></td>
+        <td>${escapeHtml(job.technician_name || "Unassigned")}<br><span class="muted">${escapeHtml(job.source_campaign || "—")}</span></td>
+        <td>${money(job.final_value || 0)}<br><span class="muted">Materials ${money(job.materials_cost || 0)}</span></td>
+        <td>${escapeHtml(job.payment_method || job.expected_payment_method || "—")}</td>
+        <td><a class="action-button" href="/jobs/${job.id}/edit">View job</a></td>
+      </tr>
+    `).join("");
+
+    const phoneDisplay = first.customer_phone || phone;
+    const customerName = first.customer_name || name || "Customer";
+
+    res.send(`
+      <html>
+        <head><title>Customer History</title><style>${sharedStyles()}</style></head>
+        <body>${nav(req)}<main class="app-main">
+          <div class="page-header">
+            <div>
+              <h1>${escapeHtml(customerName)}</h1>
+              <div class="subtitle">Customer job history${phoneDisplay ? ` · <a href="${escapeHtml(phoneHref(phoneDisplay))}">${escapeHtml(phoneDisplay)}</a>` : ""}${first.customer_email ? ` · ${escapeHtml(first.customer_email)}` : ""}</div>
+            </div>
+            <div class="button-row">
+              <a class="secondary-button" href="/customers">Back to customers</a>
+              <a class="action-button good" href="/jobs/new">+ Create order</a>
+            </div>
+          </div>
+
+          <div class="dashboard-grid cols-4">
+            <div class="metric-card"><div class="metric-label">Total jobs</div><div class="metric-value">${jobs.length}</div></div>
+            <div class="metric-card"><div class="metric-label">Active jobs</div><div class="metric-value">${activeJobs}</div></div>
+            <div class="metric-card"><div class="metric-label">Closed value</div><div class="metric-value">${money(totalValue)}</div></div>
+            <div class="metric-card"><div class="metric-label">Materials cost</div><div class="metric-value">${money(materialCost)}</div></div>
+          </div>
+
+          <div class="grid-2">
+            <div class="panel">
+              <h2>Known addresses</h2>
+              ${addresses.length ? addresses.map(addr => `<div class="linked-job-box">${escapeHtml(addr)}</div>`).join("<br>") : `<p class="muted">No addresses recorded.</p>`}
+            </div>
+            <div class="panel">
+              <h2>Campaign / source history</h2>
+              ${campaigns.length ? campaigns.map(c => `<span class="pill stage-approved">${escapeHtml(c)}</span>`).join(" ") : `<p class="muted">No campaign history recorded.</p>`}
+              <hr>
+              <p class="muted">Use this page while a repeat customer is on the phone to quickly check previous jobs, payments, materials and disputes raised from job records.</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Job history</h2>
+            <table>
+              <thead><tr><th>Job</th><th>Status</th><th>Postcode / Type</th><th>Technician / Campaign</th><th>Value</th><th>Payment</th><th>Action</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="7">No jobs found for this customer.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </main></body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Customer history error:", error);
+    res.status(500).send(`Customer history error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
 });
 
 app.get("/dispatch", async (req, res) => {
