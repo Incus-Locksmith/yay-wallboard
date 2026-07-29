@@ -5384,7 +5384,7 @@ app.get("/address-lookup-test-old", async (req, res) => {
 
 app.get("/customers", async (req, res) => {
   try {
-    await ensureSchema();
+    await initDb();
     const search = (req.query.search || "").trim();
     const params = [];
     let where = "WHERE COALESCE(j.customer_name, '') <> '' OR COALESCE(j.customer_phone, '') <> ''";
@@ -5505,7 +5505,7 @@ app.get("/customers", async (req, res) => {
 
 app.get("/customers/history", async (req, res) => {
   try {
-    await ensureSchema();
+    await initDb();
     const phone = (req.query.phone || "").trim();
     const name = (req.query.name || "").trim();
 
