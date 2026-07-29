@@ -500,6 +500,46 @@ const jobUrgencies = ["Normal", "Urgent", "Emergency"];
 const jobPaymentMethods = ["Unknown", "Cash", "Card", "Bank transfer", "Account"];
 const jobOutcomes = ["Completed", "Cancelled", "No answer", "Customer declined", "Follow-up needed", "Other"];
 
+
+const disputeStatuses = [
+  { value: "open_dispute", label: "Open dispute" },
+  { value: "awaiting_customer_email", label: "Awaiting customer email" },
+  { value: "under_review", label: "Under review" },
+  { value: "refund_agreed", label: "Refund agreed" },
+  { value: "refund_processed", label: "Refund processed" },
+  { value: "chargeback_raised", label: "Chargeback raised" },
+  { value: "resolved", label: "Resolved" },
+  { value: "rejected", label: "Rejected" }
+];
+
+const complaintTypes = [
+  "Price dispute",
+  "Workmanship complaint",
+  "Parts/materials dispute",
+  "Arrival time complaint",
+  "Refund request",
+  "Chargeback",
+  "Other"
+];
+
+function disputeStatusLabel(status) {
+  const found = disputeStatuses.find(item => item.value === status);
+  return found ? found.label : (status || "Open dispute");
+}
+
+function disputeStatusClass(status) {
+  const clean = String(status || "open_dispute").replaceAll("_", "-");
+  return `dispute-${clean}`;
+}
+
+function disputeStatusOptions(selectedStatus = "open_dispute") {
+  return optionList(disputeStatuses, selectedStatus);
+}
+
+function complaintTypeOptions(selectedType = "") {
+  return optionList(complaintTypes, selectedType);
+}
+
 function optionList(items, selectedValue = "") {
   return items.map(item => {
     const value = typeof item === "string" ? item : item.value;
@@ -1153,6 +1193,16 @@ function sharedStyles() {
     .job-invoiced-account { background: #ec4899; color: white; }
     .job-completed { background: #6b7280; color: white; }
     .job-fully-paid-private { background: #6b7280; color: white; }
+    .dispute-open-dispute { background: #dc2626; color: white; }
+    .dispute-awaiting-customer-email { background: #f59e0b; color: black; }
+    .dispute-under-review { background: #2563eb; color: white; }
+    .dispute-refund-agreed { background: #db2777; color: white; }
+    .dispute-refund-processed { background: #16a34a; color: white; }
+    .dispute-chargeback-raised { background: #7c2d12; color: white; }
+    .dispute-resolved { background: #16a34a; color: white; }
+    .dispute-rejected { background: #6b7280; color: white; }
+    .danger-zone { border: 1px solid rgba(220, 38, 38, 0.25); background: #fff7f7; }
+    .linked-job-box { padding: 14px; border: 1px solid var(--border); border-radius: 14px; background: #f9fafb; line-height: 1.5; }
     .job-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
     .job-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
     .job-card-title { font-weight: bold; font-size: 16px; color: var(--text); }
@@ -1219,6 +1269,7 @@ function nav(req) {
           </div>
         </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+        <a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>
 
         <div class="sidebar-label section-label">Admin</div>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
@@ -1548,6 +1599,47 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_assigned_technician_idx ON jobs (assigned_technician_id);`);
+
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS disputes (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER,
+      customer_name TEXT,
+      customer_phone TEXT,
+      technician_id INTEGER,
+      complaint_type TEXT,
+      disputed_amount NUMERIC(10,2),
+      refund_amount NUMERIC(10,2),
+      chargeback BOOLEAN DEFAULT FALSE,
+      status TEXT DEFAULT 'open_dispute',
+      complaint_summary TEXT,
+      resolution_notes TEXT,
+      created_by TEXT,
+      updated_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      resolved_at TIMESTAMP
+    );
+  `);
+
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS customer_name TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS customer_phone TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS technician_id INTEGER;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS complaint_type TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS disputed_amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS chargeback BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open_dispute';`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS complaint_summary TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution_notes TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS created_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS disputes_status_idx ON disputes (status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS disputes_job_id_idx ON disputes (job_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS disputes_created_at_idx ON disputes (created_at);`);
 
   await seedDefaultPortalUsers();
   await seedDefaultInvoiceItems();
@@ -4647,6 +4739,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
             <div class="job-control-actions">
               <a class="action-button" href="/jobs/${job.id}/summary">Technician summary</a>
               <a class="action-button amber" href="/jobs/${job.id}/close">Close / payment</a>
+              <a class="action-button" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
               <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
             </div>
           </div>
@@ -6558,6 +6651,382 @@ app.post("/technicians/delete", async (req, res) => {
   } catch (error) {
     console.error("Delete technician error:", error);
     res.status(500).send("Delete technician error. Check Render logs.");
+  }
+});
+
+
+app.get("/disputes", async (req, res) => {
+  try {
+    const statusFilter = req.query.status || "";
+    const search = (req.query.search || "").trim();
+
+    const conditions = [];
+    const params = [];
+
+    if (statusFilter) {
+      params.push(statusFilter);
+      conditions.push(`d.status = $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(`(
+        LOWER(COALESCE(d.customer_name, '')) LIKE LOWER($${params.length}) OR
+        LOWER(COALESCE(d.customer_phone, '')) LIKE LOWER($${params.length}) OR
+        LOWER(COALESCE(d.complaint_type, '')) LIKE LOWER($${params.length}) OR
+        LOWER(COALESCE(j.postcode, '')) LIKE LOWER($${params.length}) OR
+        LOWER(COALESCE(j.job_number, '')) LIKE LOWER($${params.length})
+      )`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const result = await pool.query(`
+      SELECT
+        d.*,
+        j.job_number,
+        j.postcode,
+        j.job_type,
+        j.source_campaign,
+        j.final_value,
+        j.materials_cost,
+        t.name AS technician_name
+      FROM disputes d
+      LEFT JOIN jobs j ON j.id = d.job_id
+      LEFT JOIN technicians t ON t.id = COALESCE(d.technician_id, j.assigned_technician_id)
+      ${where}
+      ORDER BY
+        CASE
+          WHEN d.status IN ('resolved', 'rejected', 'refund_processed') THEN 2
+          ELSE 1
+        END,
+        d.updated_at DESC,
+        d.created_at DESC
+      LIMIT 200
+    `, params);
+
+    const countsResult = await pool.query(`
+      SELECT status, COUNT(*)::int AS count
+      FROM disputes
+      GROUP BY status
+    `);
+    const counts = Object.fromEntries(countsResult.rows.map(row => [row.status, row.count]));
+
+    const openCount = result.rows.filter(row => !["resolved", "rejected", "refund_processed"].includes(row.status)).length;
+    const chargebackCount = result.rows.filter(row => row.chargeback).length;
+    const totalDisputed = result.rows.reduce((sum, row) => sum + Number(row.disputed_amount || 0), 0);
+    const totalRefunds = result.rows.reduce((sum, row) => sum + Number(row.refund_amount || 0), 0);
+
+    const rows = result.rows.map(dispute => `
+      <tr>
+        <td><span class="pill ${disputeStatusClass(dispute.status)}">${escapeHtml(disputeStatusLabel(dispute.status))}</span></td>
+        <td>
+          <strong>${escapeHtml(dispute.customer_name || "Unknown customer")}</strong><br>
+          <span class="muted">${escapeHtml(dispute.customer_phone || "")}</span>
+        </td>
+        <td>
+          ${dispute.job_id ? `<a href="/jobs/${dispute.job_id}/edit">${escapeHtml(dispute.job_number || jobNumber(dispute.job_id))}</a>` : "No linked job"}<br>
+          <span class="muted">${escapeHtml(dispute.postcode || "")} ${dispute.job_type ? `· ${escapeHtml(dispute.job_type)}` : ""}</span>
+        </td>
+        <td>${escapeHtml(dispute.technician_name || "Unassigned")}</td>
+        <td>${escapeHtml(dispute.complaint_type || "")}</td>
+        <td>${money(dispute.disputed_amount)}</td>
+        <td>${money(dispute.refund_amount)}</td>
+        <td>${dispute.chargeback ? "Yes" : "No"}</td>
+        <td>${formatDateTime(dispute.updated_at || dispute.created_at)}</td>
+        <td><a class="button small" href="/disputes/${dispute.id}">View</a></td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Disputes</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <div class="topbar">
+          <div>
+            <h1>Disputes</h1>
+            <div class="subtitle">Track complaints, refunds, chargebacks and cost disputes linked to client orders.</div>
+          </div>
+          <a class="button" href="/disputes/new">+ New dispute</a>
+        </div>
+
+        <div class="cards">
+          <div class="card"><h2>${openCount}</h2><p>Open / in progress</p></div>
+          <div class="card"><h2>${money(totalDisputed)}</h2><p>Total disputed shown</p></div>
+          <div class="card"><h2>${money(totalRefunds)}</h2><p>Refunds logged</p></div>
+          <div class="card"><h2>${chargebackCount}</h2><p>Chargebacks shown</p></div>
+        </div>
+
+        <div class="panel">
+          <form method="GET" action="/disputes" class="grid-3">
+            <div>
+              <label>Search</label>
+              <input name="search" value="${escapeHtml(search)}" placeholder="Customer, phone, postcode, job no">
+            </div>
+            <div>
+              <label>Status</label>
+              <select name="status"><option value="">All statuses</option>${disputeStatusOptions(statusFilter)}</select>
+            </div>
+            <div style="display:flex;align-items:end;gap:10px;">
+              <button type="submit">Filter</button>
+              <a class="button secondary" href="/disputes">Clear</a>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Dispute log</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th><th>Customer</th><th>Linked job</th><th>Technician</th><th>Type</th><th>Disputed</th><th>Refund</th><th>Chargeback</th><th>Updated</th><th>Action</th>
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="10">No disputes found.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Disputes page error:", error);
+    res.status(500).send("Disputes page error. Check Render logs.");
+  }
+});
+
+app.get("/disputes/new", async (req, res) => {
+  try {
+    const jobId = parseOptionalInt(req.query.job_id);
+    let linkedJob = null;
+    if (jobId) {
+      const jobResult = await pool.query(`
+        SELECT j.*, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        WHERE j.id = $1
+      `, [jobId]);
+      linkedJob = jobResult.rows[0] || null;
+    }
+
+    const technicianResult = await pool.query(`SELECT id, name FROM technicians WHERE active = TRUE ORDER BY name ASC`);
+    const technicianOptions = technicianResult.rows.map(tech => {
+      const selected = linkedJob && Number(linkedJob.assigned_technician_id) === Number(tech.id) ? "selected" : "";
+      return `<option value="${tech.id}" ${selected}>${escapeHtml(tech.name)}</option>`;
+    }).join("");
+
+    const customerName = linkedJob ? linkedJob.customer_name || "" : "";
+    const customerPhone = linkedJob ? linkedJob.customer_phone || "" : "";
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>New Dispute</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>New dispute</h1>
+        <div class="subtitle">Log a complaint, refund request, material-cost dispute or chargeback.</div>
+
+        ${linkedJob ? `
+          <div class="panel linked-job-box">
+            <strong>Linked job:</strong> <a href="/jobs/${linkedJob.id}/edit">${escapeHtml(linkedJob.job_number || jobNumber(linkedJob.id))}</a><br>
+            <span class="muted">${escapeHtml(linkedJob.customer_name || "")} · ${escapeHtml(linkedJob.postcode || "")} · ${escapeHtml(linkedJob.job_type || "")} · ${escapeHtml(linkedJob.technician_name || "Unassigned")}</span>
+          </div>
+        ` : ""}
+
+        <form method="POST" action="/disputes/save" class="panel">
+          <input type="hidden" name="id" value="">
+          <input type="hidden" name="job_id" value="${linkedJob ? linkedJob.id : ""}">
+
+          <div class="grid-2">
+            <div><label>Customer name</label><input name="customer_name" value="${escapeHtml(customerName)}"></div>
+            <div><label>Customer phone</label><input name="customer_phone" value="${escapeHtml(customerPhone)}"></div>
+          </div>
+
+          <div class="grid-3">
+            <div><label>Technician</label><select name="technician_id"><option value="">Not linked</option>${technicianOptions}</select></div>
+            <div><label>Complaint type</label><select name="complaint_type">${complaintTypeOptions()}</select></div>
+            <div><label>Status</label><select name="status">${disputeStatusOptions("open_dispute")}</select></div>
+          </div>
+
+          <div class="grid-3">
+            <div><label>Disputed amount</label><input name="disputed_amount" placeholder="£0.00"></div>
+            <div><label>Refund amount</label><input name="refund_amount" placeholder="£0.00"></div>
+            <div><label>Chargeback raised?</label><select name="chargeback"><option value="false">No</option><option value="true">Yes</option></select></div>
+          </div>
+
+          <div><label>Complaint summary</label><textarea name="complaint_summary" rows="5" placeholder="What is the customer disputing? What happened? What evidence do we have?"></textarea></div>
+          <div><label>Resolution notes</label><textarea name="resolution_notes" rows="5" placeholder="Refund agreed, email sent, bank chargeback notes, manager decision, etc."></textarea></div>
+
+          <button type="submit">Save dispute</button>
+          <a class="button secondary" href="/disputes">Cancel</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("New dispute error:", error);
+    res.status(500).send("New dispute error. Check Render logs.");
+  }
+});
+
+app.get("/disputes/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await pool.query(`
+      SELECT d.*, j.job_number, j.postcode, j.job_type, j.source_campaign, j.final_value, j.materials_used, j.materials_cost,
+             t.name AS technician_name
+      FROM disputes d
+      LEFT JOIN jobs j ON j.id = d.job_id
+      LEFT JOIN technicians t ON t.id = COALESCE(d.technician_id, j.assigned_technician_id)
+      WHERE d.id = $1
+    `, [id]);
+
+    const dispute = result.rows[0];
+    if (!dispute) return res.status(404).send("Dispute not found");
+
+    const technicianResult = await pool.query(`SELECT id, name FROM technicians WHERE active = TRUE ORDER BY name ASC`);
+    const technicianOptions = technicianResult.rows.map(tech => {
+      const selected = Number(dispute.technician_id) === Number(tech.id) ? "selected" : "";
+      return `<option value="${tech.id}" ${selected}>${escapeHtml(tech.name)}</option>`;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Dispute #${dispute.id}</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <div class="topbar">
+          <div>
+            <h1>Dispute #${dispute.id}</h1>
+            <div class="subtitle">Created ${formatDateTime(dispute.created_at)} · Updated ${formatDateTime(dispute.updated_at)}</div>
+          </div>
+          <a class="button secondary" href="/disputes">Back to disputes</a>
+        </div>
+
+        <div class="cards">
+          <div class="card"><h2><span class="pill ${disputeStatusClass(dispute.status)}">${escapeHtml(disputeStatusLabel(dispute.status))}</span></h2><p>Status</p></div>
+          <div class="card"><h2>${money(dispute.disputed_amount)}</h2><p>Disputed amount</p></div>
+          <div class="card"><h2>${money(dispute.refund_amount)}</h2><p>Refund amount</p></div>
+          <div class="card"><h2>${dispute.chargeback ? "Yes" : "No"}</h2><p>Chargeback</p></div>
+        </div>
+
+        ${dispute.job_id ? `
+          <div class="panel linked-job-box">
+            <strong>Linked job:</strong> <a href="/jobs/${dispute.job_id}/edit">${escapeHtml(dispute.job_number || jobNumber(dispute.job_id))}</a><br>
+            <span class="muted">${escapeHtml(dispute.postcode || "")} · ${escapeHtml(dispute.job_type || "")} · Final value ${money(dispute.final_value)} · Materials ${money(dispute.materials_cost)}</span>
+          </div>
+        ` : ""}
+
+        <form method="POST" action="/disputes/save" class="panel">
+          <input type="hidden" name="id" value="${dispute.id}">
+          <input type="hidden" name="job_id" value="${dispute.job_id || ""}">
+
+          <div class="grid-2">
+            <div><label>Customer name</label><input name="customer_name" value="${escapeHtml(dispute.customer_name || "")}"></div>
+            <div><label>Customer phone</label><input name="customer_phone" value="${escapeHtml(dispute.customer_phone || "")}"></div>
+          </div>
+
+          <div class="grid-3">
+            <div><label>Technician</label><select name="technician_id"><option value="">Not linked</option>${technicianOptions}</select></div>
+            <div><label>Complaint type</label><select name="complaint_type">${complaintTypeOptions(dispute.complaint_type || "")}</select></div>
+            <div><label>Status</label><select name="status">${disputeStatusOptions(dispute.status)}</select></div>
+          </div>
+
+          <div class="grid-3">
+            <div><label>Disputed amount</label><input name="disputed_amount" value="${dispute.disputed_amount || ""}" placeholder="£0.00"></div>
+            <div><label>Refund amount</label><input name="refund_amount" value="${dispute.refund_amount || ""}" placeholder="£0.00"></div>
+            <div><label>Chargeback raised?</label><select name="chargeback"><option value="false" ${!dispute.chargeback ? "selected" : ""}>No</option><option value="true" ${dispute.chargeback ? "selected" : ""}>Yes</option></select></div>
+          </div>
+
+          <div><label>Complaint summary</label><textarea name="complaint_summary" rows="6">${escapeHtml(dispute.complaint_summary || "")}</textarea></div>
+          <div><label>Resolution notes</label><textarea name="resolution_notes" rows="6">${escapeHtml(dispute.resolution_notes || "")}</textarea></div>
+
+          <button type="submit">Save dispute</button>
+          <a class="button secondary" href="/disputes">Back</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Dispute detail error:", error);
+    res.status(500).send("Dispute detail error. Check Render logs.");
+  }
+});
+
+app.post("/disputes/save", async (req, res) => {
+  try {
+    const id = parseOptionalInt(req.body.id);
+    const jobId = parseOptionalInt(req.body.job_id);
+    const technicianId = parseOptionalInt(req.body.technician_id);
+    const status = req.body.status || "open_dispute";
+    const resolvedStatuses = ["resolved", "rejected", "refund_processed"];
+    const resolvedAtExpression = resolvedStatuses.includes(status) ? "NOW()" : "NULL";
+
+    const values = [
+      jobId,
+      req.body.customer_name || "",
+      req.body.customer_phone || "",
+      technicianId,
+      req.body.complaint_type || "",
+      parseMoneyInput(req.body.disputed_amount),
+      parseMoneyInput(req.body.refund_amount),
+      req.body.chargeback === "true",
+      status,
+      req.body.complaint_summary || "",
+      req.body.resolution_notes || "",
+      currentAgentName(req)
+    ];
+
+    if (id) {
+      await pool.query(`
+        UPDATE disputes SET
+          job_id = $1,
+          customer_name = $2,
+          customer_phone = $3,
+          technician_id = $4,
+          complaint_type = $5,
+          disputed_amount = $6,
+          refund_amount = $7,
+          chargeback = $8,
+          status = $9,
+          complaint_summary = $10,
+          resolution_notes = $11,
+          updated_by = $12,
+          updated_at = NOW(),
+          resolved_at = CASE WHEN $9 IN ('resolved', 'rejected', 'refund_processed') THEN COALESCE(resolved_at, NOW()) ELSE NULL END
+        WHERE id = $13
+      `, [...values, id]);
+      res.redirect(`/disputes/${id}`);
+      return;
+    }
+
+    const insert = await pool.query(`
+      INSERT INTO disputes (
+        job_id, customer_name, customer_phone, technician_id, complaint_type,
+        disputed_amount, refund_amount, chargeback, status, complaint_summary,
+        resolution_notes, created_by, updated_by, resolved_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,
+        CASE WHEN $9 IN ('resolved', 'rejected', 'refund_processed') THEN NOW() ELSE NULL END
+      )
+      RETURNING id
+    `, values);
+
+    res.redirect(`/disputes/${insert.rows[0].id}`);
+  } catch (error) {
+    console.error("Save dispute error:", error);
+    res.status(500).send("Save dispute error. Check Render logs.");
   }
 });
 
