@@ -623,6 +623,43 @@ const jobTypes = [
 const jobUrgencies = ["Normal", "Urgent", "Emergency"];
 const etaOptions = ["15-20 mins", "25-30 mins", "< 60 mins", "Scheduled", "Other"];
 const jobPaymentMethods = ["Unknown", "Cash", "Card", "Bank transfer", "Account"];
+const splitPaymentMethods = ["Cash", "Card", "Bank transfer", "Account"];
+const UK_VAT_RATE = 0.20;
+
+function calculateVatFromNet(netValue) {
+  const net = Number(netValue || 0);
+  return Number.isFinite(net) ? Math.round((net * UK_VAT_RATE) * 100) / 100 : 0;
+}
+
+function calculateGrossFromNet(netValue) {
+  const net = Number(netValue || 0);
+  return Number.isFinite(net) ? Math.round((net + calculateVatFromNet(net)) * 100) / 100 : 0;
+}
+
+function buildSplitPaymentSummary(body) {
+  const rows = [
+    { method: String(body.payment_method_1 || "").trim(), amount: parseMoneyInput(body.payment_amount_1) },
+    { method: String(body.payment_method_2 || "").trim(), amount: parseMoneyInput(body.payment_amount_2) }
+  ].filter(row => row.method && row.method !== "Unknown");
+
+  if (!rows.length) return String(body.payment_method || "Unknown").trim() || "Unknown";
+
+  return rows.map(row => {
+    const amountText = row.amount !== null && row.amount !== undefined ? ` ${money(row.amount)}` : "";
+    return `${row.method}${amountText}`;
+  }).join(" + ");
+}
+
+function closePaymentRequiresInvoicePhotos(body) {
+  const methods = [body.payment_method_1, body.payment_method_2, body.payment_method].map(value => String(value || "").toLowerCase());
+  return methods.some(value => value.includes("card") || value.includes("bank transfer"));
+}
+
+function closePaymentIncludesCard(body) {
+  const methods = [body.payment_method_1, body.payment_method_2, body.payment_method].map(value => String(value || "").toLowerCase());
+  return methods.some(value => value.includes("card"));
+}
+
 const jobOutcomes = ["Completed", "Cancelled", "No answer", "Customer declined", "Follow-up needed", "Other"];
 
 
@@ -841,8 +878,17 @@ const auditFieldLabels = {
   scheduled_at: "Scheduled date/time",
   dispatcher_notes: "Dispatcher notes",
   status: "Status",
-  final_value: "Final value",
+  net_value: "NET value",
+  vat_amount: "VAT",
+  final_value: "Full value inc VAT",
   payment_method: "Payment method",
+  payment_method_1: "Payment method 1",
+  payment_amount_1: "Payment amount 1",
+  payment_method_2: "Payment method 2",
+  payment_amount_2: "Payment amount 2",
+  invoice_photos_confirmed: "Invoice/photos confirmation",
+  card_is_amex: "AMEX payment",
+  amex_id_provided: "AMEX ID provided",
   customer_paid: "Customer paid",
   materials_used: "Materials used",
   materials_cost: "Materials cost",
@@ -852,14 +898,14 @@ const auditFieldLabels = {
   onsite_at: "On site time"
 };
 
-const auditMoneyFields = new Set(["quoted_price", "starting_price", "call_out_agreed", "start_price_locks", "final_value", "materials_cost"]);
+const auditMoneyFields = new Set(["quoted_price", "starting_price", "call_out_agreed", "start_price_locks", "net_value", "vat_amount", "final_value", "payment_amount_1", "payment_amount_2", "materials_cost"]);
 const auditDateFields = new Set(["scheduled_at", "onsite_at", "closed_at", "created_at", "updated_at"]);
 
 function auditDisplayValue(field, value, technicianNames = {}) {
   if (value === null || value === undefined || value === "") return "—";
   if (field === "status") return jobStatusLabel(value);
   if (field === "assigned_technician_id") return technicianNames[String(value)] || value || "Unassigned";
-  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job") return value === true || value === "true" ? "Yes" : "No";
+  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job" || field === "invoice_photos_confirmed" || field === "card_is_amex" || field === "amex_id_provided") return value === true || value === "true" ? "Yes" : "No";
   if (auditMoneyFields.has(field)) return money(value || 0);
   if (auditDateFields.has(field)) return formatDateTime(value);
   return String(value);
@@ -871,7 +917,7 @@ function auditNormalValue(field, value) {
     const number = Number(String(value).replace(/[^0-9.-]/g, ""));
     return Number.isFinite(number) ? number.toFixed(2) : "";
   }
-  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job") {
+  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job" || field === "invoice_photos_confirmed" || field === "card_is_amex" || field === "amex_id_provided") {
     return value === true || value === "true" ? "true" : "false";
   }
   if (auditDateFields.has(field)) {
@@ -1999,8 +2045,17 @@ async function initDb() {
       dispatcher_name TEXT,
       dispatcher_notes TEXT,
       status TEXT DEFAULT 'open',
+      net_value NUMERIC(10,2),
+      vat_amount NUMERIC(10,2),
       final_value NUMERIC(10,2),
       payment_method TEXT,
+      payment_method_1 TEXT,
+      payment_amount_1 NUMERIC(10,2),
+      payment_method_2 TEXT,
+      payment_amount_2 NUMERIC(10,2),
+      invoice_photos_confirmed BOOLEAN DEFAULT FALSE,
+      card_is_amex BOOLEAN DEFAULT FALSE,
+      amex_id_provided BOOLEAN DEFAULT FALSE,
       customer_paid BOOLEAN DEFAULT FALSE,
       materials_used TEXT,
       materials_cost NUMERIC(10,2),
@@ -2036,8 +2091,17 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_notes TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS net_value NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS vat_amount NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_value NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method_1 TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_amount_1 NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method_2 TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_amount_2 NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS invoice_photos_confirmed BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS card_is_amex BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS amex_id_provided BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_paid BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_used TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_cost NUMERIC(10,2);`);
@@ -5987,16 +6051,32 @@ app.get("/jobs/:id/close", async (req, res) => {
           <p><strong>Description:</strong><br>${escapeHtml(job.job_description || "—")}</p>
         </div>
 
-        <form method="POST" action="/jobs/${job.id}/close">
+        <form method="POST" action="/jobs/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
           <div class="panel">
             <h2>Close job / payment</h2>
+            <p class="muted">Enter the NET value. VAT is calculated automatically at 20%, and the full value is saved against the job.</p>
             <div class="job-grid">
-              <div class="field"><label>Final job value</label><input name="final_value" value="${job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : ""}" inputmode="decimal" required></div>
-              <div class="field"><label>Payment method</label><select name="payment_method">${optionList(jobPaymentMethods, job.payment_method || job.expected_payment_method || "Unknown")}</select></div>
+              <div class="field"><label>NET job value</label><input id="netValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : "")}" inputmode="decimal" required></div>
+              <div class="field"><label>UK VAT 20%</label><input id="vatValue" name="vat_amount_display" value="" readonly></div>
+              <div class="field"><label>Full value inc VAT</label><input id="grossValue" name="final_value_display" value="" readonly></div>
               <div class="field"><label>Customer paid?</label><select name="customer_paid"><option value="false" ${!job.customer_paid ? "selected" : ""}>No</option><option value="true" ${job.customer_paid ? "selected" : ""}>Yes</option></select></div>
+              <div class="field"><label>Payment method 1</label><select id="paymentMethod1" name="payment_method_1" onchange="toggleClosePaymentRules()"><option value="">Select method</option>${optionList(splitPaymentMethods, job.payment_method_1 || job.payment_method || job.expected_payment_method || "")}</select></div>
+              <div class="field"><label>Payment amount 1</label><input name="payment_amount_1" value="${job.payment_amount_1 !== null && job.payment_amount_1 !== undefined ? Number(job.payment_amount_1).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : "")}" inputmode="decimal" placeholder="£"></div>
+              <div class="field"><label>Payment method 2 / split payment</label><select id="paymentMethod2" name="payment_method_2" onchange="toggleClosePaymentRules()"><option value="">No split payment</option>${optionList(splitPaymentMethods, job.payment_method_2 || "")}</select></div>
+              <div class="field"><label>Payment amount 2</label><input name="payment_amount_2" value="${job.payment_amount_2 !== null && job.payment_amount_2 !== undefined ? Number(job.payment_amount_2).toFixed(2) : ""}" inputmode="decimal" placeholder="£"></div>
               <div class="field"><label>Final status</label><select name="status">${jobStatusOptions(job.status || "completed")}</select></div>
               <div class="field"><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 18"></div>
               <div class="field"><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || "Completed")}</select></div>
+            </div>
+            <div id="invoicePhotosBox" class="panel" style="margin-top:14px; display:none; background:#0f172a;">
+              <label>The correct invoice has been used and completed, photos are also on file</label>
+              <select name="invoice_photos_confirmed"><option value="false" ${!job.invoice_photos_confirmed ? "selected" : ""}>No</option><option value="true" ${job.invoice_photos_confirmed ? "selected" : ""}>Yes</option></select>
+            </div>
+            <div id="cardRulesBox" class="panel" style="margin-top:14px; display:none; background:#0f172a;">
+              <div class="job-grid">
+                <div class="field"><label>Was this card payment AMEX?</label><select id="cardIsAmex" name="card_is_amex" onchange="toggleClosePaymentRules()"><option value="false" ${!job.card_is_amex ? "selected" : ""}>No</option><option value="true" ${job.card_is_amex ? "selected" : ""}>Yes</option></select></div>
+                <div id="amexIdBox" class="field" style="display:none;"><label>AMEX ID from client provided?</label><select name="amex_id_provided"><option value="false" ${!job.amex_id_provided ? "selected" : ""}>No</option><option value="true" ${job.amex_id_provided ? "selected" : ""}>Yes</option></select></div>
+              </div>
             </div>
             <br>
             <label>Materials used</label>
@@ -6011,6 +6091,33 @@ app.get("/jobs/:id/close", async (req, res) => {
           <button type="submit">Save close details</button>
           <a href="/jobs/${job.id}/edit" style="margin-left:12px;">Back to job</a>
         </form>
+        <script>
+          function recalcCloseValues(){
+            const netInput = document.getElementById('netValue');
+            const vatInput = document.getElementById('vatValue');
+            const grossInput = document.getElementById('grossValue');
+            const net = Number(String(netInput.value || '').replace(/[^0-9.-]/g, '')) || 0;
+            const vat = Math.round(net * 0.20 * 100) / 100;
+            const gross = Math.round((net + vat) * 100) / 100;
+            vatInput.value = '£' + vat.toFixed(2);
+            grossInput.value = '£' + gross.toFixed(2);
+          }
+          function selectedPaymentMethods(){
+            return [document.getElementById('paymentMethod1')?.value || '', document.getElementById('paymentMethod2')?.value || ''].map(v => v.toLowerCase());
+          }
+          function toggleClosePaymentRules(){
+            const methods = selectedPaymentMethods();
+            const hasCard = methods.some(v => v.includes('card'));
+            const hasBankOrCard = hasCard || methods.some(v => v.includes('bank transfer'));
+            document.getElementById('invoicePhotosBox').style.display = hasBankOrCard ? 'block' : 'none';
+            document.getElementById('cardRulesBox').style.display = hasCard ? 'block' : 'none';
+            const isAmex = document.getElementById('cardIsAmex')?.value === 'true';
+            document.getElementById('amexIdBox').style.display = hasCard && isAmex ? 'block' : 'none';
+          }
+          document.getElementById('netValue').addEventListener('input', recalcCloseValues);
+          recalcCloseValues();
+          toggleClosePaymentRules();
+        </script>
       </body>
       </html>
     `);
@@ -6025,9 +6132,27 @@ app.post("/jobs/:id/close", async (req, res) => {
     const id = Number(req.params.id);
     const body = req.body;
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    const netValue = parseMoneyInput(body.net_value);
+    const vatAmount = calculateVatFromNet(netValue);
+    const finalValue = calculateGrossFromNet(netValue);
+    const includesCard = closePaymentIncludesCard(body);
+    const isAmex = includesCard && body.card_is_amex === "true";
+    const amexIdProvided = isAmex && body.amex_id_provided === "true";
+    if (isAmex && !amexIdProvided) {
+      return res.status(400).send("AMEX payment selected. Please confirm that ID from the client has been provided.");
+    }
     const closeValues = {
-      final_value: parseMoneyInput(body.final_value),
-      payment_method: body.payment_method || "Unknown",
+      net_value: netValue,
+      vat_amount: vatAmount,
+      final_value: finalValue,
+      payment_method: buildSplitPaymentSummary(body),
+      payment_method_1: body.payment_method_1 || "",
+      payment_amount_1: parseMoneyInput(body.payment_amount_1),
+      payment_method_2: body.payment_method_2 || "",
+      payment_amount_2: parseMoneyInput(body.payment_amount_2),
+      invoice_photos_confirmed: closePaymentRequiresInvoicePhotos(body) ? body.invoice_photos_confirmed === "true" : false,
+      card_is_amex: isAmex,
+      amex_id_provided: amexIdProvided,
       customer_paid: body.customer_paid === "true",
       materials_used: body.materials_used,
       materials_cost: parseMoneyInput(body.materials_cost),
@@ -6038,22 +6163,40 @@ app.post("/jobs/:id/close", async (req, res) => {
     };
     await pool.query(`
       UPDATE jobs SET
-        final_value=$1,
-        payment_method=$2,
-        customer_paid=$3,
-        materials_used=$4,
-        materials_cost=$5,
-        outcome=$6,
-        tech_notes=$7,
-        close_notes=$8,
-        status=$9,
-        closed_by=$10,
+        net_value=$1,
+        vat_amount=$2,
+        final_value=$3,
+        payment_method=$4,
+        payment_method_1=$5,
+        payment_amount_1=$6,
+        payment_method_2=$7,
+        payment_amount_2=$8,
+        invoice_photos_confirmed=$9,
+        card_is_amex=$10,
+        amex_id_provided=$11,
+        customer_paid=$12,
+        materials_used=$13,
+        materials_cost=$14,
+        outcome=$15,
+        tech_notes=$16,
+        close_notes=$17,
+        status=$18,
+        closed_by=$19,
         closed_at=COALESCE(closed_at, NOW()),
         updated_at=NOW()
-      WHERE id=$11
+      WHERE id=$20
     `, [
+      closeValues.net_value,
+      closeValues.vat_amount,
       closeValues.final_value,
       closeValues.payment_method,
+      closeValues.payment_method_1,
+      closeValues.payment_amount_1,
+      closeValues.payment_method_2,
+      closeValues.payment_amount_2,
+      closeValues.invoice_photos_confirmed,
+      closeValues.card_is_amex,
+      closeValues.amex_id_provided,
       closeValues.customer_paid,
       closeValues.materials_used,
       closeValues.materials_cost,
@@ -6877,8 +7020,17 @@ async function ensureTechnicianWorkspaceSchema() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS net_value NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS vat_amount NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_value NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method_1 TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_amount_1 NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_method_2 TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_amount_2 NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS invoice_photos_confirmed BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS card_is_amex BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS amex_id_provided BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_paid BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_used TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS materials_cost NUMERIC(10,2);`);
@@ -7050,7 +7202,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
           <p class="job-sub">${escapeHtml(techJobAddress(job) || '')}</p>
           <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">
             <div class="field-grid">
-              <div><label>Final job value</label><input name="final_value" value="${job.final_value || ''}" placeholder="£"></div>
+              <div><label>NET job value</label><input name="net_value" value="${job.net_value || ''}" placeholder="£ ex VAT"></div>
               <div><label>Payment method</label><select name="payment_method">${techPaymentOptions(job.payment_method || '')}</select></div>
               <div><label>Customer paid?</label><select name="customer_paid"><option value="yes" ${job.customer_paid ? 'selected' : ''}>Yes</option><option value="no" ${!job.customer_paid ? 'selected' : ''}>No</option></select></div>
               <div><label>New status</label><select name="status">
@@ -7084,12 +7236,16 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
 
-    const finalValue = parseMoneyInput(req.body.final_value);
+    const netValue = parseMoneyInput(req.body.net_value || req.body.final_value);
+    const vatAmount = calculateVatFromNet(netValue);
+    const finalValue = calculateGrossFromNet(netValue);
     const materialsCost = parseMoneyInput(req.body.materials_cost);
     const allowedStatuses = ['closed', 'awaiting_payment', 'invoiced_account'];
     const newStatus = allowedStatuses.includes(req.body.status) ? req.body.status : 'closed';
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
     const techCloseValues = {
+      net_value: netValue,
+      vat_amount: vatAmount,
       final_value: finalValue,
       payment_method: req.body.payment_method || '',
       customer_paid: req.body.customer_paid === 'yes',
@@ -7102,22 +7258,26 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
 
     await pool.query(`
       UPDATE jobs
-      SET final_value = $1,
-          payment_method = $2,
-          customer_paid = $3,
-          materials_used = $4,
-          materials_cost = $5,
-          outcome = $6,
-          tech_notes = $7,
-          status = $8,
-          closed_by = $9,
+      SET net_value = $1,
+          vat_amount = $2,
+          final_value = $3,
+          payment_method = $4,
+          customer_paid = $5,
+          materials_used = $6,
+          materials_cost = $7,
+          outcome = $8,
+          tech_notes = $9,
+          status = $10,
+          closed_by = $11,
           closed_at = COALESCE(closed_at, NOW()),
           tech_updated_at = NOW(),
-          tech_close_submitted_by = $9,
+          tech_close_submitted_by = $11,
           updated_at = NOW()
-      WHERE id = $10
-        AND (assigned_technician_id = $11 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($12)))
+      WHERE id = $12
+        AND (assigned_technician_id = $13 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($14)))
     `, [
+      techCloseValues.net_value,
+      techCloseValues.vat_amount,
       techCloseValues.final_value,
       techCloseValues.payment_method,
       techCloseValues.customer_paid,
