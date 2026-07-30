@@ -772,6 +772,36 @@ function datetimeLocalValue(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function scheduledDateValue(value) {
+  const local = datetimeLocalValue(value);
+  return local ? local.slice(0, 10) : "";
+}
+
+function scheduledTimeValue(value) {
+  const local = datetimeLocalValue(value);
+  return local ? local.slice(11, 16) : "";
+}
+
+function quarterHourTimeOptions(selectedTime = "") {
+  const selected = String(selectedTime || "").trim();
+  const opts = [`<option value="">Select time</option>`];
+  for (let hour = 0; hour < 24; hour += 1) {
+    for (const minute of [0, 15, 30, 45]) {
+      const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      const isSelected = value === selected ? "selected" : "";
+      opts.push(`<option value="${value}" ${isSelected}>${value}</option>`);
+    }
+  }
+  return opts.join("");
+}
+
+function parseScheduledTimestamp(body) {
+  const date = String(body.scheduled_date || "").trim();
+  const time = String(body.scheduled_time || "").trim();
+  if (date && time) return `${date} ${time}`;
+  return parseOptionalTimestamp(body.scheduled_at);
+}
+
 function parseOptionalTimestamp(value) {
   if (!value || !String(value).trim()) return null;
   return String(value).trim().replace("T", " ");
@@ -5063,7 +5093,11 @@ app.get("/jobs/new", async (req, res) => {
                     <input id="eta_other" name="eta_other" placeholder="Other ETA" style="display:none; margin-top:8px;">
                     <div id="scheduled_box" style="display:none; margin-top:10px;">
                       <label>Scheduled date and time</label>
-                      <input type="datetime-local" name="scheduled_at" step="900">
+                      <div class="form-grid-2" style="margin-top:6px;">
+                        <input type="date" id="scheduled_date" name="scheduled_date">
+                        <select id="scheduled_time" name="scheduled_time">${quarterHourTimeOptions("")}</select>
+                      </div>
+                      <input type="hidden" id="scheduled_at" name="scheduled_at">
                     </div>
                   </div>
                 </div>
@@ -5175,10 +5209,19 @@ app.get("/jobs/new", async (req, res) => {
             if (etaOther) etaOther.style.display = etaSelect.value === "Other" ? "block" : "none";
             if (scheduledBox) scheduledBox.style.display = etaSelect.value === "Scheduled" ? "grid" : "none";
           }
+          function combineScheduledDateTime() {
+            const scheduledDate = document.getElementById("scheduled_date");
+            const scheduledTime = document.getElementById("scheduled_time");
+            const scheduledAt = document.getElementById("scheduled_at");
+            if (!scheduledAt) return;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+          }
           if (etaSelect) {
             etaSelect.addEventListener("change", toggleEtaFields);
             toggleEtaFields();
           }
+          const createOrderForm = document.querySelector('form[action="/jobs/create"]');
+          if (createOrderForm) createOrderForm.addEventListener("submit", combineScheduledDateTime);
         </script>
       </body>
       </html>
@@ -5236,7 +5279,7 @@ app.post("/jobs/create", async (req, res) => {
       parseOptionalInt(body.account_template_id),
       parseOptionalInt(body.assigned_technician_id),
       normaliseEta(body),
-      normaliseEta(body) === "Scheduled" ? parseOptionalTimestamp(body.scheduled_at) : null,
+      normaliseEta(body) === "Scheduled" ? parseScheduledTimestamp(body) : null,
       currentAgentName(req),
       body.dispatcher_notes,
       body.status || "open"
@@ -5485,7 +5528,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
                     <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><input type="datetime-local" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}" step="900"></div></div>
+                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px;"><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}"><select id="edit_scheduled_time" name="scheduled_time">${quarterHourTimeOptions(scheduledTimeValue(job.scheduled_at))}</select></div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
                     <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
@@ -5559,10 +5602,19 @@ app.get("/jobs/:id/edit", async (req, res) => {
             if (editEtaOther) editEtaOther.style.display = editEtaSelect.value === "Other" ? "block" : "none";
             if (editScheduledBox) editScheduledBox.style.display = editEtaSelect.value === "Scheduled" ? "block" : "none";
           }
+          function combineEditScheduledDateTime() {
+            const scheduledDate = document.getElementById("edit_scheduled_date");
+            const scheduledTime = document.getElementById("edit_scheduled_time");
+            const scheduledAt = document.getElementById("edit_scheduled_at");
+            if (!scheduledAt) return;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+          }
           if (editEtaSelect) {
             editEtaSelect.addEventListener("change", toggleEditEtaFields);
             toggleEditEtaFields();
           }
+          const editOrderForm = document.querySelector('form[action="/jobs/${job.id}/update"]');
+          if (editOrderForm) editOrderForm.addEventListener("submit", combineEditScheduledDateTime);
         </script>
       </body>
       </html>
@@ -5643,7 +5695,7 @@ app.post("/jobs/:id/update", async (req, res) => {
       parseOptionalInt(body.account_template_id),
       parseOptionalInt(body.assigned_technician_id),
       normaliseEta(body),
-      normaliseEta(body) === "Scheduled" ? parseOptionalTimestamp(body.scheduled_at) : null,
+      normaliseEta(body) === "Scheduled" ? parseScheduledTimestamp(body) : null,
       body.dispatcher_notes,
       body.status || "open",
       id
