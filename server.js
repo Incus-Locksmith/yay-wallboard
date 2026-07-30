@@ -1324,6 +1324,8 @@ function sharedStyles() {
       min-height: 44px;
     }
     .action-button.red { background: var(--brand-red); }
+    .action-button.blue { background: #2563eb; }
+    .action-button.orange { background: #f97316; color: white; }
     .action-button.amber { background: var(--brand-amber-dark); }
     .action-button.dark { background: var(--charcoal); }
 
@@ -5469,9 +5471,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
             </div>
             <div class="job-control-actions">
               <a class="action-button" href="#appointment-card">Edit appointment</a>
-              <a class="action-button" href="/jobs/${job.id}/summary">Technician summary</a>
-              <a class="action-button amber" href="/jobs/${job.id}/close">Close / payment</a>
-              <a class="action-button" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
+              <a class="action-button blue" href="/jobs/${job.id}/summary">Technician summary</a>
+              <a class="action-button red" href="/jobs/${job.id}/close">Close / payment</a>
+              <a class="action-button orange" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
               <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
             </div>
           </div>
@@ -5581,7 +5583,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                   </div>
                 </form>
                 <div class="page-actions">
-                  <a class="action-button amber" href="/jobs/${job.id}/close">Close job</a>
+                  <a class="action-button red" href="/jobs/${job.id}/close">Close job</a>
                   <a class="action-button dark" href="/dispatch?postcode=${encodeURIComponent(job.postcode || "")}">Open map</a>
                   ${techWorkspaceUrl ? `<a class="action-button" href="${escapeHtml(techWorkspaceUrl)}" target="_blank" rel="noopener noreferrer">Tech workspace</a>` : ""}
                 </div>
@@ -6748,7 +6750,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
           <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/onsite">
             <button class="button red" type="submit">On site</button>
           </form>
-          <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
+          <a class="button red" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
         </div>
       </div>
     `).join('');
@@ -6856,7 +6858,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <div class="full"><label>Technician notes</label><textarea name="tech_notes" placeholder="Any notes for the office">${escapeHtml(job.tech_notes || '')}</textarea></div>
             </div>
             <br>
-            <button class="button green" type="submit">Submit close job</button>
+            <button class="button red" type="submit">Submit close job</button>
           </form>
         </div>
       </div>
