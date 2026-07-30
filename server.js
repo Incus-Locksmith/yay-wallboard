@@ -4540,7 +4540,7 @@ app.get("/reports/management", async (req, res) => {
         <td>${escapeHtml(job.customer_name || "-")}</td>
         <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
         <td>${escapeHtml(job.source_campaign || "Unknown")}</td>
-        <td><span class="pill ${statusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span></td>
+        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span></td>
         <td>${money(job.final_value || 0)}</td>
         <td>${money(job.materials_cost || 0)}</td>
         <td>${formatDateTime(job.closed_at || job.updated_at)}</td>
