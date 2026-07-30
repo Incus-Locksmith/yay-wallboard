@@ -7038,10 +7038,12 @@ function techPaymentOptions(selected = '') {
   return optionList(['Cash', 'Card', 'BACS', 'Cheque', 'Bank transfer', 'Account', 'Other'], selected);
 }
 
-function technicianWorkspaceTabs(token, active) {
+function technicianWorkspaceTabs(token, active, disputeCount = 0) {
+  const disputeLabel = disputeCount > 0 ? `Disputes (${disputeCount})` : "Disputes";
   return `
     <div class="tabs">
       <a class="tab ${active === 'jobs' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}">Active jobs</a>
+      <a class="tab ${active === 'disputes' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/disputes">${escapeHtml(disputeLabel)}</a>
       <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
       <a class="tab" href="/tech-checkin/${escapeHtml(token)}">Status check-in</a>
     </div>
@@ -7073,11 +7075,64 @@ async function ensureTechnicianWorkspaceSchema() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_notes TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS disputes (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER,
+      customer_name TEXT,
+      customer_phone TEXT,
+      technician_id INTEGER,
+      complaint_type TEXT,
+      disputed_amount NUMERIC(10,2),
+      refund_amount NUMERIC(10,2),
+      chargeback BOOLEAN DEFAULT FALSE,
+      status TEXT DEFAULT 'open_dispute',
+      complaint_summary TEXT,
+      resolution_notes TEXT,
+      created_by TEXT,
+      updated_by TEXT,
+      resolved_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 }
 
 async function getTechnicianByToken(token) {
   const result = await pool.query(`SELECT * FROM technicians WHERE checkin_token = $1 AND active = TRUE`, [token]);
   return result.rows[0];
+}
+
+async function getOpenDisputesForTechnician(tech) {
+  const result = await pool.query(`
+    SELECT
+      d.*,
+      j.job_number,
+      j.postcode,
+      j.job_type,
+      j.customer_name AS job_customer_name,
+      j.customer_phone AS job_customer_phone,
+      j.address_line_1,
+      j.address_line_2,
+      j.address_line_3,
+      j.town,
+      j.county,
+      j.status AS job_status,
+      j.final_value,
+      j.materials_used,
+      j.materials_cost
+    FROM disputes d
+    LEFT JOIN jobs j ON j.id = d.job_id
+    WHERE (
+      d.technician_id = $1
+      OR d.technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))
+      OR j.assigned_technician_id = $1
+      OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))
+    )
+    AND COALESCE(d.status, 'open_dispute') NOT IN ('resolved', 'rejected', 'refund_processed')
+    ORDER BY d.updated_at DESC, d.created_at DESC
+  `, [tech.id, tech.name]);
+  return result.rows;
 }
 
 app.get('/tech-workspace/:token', async (req, res) => {
@@ -7113,10 +7168,20 @@ app.get('/tech-workspace/:token', async (req, res) => {
         j.created_at DESC
     `, values)).rows;
 
+    const openDisputes = await getOpenDisputesForTechnician(tech);
+    const disputeNotice = openDisputes.length ? `
+      <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
+        <h2 style="margin-top:0;">Dispute alert</h2>
+        <p><strong>${openDisputes.length} open dispute${openDisputes.length === 1 ? '' : 's'}</strong> currently linked to your name. Please review before taking further related work.</p>
+        <a class="button orange" href="/tech-workspace/${escapeHtml(token)}/disputes">View disputes</a>
+      </div>
+    ` : "";
+
     const today = new Date();
     const greeting = today.getHours() < 12 ? 'Good morning' : today.getHours() < 17 ? 'Good afternoon' : 'Good evening';
     const briefingLines = [
       `<div class="brief-line red"><strong>${jobs.length} active job${jobs.length === 1 ? '' : 's'}</strong> assigned to you.</div>`,
+      openDisputes.length ? `<div class="brief-line red"><strong>${openDisputes.length} open dispute${openDisputes.length === 1 ? '' : 's'}</strong> linked to your name.</div>` : "",
       `<div class="brief-line">Remember to press <strong>On site</strong> when you arrive.</div>`,
       `<div class="brief-line green">Close jobs with final value, payment method and materials used.</div>`
     ].join('');
@@ -7161,7 +7226,8 @@ app.get('/tech-workspace/:token', async (req, res) => {
         <div class="live">● ${escapeHtml(tech.status || 'Available')}</div>
       </div>
       <div class="wrap">
-        ${technicianWorkspaceTabs(token, 'jobs')}
+        ${technicianWorkspaceTabs(token, 'jobs', openDisputes.length)}
+        ${disputeNotice}
         <h1>Your active jobs</h1>
         <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}">
           <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Postcode">
@@ -7223,6 +7289,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
     `, [req.params.id, tech.id, tech.name]);
     const job = result.rows[0];
     if (!job) return res.status(404).send(technicianPortalShell('Job not found', `<div class="wrap"><div class="empty">Job not found for this technician.</div></div>`));
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
 
     const body = `
       <div class="topbar">
@@ -7230,7 +7297,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
         <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to jobs</a>
       </div>
       <div class="wrap">
-        ${technicianWorkspaceTabs(token, 'jobs')}
+        ${technicianWorkspaceTabs(token, 'jobs', openDisputeCount)}
         <div class="panel">
           <h1>Close job</h1>
           <p class="job-sub"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> · ${escapeHtml(job.job_type || '')} · ${escapeHtml(job.customer_name || '')}</p>
@@ -7350,6 +7417,7 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
 
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
     const period = req.query.period || 'today';
     let start = new Date();
     let end = new Date();
@@ -7406,7 +7474,7 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
         <div class="live">● Summary</div>
       </div>
       <div class="wrap">
-        ${technicianWorkspaceTabs(token, 'summary')}
+        ${technicianWorkspaceTabs(token, 'summary', openDisputeCount)}
         <h1>Income summary</h1>
         <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}/summary">
           <select name="period">
@@ -7440,6 +7508,61 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
   } catch (error) {
     console.error('Technician summary error:', error);
     res.status(500).send('Technician summary error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/disputes', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+
+    const disputes = await getOpenDisputesForTechnician(tech);
+    const rows = disputes.map(dispute => `
+      <div class="job-card" style="border-left:6px solid #f97316;">
+        <div class="job-head">
+          <div>
+            <h2 class="job-title">${escapeHtml(dispute.postcode || dispute.job_number || `Dispute ${dispute.id}`)}</h2>
+            <div class="job-sub">
+              <strong>Status:</strong> ${escapeHtml(disputeStatusLabel(dispute.status))}<br>
+              <strong>Customer:</strong> ${escapeHtml(dispute.customer_name || dispute.job_customer_name || 'Customer not set')} ${dispute.customer_phone || dispute.job_customer_phone ? `· ${escapeHtml(dispute.customer_phone || dispute.job_customer_phone || '')}` : ''}<br>
+              <strong>Job:</strong> ${escapeHtml(dispute.job_type || '')} ${dispute.job_number ? `· ${escapeHtml(dispute.job_number)}` : ''}<br>
+              ${techJobAddress(dispute) ? `<strong>Address:</strong> ${escapeHtml(techJobAddress(dispute))}<br>` : ''}
+              ${dispute.complaint_type ? `<strong>Type:</strong> ${escapeHtml(dispute.complaint_type)}<br>` : ''}
+              ${dispute.disputed_amount ? `<strong>Disputed amount:</strong> ${money(dispute.disputed_amount)}<br>` : ''}
+              ${dispute.refund_amount ? `<strong>Refund logged:</strong> ${money(dispute.refund_amount)}<br>` : ''}
+              ${dispute.chargeback ? `<strong>Chargeback:</strong> Yes<br>` : ''}
+              <strong>Updated:</strong> ${formatDateTime(dispute.updated_at || dispute.created_at)}
+            </div>
+          </div>
+          <span class="pill ${disputeStatusClass(dispute.status)}">${escapeHtml(disputeStatusLabel(dispute.status))}</span>
+        </div>
+        ${dispute.complaint_summary ? `<div class="panel" style="margin-top:12px;"><strong>Complaint summary</strong><br>${escapeHtml(dispute.complaint_summary).replaceAll('\n', '<br>')}</div>` : ''}
+        ${dispute.resolution_notes ? `<div class="panel" style="margin-top:12px;"><strong>Office notes</strong><br>${escapeHtml(dispute.resolution_notes).replaceAll('\n', '<br>')}</div>` : ''}
+      </div>
+    `).join('');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Disputes</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'disputes', disputes.length)}
+        <h1>Disputes linked to your name</h1>
+        <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
+          <strong>${disputes.length} open dispute${disputes.length === 1 ? '' : 's'}</strong><br>
+          <span class="muted">These are dispute records assigned directly to you or linked to jobs currently under your technician name. Resolved and rejected disputes are hidden from this technician view.</span>
+        </div>
+        ${rows || `<div class="empty"><strong>No open disputes linked to ${escapeHtml(tech.name)}.</strong><br><br>Resolved, rejected and processed refund disputes do not show here.</div>`}
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Technician Disputes', body));
+  } catch (error) {
+    console.error('Technician disputes error:', error);
+    res.status(500).send('Technician disputes error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
   }
 });
 
