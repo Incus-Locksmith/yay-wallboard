@@ -596,6 +596,14 @@ const jobStatuses = [
   { value: "cancelled_onsite", label: "Cancelled onsite" }
 ];
 
+const closingJobStatuses = [
+  { value: "fully_paid", label: "Fully paid" },
+  { value: "sent_to_pm", label: "Sent to PM" },
+  { value: "awaiting_balance", label: "Awaiting balance" },
+  { value: "awaiting_payment", label: "Awaiting payment" },
+  { value: "disputed", label: "Disputed" }
+];
+
 const legacyJobStatusLabels = {
   completed: "Completed",
   fully_paid_private: "Fully paid (private)"
@@ -772,7 +780,7 @@ function optionList(items, selectedValue = "") {
 }
 
 function jobStatusLabel(status) {
-  const found = jobStatuses.find(item => item.value === status);
+  const found = jobStatuses.find(item => item.value === status) || closingJobStatuses.find(item => item.value === status);
   if (found) return found.label;
   if (legacyJobStatusLabels[status]) return legacyJobStatusLabels[status];
   return status || "Job awaiting to be assigned";
@@ -785,6 +793,23 @@ function jobStatusClass(status) {
 
 function jobStatusOptions(selectedStatus = "open") {
   return optionList(jobStatuses, selectedStatus);
+}
+
+function closingJobStatusOptions(selectedStatus = "fully_paid") {
+  const selected = closingJobStatuses.some(item => item.value === selectedStatus) ? selectedStatus : "fully_paid";
+  return optionList(closingJobStatuses, selected);
+}
+
+function literalClosingStatusOptions(selectedStatus = "fully_paid") {
+  const selected = closingJobStatuses.some(item => item.value === selectedStatus) ? selectedStatus : "fully_paid";
+  const rows = [
+    ["fully_paid", "Fully paid"],
+    ["sent_to_pm", "Sent to PM"],
+    ["awaiting_balance", "Awaiting balance"],
+    ["awaiting_payment", "Awaiting payment"],
+    ["disputed", "Disputed"]
+  ];
+  return rows.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("");
 }
 
 function etaSelectOptions(selectedEta = "") {
@@ -1625,9 +1650,10 @@ function sharedStyles() {
     .job-open { background: #2563eb; color: white; }
     .job-assigned { background: #16a34a; color: white; }
     .job-scheduled { background: #7c3aed; color: white; }
-    .job-closed { background: var(--brand-red); color: white; }
-    .job-awaiting-payment { background: #f59e0b; color: black; }
-    .job-invoiced-account { background: #ec4899; color: white; }
+    .job-closed, .job-fully-paid { background: var(--brand-red); color: white; }
+    .job-awaiting-payment, .job-awaiting-balance { background: #f59e0b; color: black; }
+    .job-invoiced-account, .job-sent-to-pm { background: #ec4899; color: white; }
+    .job-disputed { background: #f97316; color: white; }
     .job-cancelled-before-arrival { background: #6b7280; color: white; }
     .job-cancelled-onsite { background: #4b5563; color: white; }
     .quote-quote-requested { background: #dbeafe; color: #1d4ed8; }
@@ -4602,6 +4628,8 @@ app.get("/jobs", async (req, res) => {
 
     if (selectedStatus === "cancelled") {
       where.push(`j.status IN ('cancelled_before_arrival', 'cancelled_onsite')`);
+    } else if (selectedStatus === "closed_today") {
+      where.push(`j.closed_at IS NOT NULL AND DATE(j.closed_at) = CURRENT_DATE`);
     } else if (selectedStatus && selectedStatus !== "all" && selectedStatus !== "active") {
       params.push(selectedStatus);
       where.push(`j.status = $${params.length}`);
@@ -4658,13 +4686,17 @@ app.get("/jobs", async (req, res) => {
             WHEN 'awaiting_payment' THEN 3
             WHEN 'invoiced_account' THEN 4
             WHEN 'closed' THEN 5
+            WHEN 'fully_paid' THEN 5
+            WHEN 'sent_to_pm' THEN 5
+            WHEN 'awaiting_balance' THEN 5
+            WHEN 'disputed' THEN 5
             ELSE 9
           END,
           j.created_at DESC
         LIMIT 300
       `, params),
       pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`),
-      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE status = 'closed' AND DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE`),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE closed_at IS NOT NULL AND DATE(closed_at) = CURRENT_DATE`),
       pool.query(`SELECT id, name, status, priority, location_checked_in_at FROM technicians WHERE active = TRUE ORDER BY name ASC`),
       pool.query(`SELECT DISTINCT COALESCE(source_campaign, '') AS campaign FROM jobs WHERE COALESCE(source_campaign, '') <> '' ORDER BY campaign ASC LIMIT 80`),
       pool.query(`
@@ -4673,7 +4705,7 @@ app.get("/jobs", async (req, res) => {
           COALESCE(SUM(materials_cost), 0) AS materials,
           COALESCE(SUM(final_value) FILTER (WHERE status = 'awaiting_payment'), 0) AS awaiting_payment,
           COUNT(*) FILTER (WHERE DATE(created_at) = CURRENT_DATE)::int AS created_today,
-          COUNT(*) FILTER (WHERE status = 'closed' AND DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE)::int AS closed_today
+          COUNT(*) FILTER (WHERE closed_at IS NOT NULL AND DATE(closed_at) = CURRENT_DATE)::int AS closed_today
         FROM jobs
         WHERE DATE(COALESCE(closed_at, updated_at, created_at)) = CURRENT_DATE
            OR DATE(created_at) = CURRENT_DATE
@@ -4695,6 +4727,7 @@ app.get("/jobs", async (req, res) => {
     const statusFilterOptions = [
       { value: "active", label: `Active orders (${activeCount})` },
       { value: "all", label: "All orders" },
+      { value: "closed_today", label: `Closed today (${closedToday})` },
       { value: "cancelled", label: `Total cancelled (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
       ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
     ];
@@ -4724,7 +4757,7 @@ app.get("/jobs", async (req, res) => {
       { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green", hrefStatus: "assigned" },
       { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
-      { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed" },
+      { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed_today" },
       { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" }
     ];
 
@@ -4861,9 +4894,10 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-open { background: #2563eb; }
           .feed-dot.job-assigned { background: #16a34a; }
           .feed-dot.job-scheduled { background: #7c3aed; }
-          .feed-dot.job-awaiting-payment { background: #f59e0b; }
-          .feed-dot.job-invoiced-account { background: #db2777; }
-          .feed-dot.job-closed { background: #dc2626; }
+          .feed-dot.job-awaiting-payment, .feed-dot.job-awaiting-balance { background: #f59e0b; }
+          .feed-dot.job-invoiced-account, .feed-dot.job-sent-to-pm { background: #db2777; }
+          .feed-dot.job-closed, .feed-dot.job-fully-paid { background: #dc2626; }
+          .feed-dot.job-disputed { background: #f97316; }
           .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
           .feed-dot.job-cancelled-onsite { background: #4b5563; }
           @media (max-width: 1500px) {
@@ -6054,7 +6088,7 @@ app.get("/jobs/:id/close", async (req, res) => {
         <form method="POST" action="/jobs/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
           <div class="panel">
             <h2>Close job / payment</h2>
-            <p class="muted">Enter the NET value. VAT is calculated automatically at 20%, and the full value is saved against the job.</p>
+            <p class="muted">Enter the NET value. VAT is calculated automatically at 20%, and the full value is saved against the job. Cancelled jobs should be cancelled from Quick Actions; they do not need to be closed here.</p>
             <div class="job-grid">
               <div class="field"><label>NET job value</label><input id="netValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : "")}" inputmode="decimal" required></div>
               <div class="field"><label>UK VAT 20%</label><input id="vatValue" name="vat_amount_display" value="" readonly></div>
@@ -6064,7 +6098,7 @@ app.get("/jobs/:id/close", async (req, res) => {
               <div class="field"><label>Payment amount 1</label><input name="payment_amount_1" value="${job.payment_amount_1 !== null && job.payment_amount_1 !== undefined ? Number(job.payment_amount_1).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : "")}" inputmode="decimal" placeholder="£"></div>
               <div class="field"><label>Payment method 2 / split payment</label><select id="paymentMethod2" name="payment_method_2" onchange="toggleClosePaymentRules()"><option value="">No split payment</option>${optionList(splitPaymentMethods, job.payment_method_2 || "")}</select></div>
               <div class="field"><label>Payment amount 2</label><input name="payment_amount_2" value="${job.payment_amount_2 !== null && job.payment_amount_2 !== undefined ? Number(job.payment_amount_2).toFixed(2) : ""}" inputmode="decimal" placeholder="£"></div>
-              <div class="field"><label>Final status</label><select name="status">${jobStatusOptions(job.status || "completed")}</select></div>
+              <div class="field"><label>Final close status</label><select name="status">${literalClosingStatusOptions(job.status || (job.customer_paid ? "fully_paid" : "awaiting_payment"))}</select><small class="muted">Closing outcomes only. Cancelled jobs should be cancelled from Quick Actions, not closed here.</small></div>
               <div class="field"><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 18"></div>
               <div class="field"><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || "Completed")}</select></div>
             </div>
@@ -6159,7 +6193,7 @@ app.post("/jobs/:id/close", async (req, res) => {
       outcome: body.outcome,
       tech_notes: body.tech_notes,
       close_notes: body.close_notes,
-      status: body.status || "completed"
+      status: body.status || "fully_paid"
     };
     await pool.query(`
       UPDATE jobs SET
@@ -6953,9 +6987,10 @@ function technicianWorkspaceStyles() {
     .job-open { background:var(--blue); color:white; }
     .job-assigned { background:var(--green); color:white; }
     .job-scheduled { background:#7c3aed; color:white; }
-    .job-closed { background:var(--red); color:white; }
-    .job-awaiting-payment { background:var(--amber); color:#111827; }
-    .job-invoiced-account { background:var(--pink); color:white; }
+    .job-closed, .job-fully-paid { background:var(--red); color:white; }
+    .job-awaiting-payment, .job-awaiting-balance { background:var(--amber); color:#111827; }
+    .job-invoiced-account, .job-sent-to-pm { background:var(--pink); color:white; }
+    .job-disputed { background:#f97316; color:white; }
     .job-cancelled-before-arrival { background:#6b7280; color:white; }
     .job-cancelled-onsite { background:#4b5563; color:white; }
     .job-completed, .job-fully-paid-private { background:#64748b; color:white; }
