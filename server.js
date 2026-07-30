@@ -4383,7 +4383,9 @@ app.get("/jobs", async (req, res) => {
     const where = [];
     const params = [];
 
-    if (selectedStatus && selectedStatus !== "all" && selectedStatus !== "active") {
+    if (selectedStatus === "cancelled") {
+      where.push(`j.status IN ('cancelled_before_arrival', 'cancelled_onsite')`);
+    } else if (selectedStatus && selectedStatus !== "all" && selectedStatus !== "active") {
       params.push(selectedStatus);
       where.push(`j.status = $${params.length}`);
     } else if (selectedStatus === "active") {
@@ -4476,6 +4478,7 @@ app.get("/jobs", async (req, res) => {
     const statusFilterOptions = [
       { value: "active", label: `Active orders (${activeCount})` },
       { value: "all", label: "All orders" },
+      { value: "cancelled", label: `Total cancelled (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
       ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
     ];
 
@@ -4497,12 +4500,15 @@ app.get("/jobs", async (req, res) => {
       { value: "month", label: "This month" }
     ];
 
+    const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
+
     const statusCards = [
-      { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue" },
-      { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green" },
-      { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber" },
-      { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink" },
-      { label: "Closed today", value: closedToday, className: "board-red" }
+      { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue", hrefStatus: "open" },
+      { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green", hrefStatus: "assigned" },
+      { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
+      { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
+      { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed" },
+      { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" }
     ];
 
     function technicianBadgeClass(status) {
@@ -4553,7 +4559,7 @@ app.get("/jobs", async (req, res) => {
     }).join("");
 
     const cardHtml = statusCards.map(card => `
-      <a class="board-card ${card.className}" href="/jobs?status=${encodeURIComponent(card.label === "Closed today" ? "closed" : card.label === "Job awaiting to be assigned" ? "open" : card.label === "Invoice sent to Acc Dept" ? "invoiced_account" : card.label === "Awaiting payment" ? "awaiting_payment" : "assigned")}">
+      <a class="board-card ${card.className}" href="/jobs?status=${encodeURIComponent(card.hrefStatus)}">
         <div class="board-card-label">${escapeHtml(card.label)}</div>
         <div class="board-card-number">${card.value}</div>
       </a>
@@ -4584,7 +4590,7 @@ app.get("/jobs", async (req, res) => {
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .status-card-grid {
             display: grid;
-            grid-template-columns: repeat(5, minmax(175px, 1fr));
+            grid-template-columns: repeat(6, minmax(160px, 1fr));
             gap: 18px;
             margin: 22px 0 20px;
           }
@@ -4598,6 +4604,7 @@ app.get("/jobs", async (req, res) => {
           .board-red:before, .board-red:after { background: #dc2626; }
           .board-amber:before, .board-amber:after { background: #f59e0b; }
           .board-pink:before, .board-pink:after { background: #db2777; }
+          .board-slate:before, .board-slate:after { background: #475569; }
           .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px 20px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
           .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
