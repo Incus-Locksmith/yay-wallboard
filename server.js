@@ -5721,7 +5721,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
         <div class="job-control-shell">
           <div class="job-control-header">
             <div class="job-control-title">
-              <h1>${escapeHtml(job.job_number || jobNumber(job.id))} Control Panel</h1>
+              <h1>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""} Control Panel</h1>
               <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
               <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>${job.urgency ? `<span class="pill stage-draft">${escapeHtml(job.urgency)}</span>` : ""}</div>
             </div>
