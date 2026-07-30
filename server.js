@@ -589,6 +589,7 @@ function quoteAddressPlain(quote) {
 const jobStatuses = [
   { value: "open", label: "Job awaiting to be assigned" },
   { value: "assigned", label: "Assigned" },
+  { value: "scheduled", label: "Scheduled" },
   { value: "closed", label: "Closed" },
   { value: "awaiting_payment", label: "Awaiting payment" },
   { value: "invoiced_account", label: "Invoice sent to Acc Dept" },
@@ -601,7 +602,7 @@ const legacyJobStatusLabels = {
   fully_paid_private: "Fully paid (private)"
 };
 
-const activeJobStatuses = ["open", "assigned", "awaiting_payment"];
+const activeJobStatuses = ["open", "assigned", "scheduled", "awaiting_payment"];
 
 const jobTypes = [
   "BAILIFF (COURT ORDERED)",
@@ -621,6 +622,7 @@ const jobTypes = [
 ];
 
 const jobUrgencies = ["Normal", "Urgent", "Emergency"];
+const etaOptions = ["15-20 mins", "25-30 mins", "< 60 mins", "Other"];
 const jobPaymentMethods = ["Unknown", "Cash", "Card", "Bank transfer", "Account"];
 const jobOutcomes = ["Completed", "Cancelled", "No answer", "Customer declined", "Follow-up needed", "Other"];
 
@@ -747,6 +749,37 @@ function jobStatusClass(status) {
 
 function jobStatusOptions(selectedStatus = "open") {
   return optionList(jobStatuses, selectedStatus);
+}
+
+function etaSelectOptions(selectedEta = "") {
+  const value = String(selectedEta || "").trim();
+  const options = etaOptions.slice();
+  if (value && !options.includes(value)) options.splice(options.length - 1, 0, value);
+  return optionList(options, value);
+}
+
+function normaliseEta(body) {
+  const selected = String(body.eta || "").trim();
+  const other = String(body.eta_other || "").trim();
+  if (selected === "Other") return other || "Other";
+  return selected;
+}
+
+function datetimeLocalValue(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function parseOptionalTimestamp(value) {
+  if (!value || !String(value).trim()) return null;
+  return String(value).trim().replace("T", " ");
+}
+
+function scheduledDisplay(value) {
+  return value ? formatDateTime(value) : "—";
 }
 
 function parseMoneyInput(value) {
@@ -1384,6 +1417,7 @@ function sharedStyles() {
 
     .job-open { background: #2563eb; color: white; }
     .job-assigned { background: #16a34a; color: white; }
+    .job-scheduled { background: #7c3aed; color: white; }
     .job-closed { background: var(--brand-red); color: white; }
     .job-awaiting-payment { background: #f59e0b; color: black; }
     .job-invoiced-account { background: #ec4899; color: white; }
@@ -1800,6 +1834,7 @@ async function initDb() {
       account_template_id INTEGER,
       assigned_technician_id INTEGER,
       eta TEXT,
+      scheduled_at TIMESTAMP,
       dispatcher_name TEXT,
       dispatcher_notes TEXT,
       status TEXT DEFAULT 'open',
@@ -1837,6 +1872,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_template_id INTEGER;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_technician_id INTEGER;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_name TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatcher_notes TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_value NUMERIC(10,2);`);
@@ -4302,6 +4338,7 @@ function jobTechnicianSummary(job) {
   }
 
   add("ETA", job.eta || "");
+  if (job.status === "scheduled" && job.scheduled_at) add("Scheduled for", formatDateTime(job.scheduled_at));
   add("Telephone number", compactPhone(job.customer_phone));
 
   return lines.join("\n");
@@ -4570,6 +4607,7 @@ app.get("/jobs", async (req, res) => {
           .feed-dot { width: 10px; height: 10px; border-radius: 999px; margin-top: 5px; flex: 0 0 10px; }
           .feed-dot.job-open { background: #2563eb; }
           .feed-dot.job-assigned { background: #16a34a; }
+          .feed-dot.job-scheduled { background: #7c3aed; }
           .feed-dot.job-awaiting-payment { background: #f59e0b; }
           .feed-dot.job-invoiced-account { background: #db2777; }
           .feed-dot.job-closed { background: #dc2626; }
@@ -5018,12 +5056,17 @@ app.get("/jobs/new", async (req, res) => {
                   </div>
                   <div class="field">
                     <label>Status</label>
-                    <select name="status">${jobStatusOptions("open")}</select>
+                    <select id="job_status" name="status">${jobStatusOptions("open")}</select>
                   </div>
                   <div class="field">
                     <label>ETA</label>
-                    <input name="eta" placeholder="e.g. 30-45 mins">
+                    <select id="eta_select" name="eta">${etaSelectOptions("")}</select>
+                    <input id="eta_other" name="eta_other" placeholder="Other ETA" style="display:none; margin-top:8px;">
                   </div>
+                </div>
+
+                <div class="form-grid-3" id="scheduled_box" style="margin-top:16px; display:none;">
+                  <div class="field"><label>Scheduled date and time</label><input type="datetime-local" name="scheduled_at"></div>
                 </div>
 
                 <div class="form-grid-3" style="margin-top:16px;">
@@ -5124,6 +5167,28 @@ app.get("/jobs/new", async (req, res) => {
             offsitePayment.addEventListener("change", toggleOffsitePayment);
             toggleOffsitePayment();
           }
+
+          const statusSelect = document.getElementById("job_status");
+          const scheduledBox = document.getElementById("scheduled_box");
+          function toggleScheduledBox() {
+            if (!statusSelect || !scheduledBox) return;
+            scheduledBox.style.display = statusSelect.value === "scheduled" ? "grid" : "none";
+          }
+          if (statusSelect) {
+            statusSelect.addEventListener("change", toggleScheduledBox);
+            toggleScheduledBox();
+          }
+
+          const etaSelect = document.getElementById("eta_select");
+          const etaOther = document.getElementById("eta_other");
+          function toggleEtaOther() {
+            if (!etaSelect || !etaOther) return;
+            etaOther.style.display = etaSelect.value === "Other" ? "block" : "none";
+          }
+          if (etaSelect) {
+            etaSelect.addEventListener("change", toggleEtaOther);
+            toggleEtaOther();
+          }
         </script>
       </body>
       </html>
@@ -5142,13 +5207,13 @@ app.post("/jobs/create", async (req, res) => {
         customer_name, customer_phone, customer_alt_phone, customer_email,
         address_line_1, address_line_2, address_line_3, town, county, postcode, latitude, longitude, udprn,
         job_type, job_description, urgency, source_campaign, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
-        account_job, account_template_id, assigned_technician_id, eta, dispatcher_name, dispatcher_notes, status,
+        account_job, account_template_id, assigned_technician_id, eta, scheduled_at, dispatcher_name, dispatcher_notes, status,
         created_at, updated_at
       ) VALUES (
         $1,$2,$3,$4,
         $5,$6,$7,$8,$9,$10,$11,$12,$13,
         $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-        $26,$27,$28,$29,$30,$31,$32,
+        $26,$27,$28,$29,$30,$31,$32,$33,
         NOW(), NOW()
       ) RETURNING id
     `, [
@@ -5180,7 +5245,8 @@ app.post("/jobs/create", async (req, res) => {
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
       parseOptionalInt(body.assigned_technician_id),
-      body.eta,
+      normaliseEta(body),
+      parseOptionalTimestamp(body.scheduled_at),
       currentAgentName(req),
       body.dispatcher_notes,
       body.status || "open"
@@ -5373,7 +5439,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
             <div class="summary-kpi"><div class="kpi-label">Customer</div><div class="kpi-value">${escapeHtml(job.customer_name || "—")}</div></div>
             <div class="summary-kpi"><div class="kpi-label">Postcode</div><div class="kpi-value">${escapeHtml(job.postcode || "—")}</div></div>
             <div class="summary-kpi"><div class="kpi-label">Technician</div><div class="kpi-value">${escapeHtml(job.technician_name || "Unassigned")}</div></div>
-            <div class="summary-kpi"><div class="kpi-label">ETA</div><div class="kpi-value">${escapeHtml(job.eta || "—")}</div></div>
+            <div class="summary-kpi"><div class="kpi-label">ETA / scheduled</div><div class="kpi-value">${escapeHtml(job.status === "scheduled" && job.scheduled_at ? scheduledDisplay(job.scheduled_at) : (job.eta || "—"))}</div></div>
           </div>
 
           <div class="job-control-grid">
@@ -5385,6 +5451,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                   <div class="info-block"><strong>Bill payer</strong><span>${escapeHtml(job.offsite_payment ? (job.bill_payer_name || "—") : (job.customer_name || "—"))}${(job.offsite_payment ? job.bill_payer_phone : job.customer_phone) ? ` · <a href="${escapeHtml(payerTel)}">${escapeHtml(job.offsite_payment ? job.bill_payer_phone : job.customer_phone)}</a>` : ""}</span></div>
                   <div class="info-block"><strong>Address</strong><div>${jobAddressBlock(job) || "—"}</div></div>
                   <div class="info-block"><strong>Job</strong><span>${escapeHtml(job.job_type || "—")} · ${escapeHtml(job.source_campaign || "No campaign")}</span><div class="muted-note">${escapeHtml(job.job_description || "No description entered.")}</div></div>
+                  <div class="info-block"><strong>Scheduled date/time</strong><span>${escapeHtml(job.scheduled_at ? scheduledDisplay(job.scheduled_at) : "—")}</span></div>
                 </div>
               </div>
 
@@ -5428,8 +5495,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
                     <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-                    <div><label>ETA</label><input name="eta" value="${escapeHtml(job.eta)}"></div>
-                    <div><label>Status</label><select name="status">${jobStatusOptions(job.status)}</select></div>
+                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"></div>
+                    <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
+                    <div id="edit_scheduled_box"><label>Scheduled date and time</label><input type="datetime-local" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
                     <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
                   </div>
@@ -5445,8 +5513,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-status">
                   <label>Change status</label>
                   <div class="quick-form-row">
-                    <select name="status">${jobStatusOptions(job.status)}</select>
+                    <select id="quick_status" name="status">${jobStatusOptions(job.status)}</select>
                     <button type="submit">Update</button>
+                  </div>
+                  <div id="quick_scheduled_box" style="display:none; margin-top:10px;">
+                    <label>Scheduled date and time</label>
+                    <input type="datetime-local" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}">
                   </div>
                 </form>
                 <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-assign">
@@ -5493,6 +5565,28 @@ app.get("/jobs/:id/edit", async (req, res) => {
             document.execCommand("copy");
             alert("Technician summary copied.");
           }
+
+          function bindScheduledToggle(selectId, boxId) {
+            const select = document.getElementById(selectId);
+            const box = document.getElementById(boxId);
+            if (!select || !box) return;
+            function update() { box.style.display = select.value === "scheduled" ? "block" : "none"; }
+            select.addEventListener("change", update);
+            update();
+          }
+          bindScheduledToggle("edit_job_status", "edit_scheduled_box");
+          bindScheduledToggle("quick_status", "quick_scheduled_box");
+
+          const editEtaSelect = document.getElementById("edit_eta_select");
+          const editEtaOther = document.getElementById("edit_eta_other");
+          function toggleEditEtaOther() {
+            if (!editEtaSelect || !editEtaOther) return;
+            editEtaOther.style.display = editEtaSelect.value === "Other" ? "block" : "none";
+          }
+          if (editEtaSelect) {
+            editEtaSelect.addEventListener("change", toggleEditEtaOther);
+            toggleEditEtaOther();
+          }
         </script>
       </body>
       </html>
@@ -5507,7 +5601,8 @@ app.post("/jobs/:id/quick-status", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const status = req.body.status || "open";
-    await pool.query(`UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`, [status, id]);
+    const scheduledAt = status === "scheduled" ? parseOptionalTimestamp(req.body.scheduled_at) : null;
+    await pool.query(`UPDATE jobs SET status = $1, scheduled_at = $2, updated_at = NOW() WHERE id = $3`, [status, scheduledAt, id]);
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick status update error:", error);
@@ -5544,8 +5639,8 @@ app.post("/jobs/:id/update", async (req, res) => {
         job_type=$11, job_description=$12, urgency=$13, source_campaign=$14, quoted_price=$15,
         starting_price=$16, call_out_agreed=$17, start_price_locks=$18, offsite_payment=$19, bill_payer_name=$20, bill_payer_phone=$21,
         expected_payment_method=$22, account_job=$23, account_template_id=$24, assigned_technician_id=$25,
-        eta=$26, dispatcher_notes=$27, status=$28, updated_at=NOW()
-      WHERE id=$29
+        eta=$26, scheduled_at=$27, dispatcher_notes=$28, status=$29, updated_at=NOW()
+      WHERE id=$30
     `, [
       body.customer_name,
       compactPhone(body.customer_phone),
@@ -5572,7 +5667,8 @@ app.post("/jobs/:id/update", async (req, res) => {
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
       parseOptionalInt(body.assigned_technician_id),
-      body.eta,
+      normaliseEta(body),
+      parseOptionalTimestamp(body.scheduled_at),
       body.dispatcher_notes,
       body.status || "open",
       id
@@ -6421,6 +6517,7 @@ function technicianWorkspaceStyles() {
     .pill { display:inline-block; border-radius:999px; padding:7px 11px; font-size:12px; font-weight:900; white-space:nowrap; }
     .job-open { background:var(--blue); color:white; }
     .job-assigned { background:var(--green); color:white; }
+    .job-scheduled { background:#7c3aed; color:white; }
     .job-closed { background:var(--red); color:white; }
     .job-awaiting-payment { background:var(--amber); color:#111827; }
     .job-invoiced-account { background:var(--pink); color:white; }
