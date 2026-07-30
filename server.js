@@ -5063,7 +5063,7 @@ app.get("/jobs/new", async (req, res) => {
                     <input id="eta_other" name="eta_other" placeholder="Other ETA" style="display:none; margin-top:8px;">
                     <div id="scheduled_box" style="display:none; margin-top:10px;">
                       <label>Scheduled date and time</label>
-                      <input type="datetime-local" name="scheduled_at">
+                      <input type="datetime-local" name="scheduled_at" step="900">
                     </div>
                   </div>
                 </div>
@@ -5485,7 +5485,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
                     <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><input type="datetime-local" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
+                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><input type="datetime-local" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}" step="900"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
                     <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
