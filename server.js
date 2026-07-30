@@ -4258,6 +4258,366 @@ app.post("/campaigns/save", async (req, res) => {
 });
 
 
+
+function managementMetricCard(title, value, hint = "") {
+  return `
+    <div class="metric-card">
+      <div class="metric-title">${escapeHtml(title)}</div>
+      <div class="metric-value">${value}</div>
+      ${hint ? `<div class="muted" style="font-size:12px;margin-top:6px;">${escapeHtml(hint)}</div>` : ""}
+    </div>
+  `;
+}
+
+function percentChangeText(current, previous) {
+  const c = Number(current || 0);
+  const p = Number(previous || 0);
+  if (!p && !c) return "No change";
+  if (!p && c) return "New activity";
+  const diff = ((c - p) / p) * 100;
+  const sign = diff > 0 ? "+" : "";
+  return `${sign}${diff.toFixed(1)}%`;
+}
+
+function managementComparisonRow(label, current, previous, formatter = value => Number(value || 0)) {
+  return `
+    <tr>
+      <td><strong>${escapeHtml(label)}</strong></td>
+      <td>${formatter(current)}</td>
+      <td>${formatter(previous)}</td>
+      <td>${escapeHtml(percentChangeText(current, previous))}</td>
+    </tr>
+  `;
+}
+
+async function managementPeriodSummary(start, end) {
+  const jobsResult = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2)::int AS jobs_created,
+      COUNT(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2)::int AS jobs_closed,
+      COUNT(*) FILTER (
+        WHERE status IN ('cancelled_before_arrival', 'cancelled_onsite')
+        AND COALESCE(closed_at, updated_at, created_at) >= $1
+        AND COALESCE(closed_at, updated_at, created_at) < $2
+      )::int AS jobs_cancelled,
+      COUNT(*) FILTER (
+        WHERE status IN ('awaiting_payment', 'awaiting_balance')
+        AND COALESCE(closed_at, updated_at, created_at) >= $1
+        AND COALESCE(closed_at, updated_at, created_at) < $2
+      )::int AS awaiting_money_jobs,
+      COUNT(*) FILTER (
+        WHERE status = 'disputed'
+        AND COALESCE(closed_at, updated_at, created_at) >= $1
+        AND COALESCE(closed_at, updated_at, created_at) < $2
+      )::int AS disputed_close_status_jobs,
+      COALESCE(SUM(COALESCE(net_value, CASE WHEN final_value IS NOT NULL THEN final_value / 1.2 ELSE 0 END)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS net_value,
+      COALESCE(SUM(COALESCE(vat_amount, CASE WHEN final_value IS NOT NULL THEN final_value - (final_value / 1.2) ELSE 0 END)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS vat_value,
+      COALESCE(SUM(COALESCE(final_value, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS gross_value,
+      COALESCE(SUM(COALESCE(materials_cost, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS materials_cost,
+      COALESCE(AVG(NULLIF(final_value, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS average_job_value,
+      COUNT(*) FILTER (
+        WHERE closed_at >= $1 AND closed_at < $2
+        AND (payment_method ILIKE '%card%' OR payment_method_1 ILIKE '%card%' OR payment_method_2 ILIKE '%card%')
+      )::int AS card_jobs,
+      COUNT(*) FILTER (
+        WHERE closed_at >= $1 AND closed_at < $2
+        AND (payment_method ILIKE '%cash%' OR payment_method_1 ILIKE '%cash%' OR payment_method_2 ILIKE '%cash%')
+      )::int AS cash_jobs,
+      COUNT(*) FILTER (
+        WHERE closed_at >= $1 AND closed_at < $2
+        AND (payment_method ILIKE '%bank%' OR payment_method_1 ILIKE '%bank%' OR payment_method_2 ILIKE '%bank%')
+      )::int AS bank_jobs
+    FROM jobs
+  `, [start, end]);
+
+  const disputesResult = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2)::int AS disputes_created,
+      COUNT(*) FILTER (WHERE status NOT IN ('resolved', 'rejected', 'refund_processed'))::int AS open_disputes,
+      COALESCE(SUM(COALESCE(disputed_amount, 0)) FILTER (WHERE created_at >= $1 AND created_at < $2), 0)::numeric AS disputed_amount,
+      COALESCE(SUM(COALESCE(refund_amount, 0)) FILTER (WHERE created_at >= $1 AND created_at < $2), 0)::numeric AS refund_amount
+    FROM disputes
+  `, [start, end]);
+
+  return { ...(jobsResult.rows[0] || {}), ...(disputesResult.rows[0] || {}) };
+}
+
+async function managementCampaignRows(start, end) {
+  const result = await pool.query(`
+    SELECT
+      COALESCE(NULLIF(source_campaign, ''), 'Unknown') AS campaign,
+      COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2)::int AS jobs_created,
+      COUNT(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2)::int AS jobs_closed,
+      COUNT(*) FILTER (WHERE status IN ('cancelled_before_arrival', 'cancelled_onsite') AND COALESCE(closed_at, updated_at, created_at) >= $1 AND COALESCE(closed_at, updated_at, created_at) < $2)::int AS cancelled_jobs,
+      COUNT(*) FILTER (WHERE status IN ('awaiting_payment', 'awaiting_balance') AND COALESCE(closed_at, updated_at, created_at) >= $1 AND COALESCE(closed_at, updated_at, created_at) < $2)::int AS awaiting_money_jobs,
+      COUNT(*) FILTER (WHERE status = 'disputed' AND COALESCE(closed_at, updated_at, created_at) >= $1 AND COALESCE(closed_at, updated_at, created_at) < $2)::int AS disputed_status_jobs,
+      COALESCE(SUM(COALESCE(net_value, CASE WHEN final_value IS NOT NULL THEN final_value / 1.2 ELSE 0 END)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS net_value,
+      COALESCE(SUM(COALESCE(final_value, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS gross_value,
+      COALESCE(SUM(COALESCE(materials_cost, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS materials_cost,
+      COALESCE(AVG(NULLIF(final_value, 0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2), 0)::numeric AS average_job_value
+    FROM jobs
+    WHERE created_at >= $1 OR closed_at >= $1 OR updated_at >= $1
+    GROUP BY COALESCE(NULLIF(source_campaign, ''), 'Unknown')
+    HAVING COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2) > 0 OR COUNT(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2) > 0
+    ORDER BY gross_value DESC, jobs_created DESC, campaign ASC
+    LIMIT 25
+  `, [start, end]);
+  return result.rows;
+}
+
+async function managementTechnicianRows(start, end) {
+  const result = await pool.query(`
+    SELECT
+      COALESCE(t.name, j.tech_close_submitted_by, 'Unassigned') AS technician_name,
+      COUNT(j.id) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2)::int AS jobs_closed,
+      COUNT(j.id) FILTER (WHERE j.status IN ('cancelled_before_arrival', 'cancelled_onsite') AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1 AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2)::int AS cancelled_jobs,
+      COUNT(j.id) FILTER (WHERE j.status = 'disputed' AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1 AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2)::int AS disputed_status_jobs,
+      COALESCE(SUM(COALESCE(j.net_value, CASE WHEN j.final_value IS NOT NULL THEN j.final_value / 1.2 ELSE 0 END)) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2), 0)::numeric AS net_value,
+      COALESCE(SUM(COALESCE(j.final_value, 0)) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2), 0)::numeric AS gross_value,
+      COALESCE(SUM(COALESCE(j.materials_cost, 0)) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2), 0)::numeric AS materials_cost,
+      COALESCE(AVG(NULLIF(j.final_value, 0)) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2), 0)::numeric AS average_job_value
+    FROM jobs j
+    LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+    WHERE j.created_at >= $1 OR j.closed_at >= $1 OR j.updated_at >= $1
+    GROUP BY COALESCE(t.name, j.tech_close_submitted_by, 'Unassigned')
+    HAVING COUNT(j.id) FILTER (WHERE j.closed_at >= $1 AND j.closed_at < $2) > 0 OR COUNT(j.id) FILTER (WHERE j.status IN ('cancelled_before_arrival', 'cancelled_onsite', 'disputed') AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1 AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2) > 0
+    ORDER BY gross_value DESC, jobs_closed DESC, technician_name ASC
+    LIMIT 25
+  `, [start, end]);
+  return result.rows;
+}
+
+async function managementProblemJobs(start, end) {
+  const result = await pool.query(`
+    SELECT j.id, j.job_number, j.customer_name, j.postcode, j.source_campaign, j.status, j.final_value, j.materials_cost, j.closed_at, j.updated_at, t.name AS technician_name
+    FROM jobs j
+    LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+    WHERE (
+      j.status IN ('cancelled_before_arrival', 'cancelled_onsite', 'awaiting_payment', 'awaiting_balance', 'disputed')
+      OR j.id IN (SELECT job_id FROM disputes WHERE job_id IS NOT NULL AND status NOT IN ('resolved', 'rejected', 'refund_processed'))
+    )
+    AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
+    AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
+    ORDER BY COALESCE(j.closed_at, j.updated_at, j.created_at) DESC
+    LIMIT 40
+  `, [start, end]);
+  return result.rows;
+}
+
+async function managementTrendRows(mode, count) {
+  const nowParts = londonDateParts();
+  const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+  const ranges = [];
+  if (mode === "week") {
+    const thisWeekStart = startOfWeekMonday(today);
+    for (let i = count - 1; i >= 0; i--) {
+      const start = addDays(thisWeekStart, -7 * i);
+      const end = i === 0 ? addDays(today, 1) : addDays(start, 7);
+      ranges.push({ label: `${dateInputValue(start)} to ${dateInputValue(addDays(end, -1))}`, start, end });
+    }
+  } else {
+    let year = nowParts.year;
+    let month = nowParts.month;
+    for (let i = count - 1; i >= 0; i--) {
+      let m = month - i;
+      let y = year;
+      while (m <= 0) { m += 12; y -= 1; }
+      const start = makeDate(y, m, 1);
+      const nextMonth = m === 12 ? makeDate(y + 1, 1, 1) : makeDate(y, m + 1, 1);
+      const end = i === 0 ? addDays(today, 1) : nextMonth;
+      ranges.push({ label: start.toLocaleString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" }), start, end });
+    }
+  }
+  const rows = [];
+  for (const range of ranges) {
+    rows.push({ ...range, summary: await managementPeriodSummary(range.start, range.end) });
+  }
+  return rows;
+}
+
+function managementTrendTable(title, rows) {
+  return `
+    <div class="panel">
+      <h2>${escapeHtml(title)}</h2>
+      <table>
+        <thead><tr><th>Period</th><th>Jobs booked</th><th>Closed</th><th>Cancelled</th><th>Disputes</th><th>NET</th><th>VAT</th><th>Gross</th><th>Materials</th><th>After materials</th><th>Avg value</th></tr></thead>
+        <tbody>
+          ${rows.map(row => {
+            const s = row.summary || {};
+            const gross = Number(s.gross_value || 0);
+            const materials = Number(s.materials_cost || 0);
+            return `
+              <tr>
+                <td><strong>${escapeHtml(row.label)}</strong></td>
+                <td>${Number(s.jobs_created || 0)}</td>
+                <td>${Number(s.jobs_closed || 0)}</td>
+                <td>${Number(s.jobs_cancelled || 0)}</td>
+                <td>${Number(s.disputes_created || 0)}</td>
+                <td>${money(s.net_value || 0)}</td>
+                <td>${money(s.vat_value || 0)}</td>
+                <td>${money(gross)}</td>
+                <td>${money(materials)}</td>
+                <td><strong>${money(gross - materials)}</strong></td>
+                <td>${money(s.average_job_value || 0)}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+app.get("/reports/management", async (req, res) => {
+  try {
+    const nowParts = londonDateParts();
+    const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+    const thisWeekStart = startOfWeekMonday(today);
+    const lastWeekStart = addDays(thisWeekStart, -7);
+    const thisMonthStart = makeDate(nowParts.year, nowParts.month, 1);
+    const lastMonthNumber = nowParts.month === 1 ? 12 : nowParts.month - 1;
+    const lastMonthYear = nowParts.month === 1 ? nowParts.year - 1 : nowParts.year;
+    const lastMonthStart = makeDate(lastMonthYear, lastMonthNumber, 1);
+
+    const selectedRange = buildReportRange(req.query.range ? req.query : { ...req.query, range: "this_month" });
+
+    const [thisWeek, lastWeek, thisMonth, lastMonth, selectedSummary, weeklyTrend, monthlyTrend, campaignRows, technicianRows, problemJobs] = await Promise.all([
+      managementPeriodSummary(thisWeekStart, addDays(today, 1)),
+      managementPeriodSummary(lastWeekStart, thisWeekStart),
+      managementPeriodSummary(thisMonthStart, addDays(today, 1)),
+      managementPeriodSummary(lastMonthStart, thisMonthStart),
+      managementPeriodSummary(selectedRange.start, selectedRange.end),
+      managementTrendRows("week", 8),
+      managementTrendRows("month", 6),
+      managementCampaignRows(selectedRange.start, selectedRange.end),
+      managementTechnicianRows(selectedRange.start, selectedRange.end),
+      managementProblemJobs(selectedRange.start, selectedRange.end)
+    ]);
+
+    const selectedGross = Number(selectedSummary.gross_value || 0);
+    const selectedMaterials = Number(selectedSummary.materials_cost || 0);
+    const campaignBody = campaignRows.map(row => {
+      const gross = Number(row.gross_value || 0);
+      const materials = Number(row.materials_cost || 0);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(row.campaign || "Unknown")}</strong></td>
+          <td>${Number(row.jobs_created || 0)}</td>
+          <td>${Number(row.jobs_closed || 0)}</td>
+          <td>${Number(row.cancelled_jobs || 0)}</td>
+          <td>${Number(row.awaiting_money_jobs || 0)}</td>
+          <td>${Number(row.disputed_status_jobs || 0)}</td>
+          <td>${money(row.net_value || 0)}</td>
+          <td>${money(gross)}</td>
+          <td>${money(materials)}</td>
+          <td><strong>${money(gross - materials)}</strong></td>
+          <td>${money(row.average_job_value || 0)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const technicianBody = technicianRows.map(row => {
+      const gross = Number(row.gross_value || 0);
+      const materials = Number(row.materials_cost || 0);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(row.technician_name || "Unassigned")}</strong></td>
+          <td>${Number(row.jobs_closed || 0)}</td>
+          <td>${Number(row.cancelled_jobs || 0)}</td>
+          <td>${Number(row.disputed_status_jobs || 0)}</td>
+          <td>${money(row.net_value || 0)}</td>
+          <td>${money(gross)}</td>
+          <td>${money(materials)}</td>
+          <td><strong>${money(gross - materials)}</strong></td>
+          <td>${money(row.average_job_value || 0)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const problemBody = problemJobs.map(job => `
+      <tr>
+        <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || `J${String(job.id).padStart(5, "0")}`)}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""}</strong></a></td>
+        <td>${escapeHtml(job.customer_name || "-")}</td>
+        <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+        <td>${escapeHtml(job.source_campaign || "Unknown")}</td>
+        <td><span class="pill ${statusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span></td>
+        <td>${money(job.final_value || 0)}</td>
+        <td>${money(job.materials_cost || 0)}</td>
+        <td>${formatDateTime(job.closed_at || job.updated_at)}</td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Management Performance Report</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Management Performance Report</h1>
+        <div class="subtitle">Owner-level view of job volume, revenue, VAT, materials, cancellations, disputes and campaign performance.</div>
+
+        <div class="page-actions">
+          <a class="action-button dark" href="/reports">Back to Reports</a>
+          ${reportPeriodLinks(selectedRange.range).replaceAll('/reports?', '/reports/management?')}
+        </div>
+
+        <div class="panel">
+          <h2>Custom management range</h2>
+          <form method="GET" action="/reports/management" class="grid-3">
+            <input type="hidden" name="range" value="custom">
+            <div><label>From</label><input type="date" name="from" value="${escapeHtml(selectedRange.fromValue)}"></div>
+            <div><label>To</label><input type="date" name="to" value="${escapeHtml(selectedRange.toValue)}"></div>
+            <div style="display:flex;align-items:end;"><button type="submit">Run report</button></div>
+          </form>
+        </div>
+
+        <div class="metric-grid">
+          ${managementMetricCard("Jobs booked", Number(selectedSummary.jobs_created || 0), selectedRange.label)}
+          ${managementMetricCard("Jobs closed", Number(selectedSummary.jobs_closed || 0), "closed within range")}
+          ${managementMetricCard("Cancelled", Number(selectedSummary.jobs_cancelled || 0), "before arrival + onsite")}
+          ${managementMetricCard("New disputes", Number(selectedSummary.disputes_created || 0), `${Number(selectedSummary.open_disputes || 0)} currently open`)}
+          ${managementMetricCard("NET value", money(selectedSummary.net_value || 0), "before VAT")}
+          ${managementMetricCard("VAT value", money(selectedSummary.vat_value || 0), "20% UK VAT")}
+          ${managementMetricCard("Gross value", money(selectedGross), "inc VAT")}
+          ${managementMetricCard("After materials", money(selectedGross - selectedMaterials), `${money(selectedMaterials)} materials`)}
+        </div>
+
+        <div class="grid-2">
+          <div class="panel"><h2>This week vs last week</h2><table><thead><tr><th>Metric</th><th>This week</th><th>Last week</th><th>Movement</th></tr></thead><tbody>
+            ${managementComparisonRow("Jobs booked", thisWeek.jobs_created, lastWeek.jobs_created)}
+            ${managementComparisonRow("Jobs closed", thisWeek.jobs_closed, lastWeek.jobs_closed)}
+            ${managementComparisonRow("Cancelled", thisWeek.jobs_cancelled, lastWeek.jobs_cancelled)}
+            ${managementComparisonRow("New disputes", thisWeek.disputes_created, lastWeek.disputes_created)}
+            ${managementComparisonRow("Gross value", thisWeek.gross_value, lastWeek.gross_value, money)}
+            ${managementComparisonRow("Materials", thisWeek.materials_cost, lastWeek.materials_cost, money)}
+            ${managementComparisonRow("Average job value", thisWeek.average_job_value, lastWeek.average_job_value, money)}
+          </tbody></table></div>
+          <div class="panel"><h2>This month vs last month</h2><table><thead><tr><th>Metric</th><th>This month</th><th>Last month</th><th>Movement</th></tr></thead><tbody>
+            ${managementComparisonRow("Jobs booked", thisMonth.jobs_created, lastMonth.jobs_created)}
+            ${managementComparisonRow("Jobs closed", thisMonth.jobs_closed, lastMonth.jobs_closed)}
+            ${managementComparisonRow("Cancelled", thisMonth.jobs_cancelled, lastMonth.jobs_cancelled)}
+            ${managementComparisonRow("New disputes", thisMonth.disputes_created, lastMonth.disputes_created)}
+            ${managementComparisonRow("Gross value", thisMonth.gross_value, lastMonth.gross_value, money)}
+            ${managementComparisonRow("Materials", thisMonth.materials_cost, lastMonth.materials_cost, money)}
+            ${managementComparisonRow("Average job value", thisMonth.average_job_value, lastMonth.average_job_value, money)}
+          </tbody></table></div>
+        </div>
+
+        ${managementTrendTable("Week-to-week performance", weeklyTrend)}
+        ${managementTrendTable("Month-to-month performance", monthlyTrend)}
+
+        <div class="panel"><h2>Campaign / source performance — ${escapeHtml(selectedRange.label)}</h2><table><thead><tr><th>Campaign</th><th>Booked</th><th>Closed</th><th>Cancelled</th><th>Awaiting money</th><th>Disputed</th><th>NET</th><th>Gross</th><th>Materials</th><th>After materials</th><th>Avg value</th></tr></thead><tbody>${campaignBody || `<tr><td colspan="11" class="muted">No campaign data for this period yet.</td></tr>`}</tbody></table></div>
+        <div class="panel"><h2>Technician performance — ${escapeHtml(selectedRange.label)}</h2><table><thead><tr><th>Technician</th><th>Closed</th><th>Cancelled</th><th>Disputed</th><th>NET</th><th>Gross</th><th>Materials</th><th>After materials</th><th>Avg value</th></tr></thead><tbody>${technicianBody || `<tr><td colspan="9" class="muted">No technician data for this period yet.</td></tr>`}</tbody></table></div>
+        <div class="panel"><h2>Problem jobs — ${escapeHtml(selectedRange.label)}</h2><div class="subtitle">Cancelled, awaiting payment/balance, disputed, or linked to an open dispute case.</div><table><thead><tr><th>Job</th><th>Customer</th><th>Technician</th><th>Campaign</th><th>Status</th><th>Gross</th><th>Materials</th><th>Last update</th></tr></thead><tbody>${problemBody || `<tr><td colspan="8" class="muted">No problem jobs for this period.</td></tr>`}</tbody></table></div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Management report error:", error);
+    res.status(500).send(`Management report error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
 app.get("/reports", async (req, res) => {
   try {
     const nowParts = londonDateParts();
@@ -4317,6 +4677,7 @@ app.get("/reports", async (req, res) => {
 
         <div class="page-actions">
           ${reportPeriodLinks(selectedRange.range)}
+          <a class="action-button" href="/reports/management?range=this_month">Management Report</a>
           <a class="action-button amber" href="/reports/jobs.csv?range=${encodeURIComponent(selectedRange.range)}&from=${encodeURIComponent(selectedRange.fromValue)}&to=${encodeURIComponent(selectedRange.toValue)}">Download jobs CSV</a>
           <a class="action-button dark" href="/reports/invoices.csv">Invoices CSV</a>
           <a class="action-button dark" href="/reports/calls.csv">Calls CSV</a>
