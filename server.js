@@ -591,7 +591,9 @@ const jobStatuses = [
   { value: "assigned", label: "Assigned" },
   { value: "closed", label: "Closed" },
   { value: "awaiting_payment", label: "Awaiting payment" },
-  { value: "invoiced_account", label: "Invoice sent to Acc Dept" }
+  { value: "invoiced_account", label: "Invoice sent to Acc Dept" },
+  { value: "cancelled_before_arrival", label: "Cancelled by client before arrival" },
+  { value: "cancelled_onsite", label: "Cancelled onsite" }
 ];
 
 const legacyJobStatusLabels = {
@@ -759,6 +761,18 @@ function parseOptionalInt(value) {
   return Number.isInteger(number) ? number : null;
 }
 
+function compactPhone(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+function compactPostcode(value) {
+  return String(value || "").toUpperCase().replace(/\s+/g, "").trim();
+}
+
+function hasFilledValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
+
 function jobNumber(id) {
   return `J${String(id).padStart(5, "0")}`;
 }
@@ -797,7 +811,7 @@ function postcodePrecision(postcode) {
 }
 
 function normalisePostcode(postcode) {
-  return (postcode || "").trim().toUpperCase().replace(/\s+/g, " ");
+  return compactPostcode(postcode);
 }
 
 async function lookupPostcodeLocation(postcode) {
@@ -1373,6 +1387,8 @@ function sharedStyles() {
     .job-closed { background: var(--brand-red); color: white; }
     .job-awaiting-payment { background: #f59e0b; color: black; }
     .job-invoiced-account { background: #ec4899; color: white; }
+    .job-cancelled-before-arrival { background: #6b7280; color: white; }
+    .job-cancelled-onsite { background: #4b5563; color: white; }
     .quote-quote-requested { background: #dbeafe; color: #1d4ed8; }
     .quote-quote-drafted { background: #374151; color: white; }
     .quote-quote-sent { background: #fef3c7; color: #92400e; }
@@ -2925,7 +2941,7 @@ app.post("/invoice-templates/save", async (req, res) => {
     const templateName = req.body.template_name || "";
     const customerName = req.body.customer_name || "";
     const customerAddress = req.body.customer_address || "";
-    const customerPostcode = req.body.customer_postcode || "";
+    const customerPostcode = compactPostcode(req.body.customer_postcode);
     const sortOrder = Number(req.body.sort_order || 100);
     const active = req.body.active === "false" ? false : true;
 
@@ -2936,7 +2952,7 @@ app.post("/invoice-templates/save", async (req, res) => {
             customer_postcode = $4, sort_order = $5, active = $6, updated_at = NOW()
         WHERE id = $7
       `, [templateName, customerName, customerAddress, customerPostcode, sortOrder, active, id]);
-    } else {
+     } else {
       await pool.query(`
         INSERT INTO invoice_templates (
           template_name, customer_name, customer_address, customer_postcode,
@@ -3379,8 +3395,8 @@ app.post("/invoices/create", async (req, res) => {
       : (req.body.site_address || req.body.site_address_line || "");
 
     const finalSitePostcode = siteSameAsInvoice
-      ? req.body.customer_postcode
-      : req.body.site_postcode;
+      ? compactPostcode(req.body.customer_postcode)
+      : compactPostcode(req.body.site_postcode);
 
     const lineItems = [];
 
@@ -3417,7 +3433,7 @@ app.post("/invoices/create", async (req, res) => {
       dispatcherName,
       req.body.customer_name,
       req.body.customer_address,
-      req.body.customer_postcode,
+      compactPostcode(req.body.customer_postcode),
       siteSameAsInvoice,
       finalSiteAddress,
       finalSitePostcode,
@@ -4257,20 +4273,39 @@ function phoneHref(value) {
 
 function jobTechnicianSummary(job) {
   const payerName = job.offsite_payment ? (job.bill_payer_name || "") : (job.customer_name || "");
-  const payerPhone = job.offsite_payment ? (job.bill_payer_phone || "") : (job.customer_phone || "");
-  return [
-    `Name: ${job.customer_name || ""}`,
-    `Address: ${jobAddressPlain(job)}`,
-    `${job.job_type || "Job"} - ${job.job_description || ""}`,
-    `Start price: ${money(job.starting_price || job.quoted_price || 0)}`,
-    `Call out agreed: ${money(job.call_out_agreed || 0)}`,
-    `Start price of parts: ${money(job.start_price_locks || 0)}`,
-    `Bill payer - ${payerName || ""}${payerPhone ? ` ${payerPhone}` : ""}`,
-    `ETA: ${job.eta || ""}`,
-    `Telephone number: ${job.customer_phone || ""}`
-  ].join("\n");
-}
+  const payerPhone = compactPhone(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
+  const lines = [];
 
+  function add(label, value) {
+    if (hasFilledValue(value)) lines.push(`${label}: ${value}`);
+  }
+
+  function addMoney(label, value) {
+    if (value !== null && value !== undefined && String(value).trim() !== "") {
+      lines.push(`${label}: ${money(value)}`);
+    }
+  }
+
+  add("Name", job.customer_name || "");
+  add("Address", jobAddressPlain(job));
+
+  const jobLine = [job.job_type || "Job", job.job_description || ""].filter(hasFilledValue).join(" - ");
+  add("Job", jobLine);
+
+  addMoney("Start price", job.starting_price !== null && job.starting_price !== undefined ? job.starting_price : job.quoted_price);
+  addMoney("Call out agreed", job.call_out_agreed);
+  addMoney("Start price of parts", job.start_price_locks);
+
+  const payerLine = [payerName, payerPhone].filter(hasFilledValue).join(" ");
+  if (job.offsite_payment && hasFilledValue(payerLine)) {
+    lines.push(`Bill payer - ${payerLine}`);
+  }
+
+  add("ETA", job.eta || "");
+  add("Telephone number", compactPhone(job.customer_phone));
+
+  return lines.join("\n");
+}
 app.get("/jobs", async (req, res) => {
   try {
     const selectedStatus = (req.query.status || "active").trim();
@@ -4538,6 +4573,8 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-awaiting-payment { background: #f59e0b; }
           .feed-dot.job-invoiced-account { background: #db2777; }
           .feed-dot.job-closed { background: #dc2626; }
+          .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
+          .feed-dot.job-cancelled-onsite { background: #4b5563; }
           @media (max-width: 1500px) {
             .status-card-grid { grid-template-columns: repeat(3, minmax(175px, 1fr)); }
             .board-content-grid { grid-template-columns: minmax(0, 1fr) 330px; }
@@ -5046,7 +5083,7 @@ app.get("/jobs/new", async (req, res) => {
             setValue("address_line_3", address.address_line_3);
             setValue("town", address.town);
             setValue("county", address.county);
-            setValue("postcode", address.postcode);
+            setValue("postcode", String(address.postcode || "").toUpperCase().replace(/\s+/g, ""));
             setValue("latitude", address.latitude);
             setValue("longitude", address.longitude);
             setValue("udprn", address.udprn);
@@ -5061,7 +5098,7 @@ app.get("/jobs/new", async (req, res) => {
               const template = templates.find(item => String(item.id) === String(existingCustomer.value));
               if (!template) return;
               setValue("customer_name", template.customer_name || "");
-              setValue("postcode", template.customer_postcode || "");
+              setValue("postcode", String(template.customer_postcode || "").toUpperCase().replace(/\s+/g, ""));
               const accountJob = document.getElementById("account_job");
               const accountTemplate = document.getElementById("account_template_id");
               if (accountJob) accountJob.value = "true";
@@ -5116,15 +5153,15 @@ app.post("/jobs/create", async (req, res) => {
       ) RETURNING id
     `, [
       body.customer_name,
-      body.customer_phone,
-      body.customer_alt_phone,
+      compactPhone(body.customer_phone),
+      compactPhone(body.customer_alt_phone),
       body.customer_email,
       body.address_line_1,
       body.address_line_2,
       body.address_line_3,
       body.town,
       body.county,
-      (body.postcode || "").toUpperCase(),
+      compactPostcode(body.postcode),
       parseMoneyInput(body.latitude),
       parseMoneyInput(body.longitude),
       body.udprn,
@@ -5138,7 +5175,7 @@ app.post("/jobs/create", async (req, res) => {
       parseMoneyInput(body.start_price_locks),
       body.offsite_payment === "true",
       body.bill_payer_name,
-      body.bill_payer_phone,
+      compactPhone(body.bill_payer_phone),
       body.expected_payment_method || "Unknown",
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
@@ -5511,15 +5548,15 @@ app.post("/jobs/:id/update", async (req, res) => {
       WHERE id=$29
     `, [
       body.customer_name,
-      body.customer_phone,
-      body.customer_alt_phone,
+      compactPhone(body.customer_phone),
+      compactPhone(body.customer_alt_phone),
       body.customer_email,
       body.address_line_1,
       body.address_line_2,
       body.address_line_3,
       body.town,
       body.county,
-      (body.postcode || "").toUpperCase(),
+      compactPostcode(body.postcode),
       body.job_type,
       body.job_description,
       body.urgency || "Normal",
@@ -5530,7 +5567,7 @@ app.post("/jobs/:id/update", async (req, res) => {
       parseMoneyInput(body.start_price_locks),
       body.offsite_payment === "true",
       body.bill_payer_name,
-      body.bill_payer_phone,
+      compactPhone(body.bill_payer_phone),
       body.expected_payment_method || "Unknown",
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
@@ -5778,7 +5815,7 @@ app.get("/address-lookup-test-old", async (req, res) => {
           setValue("address_line_3", address.address_line_3);
           setValue("town", address.town);
           setValue("county", address.county);
-          setValue("postcode", address.postcode);
+          setValue("postcode", String(address.postcode || "").toUpperCase().replace(/\s+/g, ""));
           setValue("latitude", address.latitude);
           setValue("longitude", address.longitude);
           setValue("udprn", address.udprn);
@@ -6387,6 +6424,8 @@ function technicianWorkspaceStyles() {
     .job-closed { background:var(--red); color:white; }
     .job-awaiting-payment { background:var(--amber); color:#111827; }
     .job-invoiced-account { background:var(--pink); color:white; }
+    .job-cancelled-before-arrival { background:#6b7280; color:white; }
+    .job-cancelled-onsite { background:#4b5563; color:white; }
     .job-completed, .job-fully-paid-private { background:#64748b; color:white; }
     .actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:16px; }
     .panel { background:white; border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:0 12px 25px rgba(15,23,42,.04); margin:14px 0; }
@@ -7168,7 +7207,7 @@ app.post("/tech-checkin/:token", async (req, res) => {
     const allowedStatuses = ["Available", "On job", "Available soon", "Off today"];
     const status = allowedStatuses.includes(req.body.status) ? req.body.status : tech.status;
 
-    const currentPostcode = (req.body.current_postcode || "").trim();
+    const currentPostcode = compactPostcode(req.body.current_postcode);
     const availableFrom = (req.body.available_from || "").trim();
     const notes = (req.body.notes || "").trim();
 
@@ -7438,7 +7477,7 @@ app.post("/technicians/save", async (req, res) => {
             status = $5, priority = $6, available_from = $7, skills = $8,
             notes = $9, updated_by = $10, updated_at = NOW()
         WHERE id = $11
-      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName, id]);
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
@@ -7803,11 +7842,11 @@ app.post("/quotations/create", async (req, res) => {
       req.body.company_key || "online",
       req.body.customer_name,
       req.body.customer_email,
-      req.body.customer_phone,
+      compactPhone(req.body.customer_phone),
       req.body.customer_address,
-      req.body.customer_postcode,
+      compactPostcode(req.body.customer_postcode),
       req.body.site_address,
-      req.body.site_postcode,
+      compactPostcode(req.body.site_postcode),
       req.body.quote_date,
       req.body.valid_until,
       req.body.prepared_by || currentAgentName(req),
@@ -8468,7 +8507,7 @@ app.post("/disputes/save", async (req, res) => {
     const values = [
       jobId,
       req.body.customer_name || "",
-      req.body.customer_phone || "",
+      compactPhone(req.body.customer_phone),
       technicianId,
       req.body.complaint_type || "",
       parseMoneyInput(req.body.disputed_amount),
