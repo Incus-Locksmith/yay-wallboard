@@ -91,22 +91,85 @@ const defaultInvoiceTemplates = [
 
 
 const defaultCampaigns = [
-  ["Unknown", "Private", "Unknown", 0, 1, "Fallback option where the source has not been confirmed."],
-  ["Google", "Private", "Unknown", 0, 10, "General Google lead or advert enquiry."],
-  ["Google Ads", "Private", "Unknown", 0, 20, "Paid Google advertising enquiries."],
-  ["Organic", "Private", "Unknown", 0, 30, "Website / organic search enquiries."],
-  ["Repeat customer", "Private", "Unknown", 0, 40, "Returning private customers."],
-  ["Account customer", "Account", "Account", 0, 50, "Account customer jobs to be invoiced later."],
-  ["Adam Lee", "Account", "Account", 0, 60, "Property maintenance account/customer source."],
-  ["CSG", "Account", "Account", 0, 70, "Classic Services Group account source."],
-  ["Buns From Home", "Account", "Account", 0, 80, "Buns From Home account source."],
-  ["Fantastic", "Affiliate", "Unknown", 0, 90, "Affiliate / partner source."],
-  ["ITCC", "Affiliate", "Unknown", 40, 100, "Affiliate source with commission/split tracking."],
-  ["Stefan", "Affiliate", "Unknown", 30, 110, "Affiliate source with commission/split tracking."],
-  ["GRD", "Affiliate", "Unknown", 50, 120, "Affiliate source with commission/split tracking."],
-  ["Referral", "Private", "Unknown", 0, 130, "Customer or trade referral."],
-  ["Emergency callout", "Private", "Unknown", 0, 140, "Emergency callout source."],
-  ["Other", "Other", "Unknown", 0, 999, "Use only when no other campaign/source fits."]
+  ['24H DR LOCKSMITH', 'Online lead', 'Unknown', 0, 10, 'Official campaign/source list. Online, app, text, or inbound lead source.'],
+  ['99 HOMES', 'Account', 'Account', 0, 20, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['A HUNT & CO', 'Account', 'Account', 0, 30, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ADAM LEE', 'Account', 'Account', 0, 40, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ANDY', 'Account', 'Account', 0, 50, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ARTHUR GRACE', 'Account', 'Account', 0, 60, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['BETTER HOMES COMPANY', 'Account', 'Account', 0, 70, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['BLUE PLANETIC', 'Account', 'Account', 0, 80, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['BONUS EVENTUS', 'Account', 'Account', 0, 90, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['BUNS FROM HOME', 'Account', 'Account', 0, 100, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['CIF BUILDERS', 'Account', 'Account', 0, 110, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['COUNTY RENTS', 'Account', 'Account', 0, 120, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['CROSSTOWN', 'Account', 'Account', 0, 130, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['CSG', 'Account', 'Account', 0, 140, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['DEXTERS', 'Account', 'Account', 0, 150, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ELITE', 'Account', 'Account', 0, 160, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['EMAIL & WEB/ CHAT', 'Online lead', 'Unknown', 0, 170, 'Official campaign/source list. Online, app, text, or inbound lead source.'],
+  ['ERG', 'Account', 'Account', 0, 180, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['EYAL', 'Account', 'Account', 0, 190, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['FANTASTIC', 'Account', 'Account', 0, 200, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['FINE MOVE', 'Account', 'Account', 0, 210, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['FLARE', 'Account', 'Account', 0, 220, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['FLEX GLOBAL', 'Account', 'Account', 0, 230, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['FOCUS FURNISHING', 'Account', 'Account', 0, 240, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['GAYBANK', 'Account', 'Account', 0, 250, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['GRD', 'Affiliate', 'Unknown', 50, 260, 'Official campaign/source list. Affiliate split 50%.'],
+  ['HBS CONSTRUCT', 'Account', 'Account', 0, 270, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['HESTON CLEANING', 'Account', 'Account', 0, 280, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ITCC', 'Affiliate', 'Unknown', 40, 290, 'Official campaign/source list. Affiliate split 40%.'],
+  ['JB STAYS', 'Account', 'Account', 0, 300, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['JHM', 'Account', 'Account', 0, 310, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['JOHN LOCKSMITH', 'Locksmith partner', 'Unknown', 0, 320, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['KEYS247', 'Locksmith partner', 'Unknown', 0, 330, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['L24', 'Locksmith partner', 'Unknown', 0, 340, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['LANDMARK', 'Account', 'Account', 0, 350, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['LDN PM', 'Account', 'Account', 0, 360, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['LOCKFIT', 'Locksmith partner', 'Unknown', 0, 370, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['LOCKSMITH UNION', 'Locksmith partner', 'Unknown', 0, 380, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['LOCKSUB', 'Locksmith partner', 'Unknown', 0, 390, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['LONDON LOCKSMITH', 'Affiliate', 'Unknown', 50, 400, 'Official campaign/source list. Affiliate split 50%.'],
+  ['LONDON WILDLIFE', 'Account', 'Account', 0, 410, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['LTA', 'Account', 'Account', 0, 420, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['MACK SERVICES', 'Account', 'Account', 0, 430, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['MAGNA', 'Account', 'Account', 0, 440, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['MANDIRI', 'Account', 'Account', 0, 450, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['MARTIN&CO', 'Account', 'Account', 0, 460, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['MINISTAY UK', 'Account', 'Account', 0, 470, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['NEILSON PROJECTS', 'Account', 'Account', 0, 480, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['NOAH', 'Account', 'Account', 0, 490, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['OCP', 'Account', 'Account', 0, 500, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['PARAMOUNT', 'Account', 'Account', 0, 510, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['PEACOCK', 'Account', 'Account', 0, 520, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['PIPEDRIVE', 'Online lead', 'Unknown', 0, 530, 'Official campaign/source list. Online, app, text, or inbound lead source.'],
+  ['PROPERTY PARTNERS', 'Account', 'Account', 0, 540, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['PROPERTY RESCUE', 'Account', 'Account', 0, 550, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['RECALL', 'Online lead', 'Unknown', 0, 560, 'Official campaign/source list. Online, app, text, or inbound lead source.'],
+  ['REDROCK', 'Account', 'Account', 0, 570, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ROBERT', 'Account', 'Account', 0, 580, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ROSEMOND SERVICES', 'Account', 'Account', 0, 590, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['RYL', 'Account', 'Account', 0, 600, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['S&K', 'Account', 'Account', 0, 610, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SAVILLS', 'Account', 'Account', 0, 620, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SCRAYE', 'Account', 'Account', 0, 630, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SCRIBBLER', 'Account', 'Account', 0, 640, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SECRET KEYS', 'Locksmith partner', 'Unknown', 0, 650, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['SECURITY SHUTTERS', 'Account', 'Account', 0, 660, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SHP', 'Account', 'Account', 0, 670, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SPETZ', 'Locksmith partner', 'Unknown', 0, 680, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['STEFAN', 'Affiliate', 'Unknown', 30, 690, 'Official campaign/source list. Affiliate split 30%.'],
+  ['STONEVIEW', 'Account', 'Account', 0, 700, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SULLCROM', 'Account', 'Account', 0, 710, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SUNSHINE ESTATES', 'Account', 'Account', 0, 720, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['SWIFT LOCKSMITH', 'Locksmith partner', 'Unknown', 0, 730, 'Official campaign/source list. Locksmith partner or trade source.'],
+  ['TEMPUS', 'Account', 'Account', 0, 740, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['W-APP/ TXT', 'Online lead', 'Unknown', 0, 750, 'Official campaign/source list. Online, app, text, or inbound lead source.'],
+  ['WINGFIELD', 'Account', 'Account', 0, 760, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['Z-CLIENT', 'Account', 'Account', 0, 770, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ZIMA GROUP', 'Account', 'Account', 0, 780, 'Official campaign/source list. Account, partner, property, or business source.'],
+  ['ZONE PROPERTY', 'Account', 'Account', 0, 790, 'Official campaign/source list. Account, partner, property, or business source.']
 ];
 
 function authSecret() {
@@ -1496,8 +1559,8 @@ async function seedDefaultInvoiceTemplates() {
 
 
 async function seedDefaultCampaigns() {
-  const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM campaigns`);
-  if (countResult.rows[0].count > 0) return;
+  const officialCampaignNames = defaultCampaigns.map(item => item[0]);
+  const oldStarterCampaigns = ['Unknown', 'Google', 'Google Ads', 'Organic', 'Repeat customer', 'Account customer', 'Adam Lee', 'Buns From Home', 'Referral', 'Emergency callout', 'Other'];
 
   for (const [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, notes] of defaultCampaigns) {
     await pool.query(`
@@ -1506,9 +1569,23 @@ async function seedDefaultCampaigns() {
         sort_order, notes, active, created_at, updated_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), NOW())
-      ON CONFLICT (name) DO NOTHING
+      ON CONFLICT (name) DO UPDATE SET
+        campaign_type = EXCLUDED.campaign_type,
+        default_payment_method = EXCLUDED.default_payment_method,
+        commission_percentage = EXCLUDED.commission_percentage,
+        sort_order = EXCLUDED.sort_order,
+        notes = EXCLUDED.notes,
+        active = TRUE,
+        updated_at = NOW()
     `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, notes]);
   }
+
+  await pool.query(`
+    UPDATE campaigns
+    SET active = FALSE, updated_at = NOW()
+    WHERE name = ANY($1::text[])
+    AND NOT (name = ANY($2::text[]))
+  `, [oldStarterCampaigns, officialCampaignNames]);
 }
 
 async function getCampaignOptions(selectedValue = "") {
@@ -1522,7 +1599,7 @@ async function getCampaignOptions(selectedValue = "") {
     if (!result.rows.length) return defaultCampaigns.map(item => ({ value: item[0], label: item[0] }));
     return result.rows.map(row => ({
       value: row.name,
-      label: row.campaign_type ? `${row.name} — ${row.campaign_type}` : row.name
+      label: row.name
     }));
   } catch (error) {
     console.error("Campaign option load error:", error);
