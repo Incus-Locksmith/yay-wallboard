@@ -5468,6 +5468,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
               <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>${job.urgency ? `<span class="pill stage-draft">${escapeHtml(job.urgency)}</span>` : ""}</div>
             </div>
             <div class="job-control-actions">
+              <a class="action-button" href="#appointment-card">Edit appointment</a>
               <a class="action-button" href="/jobs/${job.id}/summary">Technician summary</a>
               <a class="action-button amber" href="/jobs/${job.id}/close">Close / payment</a>
               <a class="action-button" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
@@ -5547,13 +5548,29 @@ app.get("/jobs/:id/edit", async (req, res) => {
             </main>
 
             <aside>
-              <div class="control-card">
+              <div class="control-card" id="appointment-card">
                 <h2>Quick actions</h2>
                 <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-status">
                   <label>Change status</label>
                   <div class="quick-form-row">
                     <select id="quick_status" name="status">${jobStatusOptions(job.status)}</select>
                     <button type="submit">Update</button>
+                  </div>
+                </form>
+                <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-appointment">
+                  <label>Change ETA / appointment time</label>
+                  <div class="quick-form-row">
+                    <select id="quick_eta_select" name="eta">${etaSelectOptions(job.eta)}</select>
+                    <button type="submit">Save</button>
+                  </div>
+                  <input id="quick_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;">
+                  <div id="quick_scheduled_box" style="display:none; margin-top:10px;">
+                    <label>Scheduled date and time</label>
+                    <div class="quick-form-row">
+                      <input type="date" id="quick_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}">
+                      <select id="quick_scheduled_time" name="scheduled_time">${quarterHourTimeOptions(scheduledTimeValue(job.scheduled_at))}</select>
+                    </div>
+                    <input type="hidden" id="quick_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}">
                   </div>
                 </form>
                 <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-assign">
@@ -5601,6 +5618,28 @@ app.get("/jobs/:id/edit", async (req, res) => {
             alert("Technician summary copied.");
           }
 
+          const quickEtaSelect = document.getElementById("quick_eta_select");
+          const quickEtaOther = document.getElementById("quick_eta_other");
+          const quickScheduledBox = document.getElementById("quick_scheduled_box");
+          function toggleQuickEtaFields() {
+            if (!quickEtaSelect) return;
+            if (quickEtaOther) quickEtaOther.style.display = quickEtaSelect.value === "Other" ? "block" : "none";
+            if (quickScheduledBox) quickScheduledBox.style.display = quickEtaSelect.value === "Scheduled" ? "block" : "none";
+          }
+          function combineQuickScheduledDateTime() {
+            const scheduledDate = document.getElementById("quick_scheduled_date");
+            const scheduledTime = document.getElementById("quick_scheduled_time");
+            const scheduledAt = document.getElementById("quick_scheduled_at");
+            if (!scheduledAt) return;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+          }
+          if (quickEtaSelect) {
+            quickEtaSelect.addEventListener("change", toggleQuickEtaFields);
+            toggleQuickEtaFields();
+          }
+          const quickAppointmentForm = document.querySelector('form[action="/jobs/${job.id}/quick-appointment"]');
+          if (quickAppointmentForm) quickAppointmentForm.addEventListener("submit", combineQuickScheduledDateTime);
+
           const editEtaSelect = document.getElementById("edit_eta_select");
           const editEtaOther = document.getElementById("edit_eta_other");
           const editScheduledBox = document.getElementById("edit_scheduled_box");
@@ -5641,6 +5680,19 @@ app.post("/jobs/:id/quick-status", async (req, res) => {
   } catch (error) {
     console.error("Quick status update error:", error);
     res.status(500).send("Could not update job status");
+  }
+});
+
+app.post("/jobs/:id/quick-appointment", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const eta = normaliseEta(req.body);
+    const scheduledAt = eta === "Scheduled" ? parseScheduledTimestamp(req.body) : null;
+    await pool.query(`UPDATE jobs SET eta = $1, scheduled_at = $2, updated_at = NOW() WHERE id = $3`, [eta, scheduledAt, id]);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Quick appointment update error:", error);
+    res.status(500).send("Could not update appointment time");
   }
 });
 
