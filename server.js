@@ -7845,6 +7845,28 @@ app.get("/quotations/new", async (req, res) => {
     const validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
     const preparedBy = currentAgentName(req) || "Daniel van Her";
 
+    const itemResult = await pool.query(`
+      SELECT *
+      FROM invoice_items
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, description ASC
+    `);
+
+    const templateResult = await pool.query(`
+      SELECT *
+      FROM invoice_templates
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, template_name ASC
+    `);
+
+    const itemOptions = itemResult.rows.map(item => {
+      return `<option value="${item.id}" data-description="${escapeHtml(item.description)}" data-price="${Number(item.default_price || 0).toFixed(2)}">${escapeHtml(item.description)} — ${money(item.default_price)}</option>`;
+    }).join("");
+
+    const templateOptions = templateResult.rows.map(template => {
+      return `<option value="${template.id}" data-name="${escapeHtml(template.customer_name)}" data-address="${escapeHtml(template.customer_address)}" data-postcode="${escapeHtml(template.customer_postcode)}">${escapeHtml(template.template_name)}</option>`;
+    }).join("");
+
     const defaultCustomerName = job ? (job.customer_name || "") : "";
     const defaultPhone = job ? (job.customer_phone || "") : "";
     const defaultEmail = job ? (job.customer_email || "") : "";
@@ -7854,16 +7876,52 @@ app.get("/quotations/new", async (req, res) => {
 
     function lineBlock(i, description = "", price = "") {
       return `
-        <div class="line-item-row">
-          <input name="line${i}_description" value="${escapeHtml(description)}" placeholder="Description">
-          <div class="money-input"><span>£</span><input name="line${i}_price" value="${escapeHtml(price)}" placeholder="0.00"></div>
+        <div class="line-block">
+          <div class="line-grid quote-line-grid">
+            <select name="line${i}_item_id" onchange="fillQuoteLine(${i}, this)">
+              <option value="">Choose quotation line</option>
+              ${itemOptions}
+            </select>
+            <div class="money-input"><span>£</span><input name="line${i}_price" value="${escapeHtml(price)}" placeholder="0.00"></div>
+          </div>
+          <input class="description-input" name="line${i}_description" value="${escapeHtml(description)}" placeholder="Description appears on quotation">
         </div>
       `;
     }
 
     res.send(`
       <html>
-      <head><title>Create Quotation</title><style>${sharedStyles()}</style></head>
+      <head>
+        <title>Create Quotation</title>
+        <style>
+          ${sharedStyles()}
+          textarea { min-height: 90px; }
+          .line-block { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid #e5e7eb; }
+          .quote-line-grid { display: grid; grid-template-columns: 1fr 180px; gap: 12px; margin-bottom: 10px; }
+          .description-input { width: 100%; box-sizing: border-box; }
+          .account-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; }
+          @media (max-width: 800px) { .quote-line-grid, .account-row { grid-template-columns: 1fr; } }
+        </style>
+        <script>
+          function fillQuoteLine(number, select) {
+            const selected = select.options[select.selectedIndex];
+            const description = selected.getAttribute("data-description") || "";
+            const price = selected.getAttribute("data-price") || "";
+            const descriptionInput = document.querySelector("[name='line" + number + "_description']");
+            const priceInput = document.querySelector("[name='line" + number + "_price']");
+            if (descriptionInput && description) descriptionInput.value = description;
+            if (priceInput && price) priceInput.value = price;
+          }
+
+          function fillQuoteTemplate(select) {
+            const selected = select.options[select.selectedIndex];
+            if (!selected || !selected.value) return;
+            document.querySelector("[name='customer_name']").value = selected.getAttribute("data-name") || "";
+            document.querySelector("[name='customer_address']").value = selected.getAttribute("data-address") || "";
+            document.querySelector("[name='customer_postcode']").value = selected.getAttribute("data-postcode") || "";
+          }
+        </script>
+      </head>
       <body>
         ${nav(req)}
         <main class="app-main">
@@ -7897,6 +7955,15 @@ app.get("/quotations/new", async (req, res) => {
             </div>
 
             <div class="panel">
+              <h2>Account Template / Quote Address</h2>
+              <div class="account-row">
+                <select name="quote_template_id" onchange="fillQuoteTemplate(this)">
+                  <option value="">Normal customer / no template</option>
+                  ${templateOptions}
+                </select>
+                <a href="/invoice-templates">Edit account templates</a>
+              </div>
+              <br>
               <h2>Customer / account</h2>
               <div class="grid-3">
                 <input name="customer_name" value="${escapeHtml(defaultCustomerName)}" placeholder="Customer / account name" required>
@@ -7919,12 +7986,14 @@ app.get("/quotations/new", async (req, res) => {
 
             <div class="panel">
               <h2>Quote lines</h2>
-              <div class="help">Enter prices excluding VAT. The PDF will calculate 20% VAT and show the inc VAT total.</div>
+              <div class="help">Pick a dropdown line, then adjust the description or price if needed. Prices are excluding VAT. The PDF will calculate 20% VAT and show the inc VAT total.</div>
+              <br>
               ${lineBlock(1, defaultDescription, job && job.quoted_price ? job.quoted_price : "")}
               ${lineBlock(2)}
               ${lineBlock(3)}
               ${lineBlock(4)}
               ${lineBlock(5)}
+              <a href="/invoice-items">Edit quotation dropdown lines</a>
             </div>
 
             <div class="panel">
