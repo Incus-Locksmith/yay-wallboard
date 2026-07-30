@@ -4673,7 +4673,7 @@ app.get("/jobs", async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult] = await Promise.all([
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult] = await Promise.all([
       pool.query(`
         SELECT j.*, t.name AS technician_name
         FROM jobs j
@@ -4716,6 +4716,11 @@ app.get("/jobs", async (req, res) => {
         LEFT JOIN technicians t ON t.id = j.assigned_technician_id
         ORDER BY COALESCE(j.updated_at, j.created_at) DESC
         LIMIT 8
+      `),
+      pool.query(`
+        SELECT COUNT(*)::int AS count
+        FROM disputes
+        WHERE COALESCE(status, 'open_dispute') NOT IN ('resolved', 'rejected', 'refund_processed')
       `)
     ]);
 
@@ -4751,6 +4756,7 @@ app.get("/jobs", async (req, res) => {
     ];
 
     const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
+    const openDisputesTotal = Number(disputesMetricResult.rows[0]?.count || 0);
 
     const statusCards = [
       { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue", hrefStatus: "open" },
@@ -4758,7 +4764,8 @@ app.get("/jobs", async (req, res) => {
       { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
       { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed_today" },
-      { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" }
+      { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" },
+      { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" }
     ];
 
     function technicianBadgeClass(status) {
@@ -4808,12 +4815,15 @@ app.get("/jobs", async (req, res) => {
       `;
     }).join("");
 
-    const cardHtml = statusCards.map(card => `
-      <a class="board-card ${card.className}" href="/jobs?status=${encodeURIComponent(card.hrefStatus)}">
-        <div class="board-card-label">${escapeHtml(card.label)}</div>
-        <div class="board-card-number">${card.value}</div>
-      </a>
-    `).join("");
+    const cardHtml = statusCards.map(card => {
+      const href = card.href || `/jobs?status=${encodeURIComponent(card.hrefStatus)}`;
+      return `
+        <a class="board-card ${card.className}" href="${escapeHtml(href)}">
+          <div class="board-card-label">${escapeHtml(card.label)}</div>
+          <div class="board-card-number">${card.value}</div>
+        </a>
+      `;
+    }).join("");
 
     res.send(`
       <!DOCTYPE html>
@@ -4840,7 +4850,7 @@ app.get("/jobs", async (req, res) => {
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .status-card-grid {
             display: grid;
-            grid-template-columns: repeat(6, minmax(160px, 1fr));
+            grid-template-columns: repeat(7, minmax(145px, 1fr));
             gap: 18px;
             margin: 22px 0 20px;
           }
@@ -4855,6 +4865,7 @@ app.get("/jobs", async (req, res) => {
           .board-amber:before, .board-amber:after { background: #f59e0b; }
           .board-pink:before, .board-pink:after { background: #db2777; }
           .board-slate:before, .board-slate:after { background: #475569; }
+          .board-orange:before, .board-orange:after { background: #f97316; }
           .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px 20px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
           .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
