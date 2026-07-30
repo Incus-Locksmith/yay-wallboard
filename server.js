@@ -89,6 +89,26 @@ const defaultInvoiceTemplates = [
   ["Buns From Home", "Buns From Home LTD", "22 Charterhouse Square\nLONDON", "EC1M 6DX", 30]
 ];
 
+
+const defaultCampaigns = [
+  ["Unknown", "Private", "Unknown", 0, 1, "Fallback option where the source has not been confirmed."],
+  ["Google", "Private", "Unknown", 0, 10, "General Google lead or advert enquiry."],
+  ["Google Ads", "Private", "Unknown", 0, 20, "Paid Google advertising enquiries."],
+  ["Organic", "Private", "Unknown", 0, 30, "Website / organic search enquiries."],
+  ["Repeat customer", "Private", "Unknown", 0, 40, "Returning private customers."],
+  ["Account customer", "Account", "Account", 0, 50, "Account customer jobs to be invoiced later."],
+  ["Adam Lee", "Account", "Account", 0, 60, "Property maintenance account/customer source."],
+  ["CSG", "Account", "Account", 0, 70, "Classic Services Group account source."],
+  ["Buns From Home", "Account", "Account", 0, 80, "Buns From Home account source."],
+  ["Fantastic", "Affiliate", "Unknown", 0, 90, "Affiliate / partner source."],
+  ["ITCC", "Affiliate", "Unknown", 40, 100, "Affiliate source with commission/split tracking."],
+  ["Stefan", "Affiliate", "Unknown", 30, 110, "Affiliate source with commission/split tracking."],
+  ["GRD", "Affiliate", "Unknown", 50, 120, "Affiliate source with commission/split tracking."],
+  ["Referral", "Private", "Unknown", 0, 130, "Customer or trade referral."],
+  ["Emergency callout", "Private", "Unknown", 0, 140, "Emergency callout source."],
+  ["Other", "Other", "Unknown", 0, 999, "Use only when no other campaign/source fits."]
+];
+
 function authSecret() {
   return process.env.DASHBOARD_PASSWORD || "change-me-now";
 }
@@ -1353,6 +1373,7 @@ function nav(req) {
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
         <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
+        <a class="side-link${active("/campaigns")}" href="/campaigns"><span class="side-dot dot-amber"></span><span>Campaigns</span></a>
         <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
 
         <div class="sidebar-label section-label">Team</div>
@@ -1470,6 +1491,42 @@ async function seedDefaultInvoiceTemplates() {
       )
       VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
     `, [templateName, customerName, customerAddress, customerPostcode, sortOrder]);
+  }
+}
+
+
+async function seedDefaultCampaigns() {
+  const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM campaigns`);
+  if (countResult.rows[0].count > 0) return;
+
+  for (const [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, notes] of defaultCampaigns) {
+    await pool.query(`
+      INSERT INTO campaigns (
+        name, campaign_type, default_payment_method, commission_percentage,
+        sort_order, notes, active, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), NOW())
+      ON CONFLICT (name) DO NOTHING
+    `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, notes]);
+  }
+}
+
+async function getCampaignOptions(selectedValue = "") {
+  try {
+    const result = await pool.query(`
+      SELECT name, campaign_type
+      FROM campaigns
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, name ASC
+    `);
+    if (!result.rows.length) return defaultCampaigns.map(item => ({ value: item[0], label: item[0] }));
+    return result.rows.map(row => ({
+      value: row.name,
+      label: row.campaign_type ? `${row.name} — ${row.campaign_type}` : row.name
+    }));
+  } catch (error) {
+    console.error("Campaign option load error:", error);
+    return defaultCampaigns.map(item => ({ value: item[0], label: item[0] }));
   }
 }
 
@@ -1701,6 +1758,30 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_assigned_technician_idx ON jobs (assigned_technician_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS jobs_source_campaign_idx ON jobs (source_campaign);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      campaign_type TEXT DEFAULT 'Private',
+      default_payment_method TEXT DEFAULT 'Unknown',
+      commission_percentage NUMERIC(6,2) DEFAULT 0,
+      sort_order INTEGER DEFAULT 100,
+      active BOOLEAN DEFAULT TRUE,
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS campaign_type TEXT DEFAULT 'Private';`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS default_payment_method TEXT DEFAULT 'Unknown';`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS commission_percentage NUMERIC(6,2) DEFAULT 0;`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS campaigns_active_idx ON campaigns (active);`);
 
 
   await pool.query(`
@@ -1806,6 +1887,7 @@ async function initDb() {
   await seedDefaultPortalUsers();
   await seedDefaultInvoiceItems();
   await seedDefaultInvoiceTemplates();
+  await seedDefaultCampaigns();
 }
 
 /* The rest of this file keeps all your current working routes and adds the invoice upgrade.
@@ -3540,6 +3622,235 @@ app.get("/academy", (req, res) => {
   res.redirect("https://locksmith-academy-quiz.onrender.com/");
 });
 
+function campaignTypeOptions(selected = "Private") {
+  return optionList([
+    "Private",
+    "Account",
+    "Affiliate",
+    "Subcontractor",
+    "Online lead",
+    "Referral",
+    "Other"
+  ], selected || "Private");
+}
+
+function campaignPaymentOptions(selected = "Unknown") {
+  return optionList([
+    "Unknown",
+    "Cash",
+    "Card",
+    "Bank transfer",
+    "Account"
+  ], selected || "Unknown");
+}
+
+function campaignBadgeClass(type) {
+  const value = String(type || "").toLowerCase();
+  if (value.includes("account")) return "stage-approved";
+  if (value.includes("affiliate") || value.includes("subcontractor")) return "stage-approval";
+  if (value.includes("online")) return "stage-emailed";
+  if (value.includes("referral")) return "stage-emailed-photos";
+  return "stage-draft";
+}
+
+app.get("/campaigns", async (req, res) => {
+  try {
+    const search = (req.query.search || "").trim();
+    const params = [];
+    let where = "";
+    if (search) {
+      params.push(`%${search}%`);
+      where = `WHERE name ILIKE $1 OR campaign_type ILIKE $1 OR notes ILIKE $1`;
+    }
+
+    const [campaignsResult, statsResult] = await Promise.all([
+      pool.query(`
+        SELECT *
+        FROM campaigns
+        ${where}
+        ORDER BY active DESC, sort_order ASC, name ASC
+      `, params),
+      pool.query(`
+        SELECT
+          COALESCE(NULLIF(j.source_campaign, ''), 'Unknown') AS campaign,
+          COUNT(*)::int AS job_count,
+          COUNT(*) FILTER (WHERE j.status IN ('closed', 'fully_paid_private', 'invoiced_account', 'invoice_sent_accounts'))::int AS finished_jobs,
+          COUNT(*) FILTER (WHERE j.status = 'awaiting_payment')::int AS awaiting_payment_jobs,
+          COALESCE(SUM(COALESCE(j.final_value, 0)), 0)::numeric AS income,
+          COALESCE(SUM(COALESCE(j.materials_cost, 0)), 0)::numeric AS material_cost,
+          COALESCE(AVG(NULLIF(j.final_value, 0)), 0)::numeric AS average_job_value,
+          MAX(j.created_at) AS last_job_at
+        FROM jobs j
+        GROUP BY COALESCE(NULLIF(j.source_campaign, ''), 'Unknown')
+      `)
+    ]);
+
+    const statsByCampaign = Object.fromEntries(statsResult.rows.map(row => [row.campaign, row]));
+
+    const rows = campaignsResult.rows.map(campaign => {
+      const stats = statsByCampaign[campaign.name] || {};
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(campaign.name)}</strong><br>
+            <span class="muted">Sort ${Number(campaign.sort_order || 100)}</span>
+          </td>
+          <td><span class="pill ${campaignBadgeClass(campaign.campaign_type)}">${escapeHtml(campaign.campaign_type || "Private")}</span></td>
+          <td>${escapeHtml(campaign.default_payment_method || "Unknown")}</td>
+          <td>${Number(campaign.commission_percentage || 0).toFixed(2)}%</td>
+          <td>${campaign.active ? `<span class="pill stage-emailed">Active</span>` : `<span class="pill stage-cancelled">Hidden</span>`}</td>
+          <td>
+            <strong>${Number(stats.job_count || 0)}</strong><br>
+            <span class="muted">Finished ${Number(stats.finished_jobs || 0)}</span>
+          </td>
+          <td>
+            <strong>${money(stats.income || 0)}</strong><br>
+            <span class="muted">Net ${money(Number(stats.income || 0) - Number(stats.material_cost || 0))}</span>
+          </td>
+          <td>${stats.last_job_at ? formatDateTime(stats.last_job_at) : "—"}</td>
+          <td><a class="button secondary small" href="/campaigns/${campaign.id}/edit">Edit</a></td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Campaigns</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <main class="app-main">
+          <div class="topbar">
+            <div>
+              <h1>Campaigns</h1>
+              <div class="subtitle">Manage job sources so dispatchers select clean campaign names and reports stay accurate.</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Add campaign / source</h2>
+            <form method="POST" action="/campaigns/save" class="grid-4">
+              <div><label>Name</label><input name="name" placeholder="e.g. Google Ads" required></div>
+              <div><label>Type</label><select name="campaign_type">${campaignTypeOptions("Private")}</select></div>
+              <div><label>Default payment</label><select name="default_payment_method">${campaignPaymentOptions("Unknown")}</select></div>
+              <div><label>Commission / split %</label><input name="commission_percentage" value="0"></div>
+              <div><label>Sort order</label><input name="sort_order" value="100"></div>
+              <div><label>Status</label><select name="active"><option value="true">Active</option><option value="false">Hidden</option></select></div>
+              <div style="grid-column: span 2;"><label>Notes</label><input name="notes" placeholder="Internal notes about this campaign/source"></div>
+              <div style="display:flex;align-items:end;"><button type="submit">Add campaign</button></div>
+            </form>
+          </div>
+
+          <div class="panel">
+            <form method="GET" action="/campaigns" class="search-form">
+              <input name="search" value="${escapeHtml(search)}" placeholder="Search campaigns, type or notes...">
+              <button type="submit">Search</button>
+              <a class="button secondary" href="/campaigns">Clear</a>
+            </form>
+          </div>
+
+          <div class="panel">
+            <h2>Campaign performance</h2>
+            <table>
+              <thead><tr><th>Campaign</th><th>Type</th><th>Default payment</th><th>Split</th><th>Status</th><th>Jobs</th><th>Income</th><th>Last job</th><th>Action</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="9" class="muted">No campaigns found.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Campaigns page error:", error);
+    res.status(500).send(`Campaigns page error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+app.get("/campaigns/:id/edit", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM campaigns WHERE id = $1`, [req.params.id]);
+    const campaign = result.rows[0];
+    if (!campaign) return res.status(404).send("Campaign not found");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Edit Campaign</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <main class="app-main">
+          <h1>Edit Campaign</h1>
+          <div class="subtitle">Update how this campaign/source appears in Create Order and reports.</div>
+          <div class="panel">
+            <form method="POST" action="/campaigns/save" class="grid-4">
+              <input type="hidden" name="id" value="${campaign.id}">
+              <div><label>Name</label><input name="name" value="${escapeHtml(campaign.name)}" required></div>
+              <div><label>Type</label><select name="campaign_type">${campaignTypeOptions(campaign.campaign_type)}</select></div>
+              <div><label>Default payment</label><select name="default_payment_method">${campaignPaymentOptions(campaign.default_payment_method)}</select></div>
+              <div><label>Commission / split %</label><input name="commission_percentage" value="${Number(campaign.commission_percentage || 0).toFixed(2)}"></div>
+              <div><label>Sort order</label><input name="sort_order" value="${Number(campaign.sort_order || 100)}"></div>
+              <div><label>Status</label><select name="active"><option value="true" ${campaign.active ? "selected" : ""}>Active</option><option value="false" ${!campaign.active ? "selected" : ""}>Hidden</option></select></div>
+              <div style="grid-column: span 2;"><label>Notes</label><input name="notes" value="${escapeHtml(campaign.notes || "")}"></div>
+              <div style="display:flex;align-items:end;gap:12px;"><button type="submit">Save campaign</button><a href="/campaigns">Cancel</a></div>
+            </form>
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit campaign error:", error);
+    res.status(500).send(`Edit campaign error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+app.post("/campaigns/save", async (req, res) => {
+  try {
+    const id = req.body.id || "";
+    const name = (req.body.name || "").trim();
+    const campaignType = req.body.campaign_type || "Private";
+    const defaultPaymentMethod = req.body.default_payment_method || "Unknown";
+    const commissionPercentage = Number(req.body.commission_percentage || 0) || 0;
+    const sortOrder = Number(req.body.sort_order || 100) || 100;
+    const active = req.body.active !== "false";
+    const notes = req.body.notes || "";
+
+    if (!name) return res.redirect("/campaigns");
+
+    if (id) {
+      await pool.query(`
+        UPDATE campaigns
+        SET name = $1, campaign_type = $2, default_payment_method = $3,
+            commission_percentage = $4, sort_order = $5, active = $6,
+            notes = $7, updated_at = NOW()
+        WHERE id = $8
+      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes, id]);
+    } else {
+      await pool.query(`
+        INSERT INTO campaigns (
+          name, campaign_type, default_payment_method, commission_percentage,
+          sort_order, active, notes, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        ON CONFLICT (name) DO UPDATE SET
+          campaign_type = EXCLUDED.campaign_type,
+          default_payment_method = EXCLUDED.default_payment_method,
+          commission_percentage = EXCLUDED.commission_percentage,
+          sort_order = EXCLUDED.sort_order,
+          active = TRUE,
+          notes = EXCLUDED.notes,
+          updated_at = NOW()
+      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes]);
+    }
+
+    res.redirect("/campaigns");
+  } catch (error) {
+    console.error("Save campaign error:", error);
+    res.status(500).send(`Save campaign error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+
 app.get("/reports", async (req, res) => {
   try {
     const nowParts = londonDateParts();
@@ -3549,7 +3860,7 @@ app.get("/reports", async (req, res) => {
     const monthRange = { label: "This month", start: makeDate(nowParts.year, nowParts.month, 1), end: addDays(today, 1) };
     const selectedRange = buildReportRange(req.query);
 
-    const [dayCounts, weekCounts, monthCounts, selectedCounts, dayRevenue, weekRevenue, monthRevenue, selectedRevenue] = await Promise.all([
+    const [dayCounts, weekCounts, monthCounts, selectedCounts, dayRevenue, weekRevenue, monthRevenue, selectedRevenue, campaignPerformance] = await Promise.all([
       jobCountSummary(dayRange.start, dayRange.end),
       jobCountSummary(weekRange.start, weekRange.end),
       jobCountSummary(monthRange.start, monthRange.end),
@@ -3557,7 +3868,21 @@ app.get("/reports", async (req, res) => {
       revenueSummaryByTechnician(dayRange.start, dayRange.end),
       revenueSummaryByTechnician(weekRange.start, weekRange.end),
       revenueSummaryByTechnician(monthRange.start, monthRange.end),
-      revenueSummaryByTechnician(selectedRange.start, selectedRange.end)
+      revenueSummaryByTechnician(selectedRange.start, selectedRange.end),
+      pool.query(`
+        SELECT
+          COALESCE(NULLIF(j.source_campaign, ''), 'Unknown') AS campaign,
+          COUNT(*)::int AS job_count,
+          COUNT(*) FILTER (WHERE j.status IN ('closed', 'fully_paid_private', 'invoiced_account', 'invoice_sent_accounts'))::int AS finished_jobs,
+          COALESCE(SUM(COALESCE(j.final_value, 0)), 0)::numeric AS income,
+          COALESCE(SUM(COALESCE(j.materials_cost, 0)), 0)::numeric AS material_cost,
+          COALESCE(AVG(NULLIF(j.final_value, 0)), 0)::numeric AS average_job_value,
+          COUNT(*) FILTER (WHERE j.status = 'awaiting_payment')::int AS awaiting_payment_jobs
+        FROM jobs j
+        WHERE j.created_at >= $1 AND j.created_at < $2
+        GROUP BY COALESCE(NULLIF(j.source_campaign, ''), 'Unknown')
+        ORDER BY income DESC, job_count DESC, campaign ASC
+      `, [selectedRange.start, selectedRange.end])
     ]);
 
     const countSummaryRow = (label, counts) => `
@@ -3627,6 +3952,27 @@ app.get("/reports", async (req, res) => {
         ${revenueTable("Revenue by technician — This week", weekRevenue)}
         ${revenueTable("Revenue by technician — This month", monthRevenue)}
         ${selectedRange.range === "custom" ? revenueTable(`Revenue by technician — ${selectedRange.label}`, selectedRevenue) : ""}
+
+        <div class="panel">
+          <h2>Campaign / source performance — ${escapeHtml(selectedRange.label)}</h2>
+          <table>
+            <thead><tr><th>Campaign</th><th>Jobs</th><th>Finished</th><th>Income</th><th>Materials</th><th>Net after materials</th><th>Average value</th><th>Awaiting payment</th></tr></thead>
+            <tbody>
+              ${campaignPerformance.rows.map(row => `
+                <tr>
+                  <td><strong>${escapeHtml(row.campaign || "Unknown")}</strong></td>
+                  <td>${Number(row.job_count || 0)}</td>
+                  <td>${Number(row.finished_jobs || 0)}</td>
+                  <td>${money(row.income || 0)}</td>
+                  <td>${money(row.material_cost || 0)}</td>
+                  <td>${money(Number(row.income || 0) - Number(row.material_cost || 0))}</td>
+                  <td>${money(row.average_job_value || 0)}</td>
+                  <td>${Number(row.awaiting_payment_jobs || 0)}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="8" class="muted">No campaign data for this range.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
       </body>
       </html>
     `);
@@ -3650,7 +3996,7 @@ app.get("/reports/jobs.csv", async (req, res) => {
 
     const header = [
       "Job Number", "Created At", "Status", "Customer", "Phone", "Postcode",
-      "Job Type", "Technician", "Starting Price", "Call Out Agreed", "Start Price Of Locks",
+      "Job Type", "Campaign", "Technician", "Starting Price", "Call Out Agreed", "Start Price Of Locks",
       "Final Job Value", "Payment Method", "Customer Paid", "Materials Used", "Material Cost", "Outcome"
     ];
 
@@ -3665,6 +4011,7 @@ app.get("/reports/jobs.csv", async (req, res) => {
         job.customer_phone,
         job.postcode,
         job.job_type,
+        job.source_campaign,
         job.technician_name,
         job.starting_price,
         job.call_out_agreed,
@@ -4250,17 +4597,7 @@ app.get("/jobs/new", async (req, res) => {
       "Other"
     ];
 
-    const campaignOptions = [
-      "Unknown",
-      "Google",
-      "Google Ads",
-      "Organic",
-      "Repeat customer",
-      "Account customer",
-      "Referral",
-      "Emergency callout",
-      "Other"
-    ];
+    const campaignOptions = await getCampaignOptions("Unknown");
 
     res.send(`
       <!DOCTYPE html>
@@ -4803,6 +5140,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
     const job = jobResult.rows[0];
     const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
     const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
+    const campaignOptions = await getCampaignOptions(job.source_campaign || "Unknown");
     const summary = jobTechnicianSummary(job);
     const customerTel = phoneHref(job.customer_phone);
     const payerTel = phoneHref(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
@@ -4953,7 +5291,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
                     <div><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
                     <div><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
-                    <div><label>Source / campaign</label><input name="source_campaign" value="${escapeHtml(job.source_campaign)}"></div>
+                    <div><label>Source / campaign</label><select name="source_campaign">${optionList(campaignOptions, job.source_campaign || "Unknown")}</select></div>
                     <div><label>Starting price £</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
                     <div><label>Call out agreed £</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
                     <div><label>Start price of locks £</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
