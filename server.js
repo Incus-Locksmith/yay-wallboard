@@ -602,14 +602,20 @@ const legacyJobStatusLabels = {
 const activeJobStatuses = ["open", "assigned", "awaiting_payment"];
 
 const jobTypes = [
-  "Lockout",
-  "Lock change",
-  "Lock repair",
-  "Fresh lock installation",
-  "Boarding up / temporary security",
-  "Safe opening",
-  "Account job",
-  "Other"
+  "BAILIFF (COURT ORDERED)",
+  "BIKE LOCK (FROM £75, 1HR ETA)",
+  "DOOR FIX/ REPLACEMENT",
+  "FIX LOCK",
+  "FRESH INSTALLATION (LOCK ON BLANK DOOR)",
+  "KEY BROKEN IN LOCK",
+  "KEY SAFE INSTALLATION",
+  "LOCK CHANGE",
+  "LOCKED IN",
+  "LOCKED OUT",
+  "OPEN SAFE (FROM £120)",
+  "QUOTE",
+  "RECALL (UNDER WARRANTY)",
+  "SPECIALIST"
 ];
 
 const jobUrgencies = ["Normal", "Urgent", "Emergency"];
@@ -4663,15 +4669,20 @@ app.get("/jobs/new", async (req, res) => {
           : "No addresses found. You can still type the address manually.";
 
     const categoryOptions = [
-      "Locksmith",
-      "Lockout",
-      "Lock change",
-      "Lock repair",
-      "Fresh installation",
-      "Boarding up",
-      "Safe",
-      "Account job",
-      "Other"
+      "BAILIFF (COURT ORDERED)",
+      "BIKE LOCK (FROM £75, 1HR ETA)",
+      "DOOR FIX/ REPLACEMENT",
+      "FIX LOCK",
+      "FRESH INSTALLATION (LOCK ON BLANK DOOR)",
+      "KEY BROKEN IN LOCK",
+      "KEY SAFE INSTALLATION",
+      "LOCK CHANGE",
+      "LOCKED IN",
+      "LOCKED OUT",
+      "OPEN SAFE (FROM £120)",
+      "QUOTE",
+      "RECALL (UNDER WARRANTY)",
+      "SPECIALIST"
     ];
 
     const campaignOptions = await getCampaignOptions("Unknown");
