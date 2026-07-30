@@ -811,6 +811,136 @@ function scheduledDisplay(value) {
   return value ? formatDateTime(value) : "—";
 }
 
+const auditFieldLabels = {
+  customer_name: "Customer name",
+  customer_phone: "Customer phone",
+  customer_alt_phone: "Alternative phone",
+  customer_email: "Customer email",
+  address_line_1: "Address line 1",
+  address_line_2: "Address line 2",
+  address_line_3: "Address line 3",
+  town: "Town",
+  county: "County",
+  postcode: "Postcode",
+  job_type: "Category",
+  job_description: "Job description",
+  urgency: "Urgency",
+  source_campaign: "Campaign/source",
+  quoted_price: "Quoted price",
+  starting_price: "Starting price",
+  call_out_agreed: "Call-out agreed",
+  start_price_locks: "Start price of parts",
+  offsite_payment: "Offsite payment",
+  bill_payer_name: "Bill payer name",
+  bill_payer_phone: "Bill payer phone",
+  expected_payment_method: "Expected payment method",
+  account_job: "Account job",
+  account_template_id: "Account template",
+  assigned_technician_id: "Technician",
+  eta: "ETA",
+  scheduled_at: "Scheduled date/time",
+  dispatcher_notes: "Dispatcher notes",
+  status: "Status",
+  final_value: "Final value",
+  payment_method: "Payment method",
+  customer_paid: "Customer paid",
+  materials_used: "Materials used",
+  materials_cost: "Materials cost",
+  outcome: "Outcome",
+  tech_notes: "Technician notes",
+  close_notes: "Close notes",
+  onsite_at: "On site time"
+};
+
+const auditMoneyFields = new Set(["quoted_price", "starting_price", "call_out_agreed", "start_price_locks", "final_value", "materials_cost"]);
+const auditDateFields = new Set(["scheduled_at", "onsite_at", "closed_at", "created_at", "updated_at"]);
+
+function auditDisplayValue(field, value, technicianNames = {}) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (field === "status") return jobStatusLabel(value);
+  if (field === "assigned_technician_id") return technicianNames[String(value)] || value || "Unassigned";
+  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job") return value === true || value === "true" ? "Yes" : "No";
+  if (auditMoneyFields.has(field)) return money(value || 0);
+  if (auditDateFields.has(field)) return formatDateTime(value);
+  return String(value);
+}
+
+function auditNormalValue(field, value) {
+  if (value === null || value === undefined) return "";
+  if (auditMoneyFields.has(field)) {
+    const number = Number(String(value).replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(number) ? number.toFixed(2) : "";
+  }
+  if (field === "customer_paid" || field === "offsite_payment" || field === "account_job") {
+    return value === true || value === "true" ? "true" : "false";
+  }
+  if (auditDateFields.has(field)) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).trim();
+    return date.toISOString().slice(0, 16);
+  }
+  return String(value).trim();
+}
+
+async function loadTechnicianNameMap(ids = []) {
+  const cleanIds = [...new Set(ids.filter(id => id !== null && id !== undefined && String(id).trim() !== "").map(id => Number(id)).filter(Number.isFinite))];
+  if (!cleanIds.length) return {};
+  const result = await pool.query(`SELECT id, name FROM technicians WHERE id = ANY($1::int[])`, [cleanIds]);
+  const map = {};
+  result.rows.forEach(row => { map[String(row.id)] = row.name; });
+  return map;
+}
+
+async function addJobAuditEntry(jobId, actionType, fieldName, oldValue, newValue, changedBy, technicianNames = {}) {
+  await pool.query(`
+    INSERT INTO job_audit_log (job_id, action_type, field_name, old_value, new_value, changed_by, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+  `, [
+    jobId,
+    actionType,
+    auditFieldLabels[fieldName] || fieldName || actionType,
+    auditDisplayValue(fieldName, oldValue, technicianNames),
+    auditDisplayValue(fieldName, newValue, technicianNames),
+    changedBy || "Unknown"
+  ]);
+}
+
+async function logJobChanges(jobId, oldJob, newValues, changedBy, actionType = "job_updated") {
+  if (!oldJob) return;
+  const technicianIds = [];
+  if (Object.prototype.hasOwnProperty.call(newValues, "assigned_technician_id")) {
+    technicianIds.push(oldJob.assigned_technician_id, newValues.assigned_technician_id);
+  }
+  const technicianNames = await loadTechnicianNameMap(technicianIds);
+  for (const [field, newValue] of Object.entries(newValues)) {
+    const oldValue = oldJob[field];
+    if (auditNormalValue(field, oldValue) === auditNormalValue(field, newValue)) continue;
+    await addJobAuditEntry(jobId, actionType, field, oldValue, newValue, changedBy, technicianNames);
+  }
+}
+
+function renderJobAuditTrail(auditRows = []) {
+  if (!auditRows.length) {
+    return `<p class="muted-note">No audit entries yet. Future edits will appear here with the user, change, and time.</p>`;
+  }
+  return `
+    <div class="activity-list">
+      ${auditRows.map(row => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div>
+            <div class="activity-label">${escapeHtml(row.field_name || row.action_type || "Job updated")}</div>
+            <div class="activity-value">
+              ${escapeHtml(row.old_value || "—")} → ${escapeHtml(row.new_value || "—")}<br>
+              <span class="muted">${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.changed_by || "Unknown")}</span>
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function parseMoneyInput(value) {
   if (value === null || value === undefined || String(value).trim() === "") return null;
   const number = Number(String(value).replace(/[^0-9.-]/g, ""));
@@ -1925,6 +2055,27 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_postcode_idx ON jobs (postcode);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_assigned_technician_idx ON jobs (assigned_technician_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_source_campaign_idx ON jobs (source_campaign);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_audit_log (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      action_type TEXT,
+      field_name TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      changed_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS action_type TEXT;`);
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS field_name TEXT;`);
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS old_value TEXT;`);
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS new_value TEXT;`);
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS changed_by TEXT;`);
+  await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_audit_log_job_idx ON job_audit_log (job_id, created_at DESC);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS campaigns (
@@ -5296,6 +5447,7 @@ app.post("/jobs/create", async (req, res) => {
 
     const id = result.rows[0].id;
     await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2`, [jobNumber(id), id]);
+    await addJobAuditEntry(id, "job_created", "status", "—", "Job created", currentAgentName(req));
     res.redirect(`/jobs/${id}/summary`);
   } catch (error) {
     console.error("Create job error:", error);
@@ -5378,6 +5530,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
     const customerTel = phoneHref(job.customer_phone);
     const payerTel = phoneHref(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
     const techWorkspaceUrl = job.technician_token ? `/tech-workspace/${job.technician_token}` : "";
+    const auditRows = (await pool.query(`
+      SELECT * FROM job_audit_log
+      WHERE job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 80
+    `, [id])).rows;
 
     const activityItems = [
       { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
@@ -5597,16 +5755,8 @@ app.get("/jobs/:id/edit", async (req, res) => {
               </div>
 
               <div class="control-card">
-                <h2>Activity / history</h2>
-                <div class="activity-list">
-                  ${activityItems.map(item => `
-                    <div class="activity-item">
-                      <span class="activity-dot"></span>
-                      <div><div class="activity-label">${escapeHtml(item.label)}</div><div class="activity-value">${escapeHtml(item.value)}</div></div>
-                    </div>
-                  `).join("")}
-                </div>
-                <p class="muted-note">This is a basic history view for now. A full audit trail can be added later.</p>
+                <h2>Audit trail</h2>
+                ${renderJobAuditTrail(auditRows)}
               </div>
             </aside>
           </div>
@@ -5677,7 +5827,9 @@ app.post("/jobs/:id/quick-status", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const status = req.body.status || "open";
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
     await pool.query(`UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`, [status, id]);
+    await logJobChanges(id, oldJob, { status }, currentAgentName(req), "status_changed");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick status update error:", error);
@@ -5690,7 +5842,9 @@ app.post("/jobs/:id/quick-appointment", async (req, res) => {
     const id = Number(req.params.id);
     const eta = normaliseEta(req.body);
     const scheduledAt = eta === "Scheduled" ? parseScheduledTimestamp(req.body) : null;
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
     await pool.query(`UPDATE jobs SET eta = $1, scheduled_at = $2, updated_at = NOW() WHERE id = $3`, [eta, scheduledAt, id]);
+    await logJobChanges(id, oldJob, { eta, scheduled_at: scheduledAt }, currentAgentName(req), "appointment_changed");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick appointment update error:", error);
@@ -5702,6 +5856,8 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const technicianId = parseOptionalInt(req.body.assigned_technician_id);
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    const newStatus = technicianId !== null && oldJob && oldJob.status === "open" ? "assigned" : oldJob ? oldJob.status : "open";
     await pool.query(`
       UPDATE jobs
       SET assigned_technician_id = $1,
@@ -5709,6 +5865,7 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
           updated_at = NOW()
       WHERE id = $2
     `, [technicianId, id]);
+    await logJobChanges(id, oldJob, { assigned_technician_id: technicianId, status: newStatus }, currentAgentName(req), "technician_changed");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick assign error:", error);
@@ -5720,6 +5877,39 @@ app.post("/jobs/:id/update", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const body = req.body;
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    const eta = normaliseEta(body);
+    const newValues = {
+      customer_name: body.customer_name,
+      customer_phone: compactPhone(body.customer_phone),
+      customer_alt_phone: compactPhone(body.customer_alt_phone),
+      customer_email: body.customer_email,
+      address_line_1: body.address_line_1,
+      address_line_2: body.address_line_2,
+      address_line_3: body.address_line_3,
+      town: body.town,
+      county: body.county,
+      postcode: compactPostcode(body.postcode),
+      job_type: body.job_type,
+      job_description: body.job_description,
+      urgency: body.urgency || "Normal",
+      source_campaign: body.source_campaign,
+      quoted_price: parseMoneyInput(body.quoted_price),
+      starting_price: parseMoneyInput(body.starting_price),
+      call_out_agreed: parseMoneyInput(body.call_out_agreed),
+      start_price_locks: parseMoneyInput(body.start_price_locks),
+      offsite_payment: body.offsite_payment === "true",
+      bill_payer_name: body.bill_payer_name,
+      bill_payer_phone: compactPhone(body.bill_payer_phone),
+      expected_payment_method: body.expected_payment_method || "Unknown",
+      account_job: body.account_job === "true",
+      account_template_id: parseOptionalInt(body.account_template_id),
+      assigned_technician_id: parseOptionalInt(body.assigned_technician_id),
+      eta,
+      scheduled_at: eta === "Scheduled" ? parseScheduledTimestamp(body) : null,
+      dispatcher_notes: body.dispatcher_notes,
+      status: body.status || "open"
+    };
     await pool.query(`
       UPDATE jobs SET
         customer_name=$1, customer_phone=$2, customer_alt_phone=$3, customer_email=$4,
@@ -5730,37 +5920,38 @@ app.post("/jobs/:id/update", async (req, res) => {
         eta=$26, scheduled_at=$27, dispatcher_notes=$28, status=$29, updated_at=NOW()
       WHERE id=$30
     `, [
-      body.customer_name,
-      compactPhone(body.customer_phone),
-      compactPhone(body.customer_alt_phone),
-      body.customer_email,
-      body.address_line_1,
-      body.address_line_2,
-      body.address_line_3,
-      body.town,
-      body.county,
-      compactPostcode(body.postcode),
-      body.job_type,
-      body.job_description,
-      body.urgency || "Normal",
-      body.source_campaign,
-      parseMoneyInput(body.quoted_price),
-      parseMoneyInput(body.starting_price),
-      parseMoneyInput(body.call_out_agreed),
-      parseMoneyInput(body.start_price_locks),
-      body.offsite_payment === "true",
-      body.bill_payer_name,
-      compactPhone(body.bill_payer_phone),
-      body.expected_payment_method || "Unknown",
-      body.account_job === "true",
-      parseOptionalInt(body.account_template_id),
-      parseOptionalInt(body.assigned_technician_id),
-      normaliseEta(body),
-      normaliseEta(body) === "Scheduled" ? parseScheduledTimestamp(body) : null,
-      body.dispatcher_notes,
-      body.status || "open",
+      newValues.customer_name,
+      newValues.customer_phone,
+      newValues.customer_alt_phone,
+      newValues.customer_email,
+      newValues.address_line_1,
+      newValues.address_line_2,
+      newValues.address_line_3,
+      newValues.town,
+      newValues.county,
+      newValues.postcode,
+      newValues.job_type,
+      newValues.job_description,
+      newValues.urgency,
+      newValues.source_campaign,
+      newValues.quoted_price,
+      newValues.starting_price,
+      newValues.call_out_agreed,
+      newValues.start_price_locks,
+      newValues.offsite_payment,
+      newValues.bill_payer_name,
+      newValues.bill_payer_phone,
+      newValues.expected_payment_method,
+      newValues.account_job,
+      newValues.account_template_id,
+      newValues.assigned_technician_id,
+      newValues.eta,
+      newValues.scheduled_at,
+      newValues.dispatcher_notes,
+      newValues.status,
       id
     ]);
+    await logJobChanges(id, oldJob, newValues, currentAgentName(req), "full_job_edit");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Update job error:", error);
@@ -5833,6 +6024,18 @@ app.post("/jobs/:id/close", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const body = req.body;
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    const closeValues = {
+      final_value: parseMoneyInput(body.final_value),
+      payment_method: body.payment_method || "Unknown",
+      customer_paid: body.customer_paid === "true",
+      materials_used: body.materials_used,
+      materials_cost: parseMoneyInput(body.materials_cost),
+      outcome: body.outcome,
+      tech_notes: body.tech_notes,
+      close_notes: body.close_notes,
+      status: body.status || "completed"
+    };
     await pool.query(`
       UPDATE jobs SET
         final_value=$1,
@@ -5849,18 +6052,19 @@ app.post("/jobs/:id/close", async (req, res) => {
         updated_at=NOW()
       WHERE id=$11
     `, [
-      parseMoneyInput(body.final_value),
-      body.payment_method || "Unknown",
-      body.customer_paid === "true",
-      body.materials_used,
-      parseMoneyInput(body.materials_cost),
-      body.outcome,
-      body.tech_notes,
-      body.close_notes,
-      body.status || "completed",
+      closeValues.final_value,
+      closeValues.payment_method,
+      closeValues.customer_paid,
+      closeValues.materials_used,
+      closeValues.materials_cost,
+      closeValues.outcome,
+      closeValues.tech_notes,
+      closeValues.close_notes,
+      closeValues.status,
       currentAgentName(req),
       id
     ]);
+    await logJobChanges(id, oldJob, closeValues, currentAgentName(req), "job_closed_or_payment_updated");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Close job error:", error);
@@ -6796,12 +7000,14 @@ app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
 
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
     await pool.query(`
       UPDATE jobs
       SET status = 'assigned', onsite_at = NOW(), tech_updated_at = NOW(), updated_at = NOW()
       WHERE id = $1
         AND (assigned_technician_id = $2 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)))
     `, [req.params.id, tech.id, tech.name]);
+    await logJobChanges(Number(req.params.id), oldJob, { status: "assigned", onsite_at: new Date() }, `${tech.name} workspace`, "technician_on_site");
 
     await pool.query(`
       UPDATE technicians
@@ -6882,6 +7088,17 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
     const materialsCost = parseMoneyInput(req.body.materials_cost);
     const allowedStatuses = ['closed', 'awaiting_payment', 'invoiced_account'];
     const newStatus = allowedStatuses.includes(req.body.status) ? req.body.status : 'closed';
+    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
+    const techCloseValues = {
+      final_value: finalValue,
+      payment_method: req.body.payment_method || '',
+      customer_paid: req.body.customer_paid === 'yes',
+      materials_used: req.body.materials_used || '',
+      materials_cost: materialsCost,
+      outcome: req.body.outcome || '',
+      tech_notes: req.body.tech_notes || '',
+      status: newStatus
+    };
 
     await pool.query(`
       UPDATE jobs
@@ -6901,19 +7118,20 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       WHERE id = $10
         AND (assigned_technician_id = $11 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($12)))
     `, [
-      finalValue,
-      req.body.payment_method || '',
-      req.body.customer_paid === 'yes',
-      req.body.materials_used || '',
-      materialsCost,
-      req.body.outcome || '',
-      req.body.tech_notes || '',
-      newStatus,
+      techCloseValues.final_value,
+      techCloseValues.payment_method,
+      techCloseValues.customer_paid,
+      techCloseValues.materials_used,
+      techCloseValues.materials_cost,
+      techCloseValues.outcome,
+      techCloseValues.tech_notes,
+      techCloseValues.status,
       tech.name,
       req.params.id,
       tech.id,
       tech.name
     ]);
+    await logJobChanges(Number(req.params.id), oldJob, techCloseValues, `${tech.name} workspace`, "technician_close_submit");
 
     await pool.query(`
       UPDATE technicians
