@@ -604,6 +604,41 @@ const closingJobStatuses = [
   { value: "disputed", label: "Disputed" }
 ];
 
+const unpaidJobStatuses = ["awaiting_payment", "awaiting_balance", "sent_to_pm", "disputed"];
+
+function isUnpaidTrackingStatus(status) {
+  return unpaidJobStatuses.includes(String(status || ""));
+}
+
+function chaseDateInputValue(value) {
+  if (!value) return dateInputValue(new Date());
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return dateInputValue(new Date());
+  return date.toISOString().slice(0, 10);
+}
+
+function renderPaymentChaseHistory(chases = []) {
+  if (!chases.length) return `<p class="muted-note">No payment chases logged yet.</p>`;
+  return `
+    <div class="activity-list">
+      ${chases.map(chase => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div>
+            <div class="activity-label">Chased on ${escapeHtml(chaseDateInputValue(chase.chase_date))}</div>
+            <div class="activity-value">
+              ${escapeHtml(chase.outcome || "No outcome entered")}<br>
+              ${chase.next_follow_up_date ? `<span class="muted">Next follow-up: ${escapeHtml(chaseDateInputValue(chase.next_follow_up_date))}</span><br>` : ""}
+              ${chase.notes ? `<span class="muted">${escapeHtml(chase.notes)}</span><br>` : ""}
+              <span class="muted">Logged ${escapeHtml(formatDateTime(chase.created_at))} by ${escapeHtml(chase.chased_by || "Unknown")}</span>
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 const legacyJobStatusLabels = {
   completed: "Completed",
   fully_paid_private: "Fully paid (private)"
@@ -1744,6 +1779,7 @@ function nav(req) {
           </div>
         </div>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+        <a class="side-link${active("/payment-chasing")}" href="/payment-chasing"><span class="side-dot dot-amber"></span><span>Payment chasing</span></a>
         <a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>
 
         <div class="sidebar-label section-label">Admin</div>
@@ -2166,6 +2202,28 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS changed_by TEXT;`);
   await pool.query(`ALTER TABLE job_audit_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_audit_log_job_idx ON job_audit_log (job_id, created_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_payment_chases (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      chase_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      outcome TEXT,
+      next_follow_up_date DATE,
+      notes TEXT,
+      chased_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS job_id INTEGER NOT NULL;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS chase_date DATE NOT NULL DEFAULT CURRENT_DATE;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS outcome TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS next_follow_up_date DATE;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS chased_by TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_job_idx ON job_payment_chases (job_id, chase_date DESC, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_follow_up_idx ON job_payment_chases (next_follow_up_date);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS campaigns (
@@ -4468,6 +4526,154 @@ function managementTrendTable(title, rows) {
   `;
 }
 
+
+app.get("/payment-chasing", async (req, res) => {
+  try {
+    const selected = String(req.query.view || "active").trim();
+    const today = dateInputValue(new Date());
+    const where = selected === "due"
+      ? `WHERE (j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid')) AND pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE`
+      : `WHERE j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid')`;
+
+    const result = await pool.query(`
+      WITH latest_chase AS (
+        SELECT DISTINCT ON (job_id) *
+        FROM job_payment_chases
+        ORDER BY job_id, chase_date DESC, created_at DESC, id DESC
+      ), chase_counts AS (
+        SELECT job_id, COUNT(*)::int AS chase_count
+        FROM job_payment_chases
+        GROUP BY job_id
+      )
+      SELECT
+        j.*, t.name AS technician_name,
+        pc.chase_date AS last_chase_date,
+        pc.outcome AS last_chase_outcome,
+        pc.next_follow_up_date,
+        pc.notes AS last_chase_notes,
+        pc.chased_by AS last_chased_by,
+        pc.created_at AS last_chase_logged_at,
+        COALESCE(cc.chase_count, 0)::int AS chase_count
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      LEFT JOIN latest_chase pc ON pc.job_id = j.id
+      LEFT JOIN chase_counts cc ON cc.job_id = j.id
+      ${where}
+      ORDER BY
+        CASE WHEN pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE THEN 0 ELSE 1 END,
+        COALESCE(pc.next_follow_up_date, CURRENT_DATE + INTERVAL '90 days') ASC,
+        COALESCE(j.closed_at, j.updated_at, j.created_at) DESC
+      LIMIT 300
+    `);
+
+    const rows = result.rows;
+    const dueCount = rows.filter(row => row.next_follow_up_date && chaseDateInputValue(row.next_follow_up_date) <= today).length;
+    const noChaseCount = rows.filter(row => !row.last_chase_date).length;
+    const totalOwed = rows.reduce((sum, row) => sum + Number(row.final_value || 0), 0);
+    const totalMaterials = rows.reduce((sum, row) => sum + Number(row.materials_cost || 0), 0);
+
+    const cards = `
+      <div class="metric-grid">
+        <div class="metric-card"><div class="metric-label">Jobs needing chase</div><div class="metric-value">${rows.length}</div></div>
+        <div class="metric-card"><div class="metric-label">Follow-up due</div><div class="metric-value">${dueCount}</div></div>
+        <div class="metric-card"><div class="metric-label">Never chased</div><div class="metric-value">${noChaseCount}</div></div>
+        <div class="metric-card"><div class="metric-label">Value outstanding</div><div class="metric-value">${money(totalOwed)}</div></div>
+        <div class="metric-card"><div class="metric-label">Materials exposed</div><div class="metric-value">${money(totalMaterials)}</div></div>
+      </div>
+    `;
+
+    const body = rows.map(job => `
+      <tr>
+        <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""}</strong></a><br><span class="muted">${escapeHtml(job.customer_name || "—")} ${job.customer_phone ? `· ${escapeHtml(job.customer_phone)}` : ""}</span></td>
+        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span><br><span class="muted">${escapeHtml(job.technician_name || "Unassigned")}</span></td>
+        <td><strong>${money(job.final_value || 0)}</strong><br><span class="muted">Paid: ${job.customer_paid ? "Yes" : "No"}</span></td>
+        <td>${job.last_chase_date ? `${escapeHtml(chaseDateInputValue(job.last_chase_date))}<br><span class="muted">${escapeHtml(job.last_chased_by || "Unknown")}</span>` : `<span class="muted">Not chased yet</span>`}</td>
+        <td>${escapeHtml(job.last_chase_outcome || "—")}${job.last_chase_notes ? `<br><span class="muted">${escapeHtml(job.last_chase_notes)}</span>` : ""}</td>
+        <td>${job.next_follow_up_date ? `<strong>${escapeHtml(chaseDateInputValue(job.next_follow_up_date))}</strong>` : `<span class="muted">Not set</span>`}</td>
+        <td>
+          <form method="POST" action="/jobs/${job.id}/payment-chase" class="mini-inline-form">
+            <input type="date" name="chase_date" value="${escapeHtml(today)}" title="Chase date">
+            <input name="outcome" placeholder="Outcome" required>
+            <input type="date" name="next_follow_up_date" title="Next follow-up">
+            <input name="notes" placeholder="Notes">
+            <button type="submit">Log chase</button>
+          </form>
+          <div class="muted">${Number(job.chase_count || 0)} chase${Number(job.chase_count || 0) === 1 ? "" : "s"} logged</div>
+        </td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Payment Chasing</title>
+        <style>
+          ${sharedStyles()}
+          .mini-inline-form { display:grid; grid-template-columns: 120px minmax(150px,1fr) 120px minmax(120px,1fr) auto; gap:8px; align-items:center; }
+          .mini-inline-form input { min-width:0; padding:9px; }
+          .mini-inline-form button { padding:9px 12px; white-space:nowrap; }
+          @media (max-width: 980px) { .mini-inline-form { grid-template-columns: 1fr; } }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Payment Chasing</h1>
+        <div class="subtitle">Track partially or completely unpaid jobs. Every chase records the date, outcome, user and next follow-up date.</div>
+        <div class="page-actions">
+          <a class="action-button ${selected === "active" ? "dark" : ""}" href="/payment-chasing">All unpaid / part-paid jobs</a>
+          <a class="action-button ${selected === "due" ? "dark" : ""}" href="/payment-chasing?view=due">Follow-up due</a>
+          <a class="action-button" href="/jobs">Back to Dispatch Board</a>
+        </div>
+        ${cards}
+        <div class="panel">
+          <h2>Jobs requiring payment chase</h2>
+          <table>
+            <thead><tr><th>Job / customer</th><th>Status / tech</th><th>Value</th><th>Last chased</th><th>Outcome</th><th>Next follow-up</th><th>Log chase</th></tr></thead>
+            <tbody>${body || `<tr><td colspan="7" class="muted">No unpaid or part-paid jobs need chasing.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Payment chasing page error:", error);
+    res.status(500).send(`Payment chasing page error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+app.post("/jobs/:id/payment-chase", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const body = req.body;
+    const chaseDate = body.chase_date || dateInputValue(new Date());
+    const nextFollowUp = body.next_follow_up_date || null;
+    const outcome = String(body.outcome || "").trim();
+    const notes = String(body.notes || "").trim();
+    const changedBy = currentAgentName(req);
+
+    await pool.query(`
+      INSERT INTO job_payment_chases (job_id, chase_date, outcome, next_follow_up_date, notes, chased_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `, [id, chaseDate, outcome, nextFollowUp, notes, changedBy]);
+
+    await addJobAuditEntry(
+      id,
+      "payment_chase_logged",
+      "Payment chase",
+      "—",
+      `${chaseDate}${outcome ? ` · ${outcome}` : ""}${nextFollowUp ? ` · next ${nextFollowUp}` : ""}`,
+      changedBy
+    );
+
+    const back = req.headers.referer && String(req.headers.referer).includes('/payment-chasing') ? '/payment-chasing' : `/jobs/${id}/edit`;
+    res.redirect(back);
+  } catch (error) {
+    console.error("Payment chase save error:", error);
+    res.status(500).send(`Payment chase save error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
 app.get("/reports/management", async (req, res) => {
   try {
     const nowParts = londonDateParts();
@@ -5034,7 +5240,7 @@ app.get("/jobs", async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult] = await Promise.all([
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult] = await Promise.all([
       pool.query(`
         SELECT j.*, t.name AS technician_name
         FROM jobs j
@@ -5082,6 +5288,12 @@ app.get("/jobs", async (req, res) => {
         SELECT COUNT(*)::int AS count
         FROM disputes
         WHERE COALESCE(status, 'open_dispute') NOT IN ('resolved', 'rejected', 'refund_processed')
+      `),
+      pool.query(`
+        SELECT COUNT(*)::int AS count
+        FROM jobs
+        WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
+           OR (closed_at IS NOT NULL AND COALESCE(customer_paid, FALSE) = FALSE AND COALESCE(final_value, 0) > 0 AND COALESCE(status, '') <> 'fully_paid')
       `)
     ]);
 
@@ -5118,6 +5330,7 @@ app.get("/jobs", async (req, res) => {
 
     const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
     const openDisputesTotal = Number(disputesMetricResult.rows[0]?.count || 0);
+    const paymentChaseTotal = Number(paymentChaseMetricResult.rows[0]?.count || 0);
 
     const statusCards = [
       { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue", hrefStatus: "open" },
@@ -5126,7 +5339,8 @@ app.get("/jobs", async (req, res) => {
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
       { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed_today" },
       { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" },
-      { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" }
+      { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" },
+      { label: "Payment chase", value: paymentChaseTotal, className: "board-purple", href: "/payment-chasing" }
     ];
 
     function technicianBadgeClass(status) {
@@ -5211,7 +5425,7 @@ app.get("/jobs", async (req, res) => {
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .status-card-grid {
             display: grid;
-            grid-template-columns: repeat(7, minmax(145px, 1fr));
+            grid-template-columns: repeat(8, minmax(135px, 1fr));
             gap: 18px;
             margin: 22px 0 20px;
           }
@@ -5227,6 +5441,7 @@ app.get("/jobs", async (req, res) => {
           .board-pink:before, .board-pink:after { background: #db2777; }
           .board-slate:before, .board-slate:after { background: #475569; }
           .board-orange:before, .board-orange:after { background: #f97316; }
+          .board-purple:before, .board-purple:after { background: #7c3aed; }
           .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px 20px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
           .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -6006,6 +6221,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
       ORDER BY created_at DESC, id DESC
       LIMIT 80
     `, [id])).rows;
+    const paymentChases = (await pool.query(`
+      SELECT * FROM job_payment_chases
+      WHERE job_id = $1
+      ORDER BY chase_date DESC, created_at DESC, id DESC
+      LIMIT 20
+    `, [id])).rows;
 
     const activityItems = [
       { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
@@ -6222,6 +6443,23 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 <textarea id="techSummary" class="tech-summary-box" readonly>${escapeHtml(summary)}</textarea>
                 <br><br>
                 <button class="copy-mini" type="button" onclick="copySummary()">Copy summary</button>
+              </div>
+
+              <div class="control-card">
+                <h2>Payment chase</h2>
+                <p class="muted-note">Use this when a job is partially or fully unpaid. Log the chase, outcome and next follow-up date.</p>
+                <form method="POST" action="/jobs/${job.id}/payment-chase" class="quick-form">
+                  <label>Chase made</label>
+                  <input type="date" name="chase_date" value="${escapeHtml(dateInputValue(new Date()))}">
+                  <label>Outcome</label>
+                  <input name="outcome" placeholder="e.g. Left voicemail / client promised payment">
+                  <label>Next follow-up date</label>
+                  <input type="date" name="next_follow_up_date">
+                  <label>Notes</label>
+                  <textarea name="notes" rows="2" placeholder="Optional notes"></textarea>
+                  <button type="submit">Log payment chase</button>
+                </form>
+                ${renderPaymentChaseHistory(paymentChases)}
               </div>
 
               <div class="control-card">
