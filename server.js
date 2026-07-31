@@ -892,6 +892,27 @@ function quarterHourTimeOptions(selectedTime = "") {
   return opts.join("");
 }
 
+function compactScheduledTimePicker(prefix, selectedTime = "") {
+  const selected = String(selectedTime || "").trim();
+  const selectedHour = selected && selected.includes(":") ? selected.split(":")[0] : "";
+  const selectedMinute = selected && selected.includes(":") ? selected.split(":")[1] : "";
+  const hourOptions = [`<option value="">Hour</option>`];
+  for (let hour = 0; hour < 24; hour += 1) {
+    const value = String(hour).padStart(2, "0");
+    hourOptions.push(`<option value="${value}" ${value === selectedHour ? "selected" : ""}>${value}</option>`);
+  }
+  const minuteOptions = ["00", "15", "30", "45"].map(minute => `
+    <button type="button" class="minute-pill ${minute === selectedMinute ? "active" : ""}" data-minute="${minute}" data-target="${prefix}">:${minute}</button>
+  `).join("");
+  return `
+    <div class="time-picker" data-time-picker="${prefix}">
+      <select id="${prefix}_hour" class="hour-select" aria-label="Scheduled hour">${hourOptions.join("")}</select>
+      <div class="minute-buttons" aria-label="Scheduled minutes">${minuteOptions}</div>
+      <input type="hidden" id="${prefix}_time" name="scheduled_time" value="${escapeHtml(selected)}">
+    </div>
+  `;
+}
+
 function parseScheduledTimestamp(body) {
   const date = String(body.scheduled_date || "").trim();
   const time = String(body.scheduled_time || "").trim();
@@ -5907,6 +5928,35 @@ app.get("/jobs/new", async (req, res) => {
           }
           .tel-wrap input { border-top-left-radius: 0; border-bottom-left-radius: 0; }
           .muted-light { color: #6b7280; font-size: 12px; }
+          .time-picker {
+            display: grid;
+            grid-template-columns: 92px 1fr;
+            gap: 8px;
+            align-items: center;
+          }
+          .time-picker .hour-select { min-width: 92px; }
+          .minute-buttons {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(46px, 1fr));
+            gap: 6px;
+          }
+          .minute-pill {
+            min-height: 38px;
+            border: 1px solid #bfc7d1;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #111827;
+            font-weight: 800;
+            cursor: pointer;
+          }
+          .minute-pill.active {
+            background: #2563eb;
+            color: #ffffff;
+            border-color: #2563eb;
+          }
+          @media (max-width: 520px) {
+            .time-picker { grid-template-columns: 1fr; }
+          }
           @media (max-width: 800px) {
             .form-grid-2, .form-grid-3, .customer-line, .phone-line, .postcode-row { grid-template-columns: 1fr; }
             .order-body { padding: 16px; }
@@ -6037,7 +6087,7 @@ app.get("/jobs/new", async (req, res) => {
                       <label>Scheduled date and time</label>
                       <div class="form-grid-2" style="margin-top:6px;">
                         <input type="date" id="scheduled_date" name="scheduled_date">
-                        <select id="scheduled_time" name="scheduled_time">${quarterHourTimeOptions("")}</select>
+                        ${compactScheduledTimePicker("scheduled", "")}
                       </div>
                       <input type="hidden" id="scheduled_at" name="scheduled_at">
                     </div>
@@ -6151,6 +6201,31 @@ app.get("/jobs/new", async (req, res) => {
             if (etaOther) etaOther.style.display = etaSelect.value === "Other" ? "block" : "none";
             if (scheduledBox) scheduledBox.style.display = etaSelect.value === "Scheduled" ? "grid" : "none";
           }
+          function initCompactTimePicker(prefix) {
+            const hour = document.getElementById(prefix + "_hour");
+            const hidden = document.getElementById(prefix + "_time");
+            const buttons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
+            if (!hour || !hidden || !buttons.length) return;
+            function selectedMinute() {
+              const active = buttons.find(button => button.classList.contains("active"));
+              return active ? active.dataset.minute : "";
+            }
+            function syncTime() {
+              const minute = selectedMinute();
+              hidden.value = hour.value && minute ? hour.value + ":" + minute : "";
+            }
+            hour.addEventListener("change", syncTime);
+            buttons.forEach(button => {
+              button.addEventListener("click", () => {
+                buttons.forEach(item => item.classList.remove("active"));
+                button.classList.add("active");
+                syncTime();
+              });
+            });
+            syncTime();
+          }
+          initCompactTimePicker("scheduled");
+
           function combineScheduledDateTime() {
             const scheduledDate = document.getElementById("scheduled_date");
             const scheduledTime = document.getElementById("scheduled_time");
@@ -6484,7 +6559,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
                     <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px;"><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}"><select id="edit_scheduled_time" name="scheduled_time">${quarterHourTimeOptions(scheduledTimeValue(job.scheduled_at))}</select></div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
+                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px;"><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}">${compactScheduledTimePicker("edit_scheduled", scheduledTimeValue(job.scheduled_at))}</div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
                     <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
@@ -6516,7 +6591,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <label>Scheduled date and time</label>
                     <div class="quick-form-row">
                       <input type="date" id="quick_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}">
-                      <select id="quick_scheduled_time" name="scheduled_time">${quarterHourTimeOptions(scheduledTimeValue(job.scheduled_at))}</select>
+                      ${compactScheduledTimePicker("quick_scheduled", scheduledTimeValue(job.scheduled_at))}
                     </div>
                     <input type="hidden" id="quick_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}">
                   </div>
@@ -6583,6 +6658,32 @@ app.get("/jobs/:id/edit", async (req, res) => {
             if (quickEtaOther) quickEtaOther.style.display = quickEtaSelect.value === "Other" ? "block" : "none";
             if (quickScheduledBox) quickScheduledBox.style.display = quickEtaSelect.value === "Scheduled" ? "block" : "none";
           }
+          function initCompactTimePicker(prefix) {
+            const hour = document.getElementById(prefix + "_hour");
+            const hidden = document.getElementById(prefix + "_time");
+            const buttons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
+            if (!hour || !hidden || !buttons.length) return;
+            function selectedMinute() {
+              const active = buttons.find(button => button.classList.contains("active"));
+              return active ? active.dataset.minute : "";
+            }
+            function syncTime() {
+              const minute = selectedMinute();
+              hidden.value = hour.value && minute ? hour.value + ":" + minute : "";
+            }
+            hour.addEventListener("change", syncTime);
+            buttons.forEach(button => {
+              button.addEventListener("click", () => {
+                buttons.forEach(item => item.classList.remove("active"));
+                button.classList.add("active");
+                syncTime();
+              });
+            });
+            syncTime();
+          }
+          initCompactTimePicker("quick_scheduled");
+          initCompactTimePicker("edit_scheduled");
+
           function combineQuickScheduledDateTime() {
             const scheduledDate = document.getElementById("quick_scheduled_date");
             const scheduledTime = document.getElementById("quick_scheduled_time");
