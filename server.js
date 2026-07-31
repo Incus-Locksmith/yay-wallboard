@@ -2509,342 +2509,352 @@ app.get("/logout", (req, res) => {
 });
 
 app.get("/start-shift", async (req, res) => {
-  try {
-    const agentName = currentAgentName(req) || "there";
+  const agentName = currentAgentName(req) || "there";
 
-    const callsTakenTodayResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM calls
-      WHERE start_time >= date_trunc('day', NOW())
-        AND LOWER(COALESCE(call_type, '')) = 'inbound'
-        AND COALESCE(answered_by, '') <> ''
-    `);
+  const safeCount = async (label, sql, params = []) => {
+    try {
+      const result = await pool.query(sql, params);
+      return Number(result.rows[0]?.count || 0);
+    } catch (error) {
+      console.error(`Start shift count error (${label}):`, error);
+      return 0;
+    }
+  };
 
-    const activeJobsTodayResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM jobs
-      WHERE created_at >= date_trunc('day', NOW())
-        AND status IN ('open', 'assigned')
-    `);
+  const safeRows = async (label, sql, params = []) => {
+    try {
+      const result = await pool.query(sql, params);
+      return result.rows || [];
+    } catch (error) {
+      console.error(`Start shift list error (${label}):`, error);
+      return [];
+    }
+  };
 
-    const notClosedResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM jobs
-      WHERE COALESCE(status, 'open') NOT IN (
-        'closed', 'fully_paid', 'cancelled_before_arrival', 'cancelled_onsite', 'completed', 'fully_paid_private'
-      )
-    `);
+  const callsTakenToday = await safeCount("calls taken today", `
+    SELECT COUNT(*)::int AS count
+    FROM calls
+    WHERE start_time >= date_trunc('day', NOW())
+      AND LOWER(COALESCE(call_type, '')) = 'inbound'
+      AND COALESCE(answered_by, '') <> ''
+  `);
 
-    const disputedJobsResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM (
-        SELECT id FROM jobs WHERE status = 'disputed'
-        UNION
-        SELECT job_id AS id
-        FROM disputes
-        WHERE job_id IS NOT NULL
-          AND LOWER(COALESCE(status, 'open_dispute')) NOT IN ('resolved', 'rejected', 'refund_processed')
-      ) disputed_jobs
-    `);
+  const activeJobsToday = await safeCount("active jobs today", `
+    SELECT COUNT(*)::int AS count
+    FROM jobs
+    WHERE created_at >= date_trunc('day', NOW())
+      AND status IN ('open', 'assigned')
+  `);
 
-    const paymentFollowUpResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM jobs
-      WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
-         OR customer_paid = FALSE
-    `);
+  const jobsNotClosed = await safeCount("jobs not closed", `
+    SELECT COUNT(*)::int AS count
+    FROM jobs
+    WHERE COALESCE(status, 'open') NOT IN (
+      'closed', 'fully_paid', 'cancelled_before_arrival', 'cancelled_onsite', 'completed', 'fully_paid_private'
+    )
+  `);
 
-    const invoicesNotSentResult = await pool.query(`
-      SELECT COUNT(*)::int AS count
-      FROM invoices
-      WHERE LOWER(COALESCE(invoice_stage, 'Draft only')) NOT LIKE '%emailed%'
-        AND LOWER(COALESCE(invoice_stage, '')) NOT LIKE '%cancelled%'
-    `);
+  const disputedJobs = await safeCount("disputed jobs", `
+    SELECT COUNT(*)::int AS count
+    FROM (
+      SELECT id FROM jobs WHERE status = 'disputed'
+      UNION
+      SELECT job_id AS id
+      FROM disputes
+      WHERE job_id IS NOT NULL
+        AND LOWER(COALESCE(status, 'open_dispute')) NOT IN ('resolved', 'rejected', 'refund_processed')
+    ) disputed_jobs
+  `);
 
-    const openUnassignedResult = await pool.query(`
-      SELECT job_number, postcode, job_type, created_at
-      FROM jobs
-      WHERE status = 'open'
-        AND assigned_technician_id IS NULL
-      ORDER BY created_at ASC
-      LIMIT 5
-    `);
+  const paymentFollowUp = await safeCount("payment follow up", `
+    SELECT COUNT(*)::int AS count
+    FROM jobs
+    WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
+       OR customer_paid = FALSE
+  `);
 
-    const assignedResult = await pool.query(`
-      SELECT j.job_number, j.postcode, j.job_type, j.created_at, t.name AS technician_name
-      FROM jobs j
-      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
-      WHERE j.status = 'assigned'
-      ORDER BY j.created_at ASC
-      LIMIT 5
-    `);
+  const invoicesNotSent = await safeCount("invoices not sent", `
+    SELECT COUNT(*)::int AS count
+    FROM invoices
+    WHERE LOWER(COALESCE(invoice_stage, 'Draft only')) NOT LIKE '%emailed%'
+      AND LOWER(COALESCE(invoice_stage, '')) NOT LIKE '%cancelled%'
+  `);
 
-    const disputedRowsResult = await pool.query(`
-      SELECT DISTINCT j.id, j.job_number, j.postcode, j.job_type, j.customer_name, j.updated_at, j.created_at
-      FROM jobs j
-      LEFT JOIN disputes d ON d.job_id = j.id
-      WHERE j.status = 'disputed'
-         OR LOWER(COALESCE(d.status, '')) NOT IN ('', 'resolved', 'rejected', 'refund_processed')
-      ORDER BY COALESCE(j.updated_at, j.created_at) DESC
-      LIMIT 5
-    `);
+  const openRows = await safeRows("open unassigned jobs", `
+    SELECT job_number, postcode, job_type, created_at
+    FROM jobs
+    WHERE status = 'open'
+      AND assigned_technician_id IS NULL
+    ORDER BY created_at ASC
+    LIMIT 5
+  `);
 
-    const followUpRowsResult = await pool.query(`
-      WITH latest_chase AS (
-        SELECT DISTINCT ON (job_id) job_id, chase_date, outcome, next_follow_up_date, chased_by, created_at
-        FROM job_payment_chases
-        ORDER BY job_id, chase_date DESC, created_at DESC, id DESC
-      )
-      SELECT j.id, j.job_number, j.postcode, j.customer_name, j.status, lc.chase_date, lc.outcome, lc.next_follow_up_date
-      FROM jobs j
-      LEFT JOIN latest_chase lc ON lc.job_id = j.id
-      WHERE j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
-         OR j.customer_paid = FALSE
-      ORDER BY lc.next_follow_up_date ASC NULLS FIRST, COALESCE(j.updated_at, j.created_at) DESC
-      LIMIT 5
-    `);
+  const assignedRows = await safeRows("assigned jobs", `
+    SELECT j.job_number, j.postcode, j.job_type, j.created_at, t.name AS technician_name
+    FROM jobs j
+    LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+    WHERE j.status = 'assigned'
+    ORDER BY j.created_at ASC
+    LIMIT 5
+  `);
 
-    const unsentInvoiceRowsResult = await pool.query(`
-      SELECT invoice_number, customer_name, customer_postcode, invoice_stage, created_at
-      FROM invoices
-      WHERE LOWER(COALESCE(invoice_stage, 'Draft only')) NOT LIKE '%emailed%'
-        AND LOWER(COALESCE(invoice_stage, '')) NOT LIKE '%cancelled%'
-      ORDER BY created_at DESC
-      LIMIT 5
-    `);
+  const disputedRows = await safeRows("disputed rows", `
+    SELECT DISTINCT j.id, j.job_number, j.postcode, j.job_type, j.customer_name, j.updated_at, j.created_at
+    FROM jobs j
+    LEFT JOIN disputes d ON d.job_id = j.id
+    WHERE j.status = 'disputed'
+       OR LOWER(COALESCE(d.status, '')) NOT IN ('', 'resolved', 'rejected', 'refund_processed')
+    ORDER BY COALESCE(j.updated_at, j.created_at) DESC
+    LIMIT 5
+  `);
 
-    const techResult = await pool.query(`
-      SELECT
-        COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%available%' AND LOWER(COALESCE(status, '')) NOT LIKE '%soon%')::int AS available,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%job%')::int AS on_job,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%soon%')::int AS soon
-      FROM technicians
-      WHERE active = TRUE
-    `);
+  const followUpRows = await safeRows("payment follow up rows", `
+    WITH latest_chase AS (
+      SELECT DISTINCT ON (job_id) job_id, chase_date, outcome, next_follow_up_date, chased_by, created_at
+      FROM job_payment_chases
+      ORDER BY job_id, chase_date DESC, created_at DESC, id DESC
+    )
+    SELECT j.id, j.job_number, j.postcode, j.customer_name, j.status, lc.chase_date, lc.outcome, lc.next_follow_up_date
+    FROM jobs j
+    LEFT JOIN latest_chase lc ON lc.job_id = j.id
+    WHERE j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
+       OR j.customer_paid = FALSE
+    ORDER BY lc.next_follow_up_date ASC NULLS FIRST, COALESCE(j.updated_at, j.created_at) DESC
+    LIMIT 5
+  `);
 
-    const openRows = openUnassignedResult.rows;
-    const assignedRows = assignedResult.rows;
-    const disputedRows = disputedRowsResult.rows;
-    const followUpRows = followUpRowsResult.rows;
-    const unsentInvoiceRows = unsentInvoiceRowsResult.rows;
-    const tech = techResult.rows[0] || {};
+  const unsentInvoiceRows = await safeRows("unsent invoice rows", `
+    SELECT invoice_number, customer_name, customer_postcode, invoice_stage, created_at
+    FROM invoices
+    WHERE LOWER(COALESCE(invoice_stage, 'Draft only')) NOT LIKE '%emailed%'
+      AND LOWER(COALESCE(invoice_stage, '')) NOT LIKE '%cancelled%'
+    ORDER BY created_at DESC
+    LIMIT 5
+  `);
 
-    const metric = (label, value, href, tone = "") => `
-      <a class="metric-card ${tone}" href="${escapeHtml(href)}">
-        <span>${escapeHtml(label)}</span>
-        <strong>${Number(value || 0)}</strong>
-      </a>
-    `;
+  const techRows = await safeRows("technician availability", `
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%available%' AND LOWER(COALESCE(status, '')) NOT LIKE '%soon%')::int AS available,
+      COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%job%')::int AS on_job,
+      COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) LIKE '%soon%')::int AS soon
+    FROM technicians
+    WHERE active = TRUE
+  `);
+  const tech = techRows[0] || {};
 
-    const lineList = (rows, emptyText, formatter) => {
-      if (!rows.length) return `<div class="brief-small">${escapeHtml(emptyText)}</div>`;
-      return rows.map(formatter).join("");
-    };
+  const metric = (label, value, href, tone = "") => `
+    <a class="metric-card ${tone}" href="${escapeHtml(href)}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${Number(value || 0)}</strong>
+    </a>
+  `;
 
-    const openList = lineList(openRows, "No unassigned open jobs.", job => `
-      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · waiting to assign</div>
-    `);
+  const lineList = (rows, emptyText, formatter) => {
+    if (!rows.length) return `<div class="brief-small">${escapeHtml(emptyText)}</div>`;
+    return rows.map(formatter).join("");
+  };
 
-    const assignedList = lineList(assignedRows, "No assigned jobs waiting for completion.", job => `
-      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.technician_name || 'Technician assigned')}</div>
-    `);
+  const openList = lineList(openRows, "No unassigned open jobs.", job => `
+    <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · waiting to assign</div>
+  `);
 
-    const disputeList = lineList(disputedRows, "No disputed jobs showing right now.", job => `
-      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.customer_name || 'Customer')} · ${escapeHtml(job.job_type || 'Job')}</div>
-    `);
+  const assignedList = lineList(assignedRows, "No assigned jobs waiting for completion.", job => `
+    <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.technician_name || 'Technician assigned')}</div>
+  `);
 
-    const followUpList = lineList(followUpRows, "No unpaid follow-up items showing right now.", job => `
-      <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(jobStatusLabel(job.status))}${job.next_follow_up_date ? ` · next ${escapeHtml(chaseDateInputValue(job.next_follow_up_date))}` : ' · follow-up needed'}</div>
-    `);
+  const disputeList = lineList(disputedRows, "No disputed jobs showing right now.", job => `
+    <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(job.customer_name || 'Customer')} · ${escapeHtml(job.job_type || 'Job')}</div>
+  `);
 
-    const invoiceList = lineList(unsentInvoiceRows, "No unsent invoices showing right now.", invoice => `
-      <div class="brief-line"><strong>${escapeHtml(invoice.customer_postcode || invoice.invoice_number || 'Invoice')}</strong> — ${escapeHtml(invoice.customer_name || 'Customer')} · ${escapeHtml(invoice.invoice_stage || 'Draft only')}</div>
-    `);
+  const followUpList = lineList(followUpRows, "No unpaid follow-up items showing right now.", job => `
+    <div class="brief-line"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> — ${escapeHtml(jobStatusLabel(job.status))}${job.next_follow_up_date ? ` · next ${escapeHtml(chaseDateInputValue(job.next_follow_up_date))}` : ' · follow-up needed'}</div>
+  `);
 
-    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hour12: false }).format(new Date()));
-    const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-    const todayLabel = new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
-    }).format(new Date());
+  const invoiceList = lineList(unsentInvoiceRows, "No unsent invoices showing right now.", invoice => `
+    <div class="brief-line"><strong>${escapeHtml(invoice.customer_postcode || invoice.invoice_number || 'Invoice')}</strong> — ${escapeHtml(invoice.customer_name || 'Customer')} · ${escapeHtml(invoice.invoice_stage || 'Draft only')}</div>
+  `);
 
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Start shift</title>
-        <style>
-          :root {
-            --red: #d9462e;
-            --green: #22a851;
-            --amber: #f59e0b;
-            --blue: #2563eb;
-            --purple: #7c3aed;
-            --charcoal: #26323a;
-            --muted: #637083;
-            --bg: #f5f6f8;
-            --border: #e5e7eb;
-          }
-          * { box-sizing: border-box; }
-          body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: Arial, sans-serif;
-            color: #1f2937;
-            background:
-              linear-gradient(rgba(17,24,39,0.68), rgba(17,24,39,0.68)),
-              radial-gradient(circle at top left, rgba(34,168,81,0.14), transparent 34%),
-              #1f2937;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 28px;
-          }
-          .brief-card {
-            width: min(780px, 100%);
-            background: white;
-            border-radius: 24px;
-            padding: 34px;
-            box-shadow: 0 28px 90px rgba(0,0,0,0.36);
-            border: 1px solid rgba(255,255,255,0.65);
-          }
-          .logo-row { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
-          .logo-row img { width: 78px; height: 78px; object-fit: contain; border-radius: 16px; background: #fff; }
-          .brief-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            background: #fee2e2;
-            color: var(--red);
-            border-radius: 999px;
-            padding: 8px 14px;
-            font-size: 12px;
-            font-weight: 900;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-          }
-          .brief-pill::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: var(--red); display: inline-block; }
-          h1 { margin: 18px 0 6px; font-size: 31px; line-height: 1.1; letter-spacing: -0.02em; color: #1f2937; }
-          .intro { color: var(--muted); margin: 0 0 24px; line-height: 1.45; }
-          .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0 22px; }
-          .metric-card {
-            display: block;
-            text-decoration: none;
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 14px;
-            background: #f8fafc;
-            color: #1f2937;
-          }
-          .metric-card span { display: block; color: #64748b; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.05em; line-height: 1.25; min-height: 30px; }
-          .metric-card strong { display: block; margin-top: 8px; font-size: 30px; line-height: 1; }
-          .metric-card.red { border-color: #fecaca; background: #fff1f2; }
-          .metric-card.amber { border-color: #fde68a; background: #fffbeb; }
-          .metric-card.blue { border-color: #bfdbfe; background: #eff6ff; }
-          .metric-card.purple { border-color: #ddd6fe; background: #f5f3ff; }
-          .brief-item {
-            border-radius: 14px;
-            padding: 15px 17px;
-            margin: 12px 0;
-            border-left: 5px solid;
-          }
-          .brief-red { background: #fde9e7; border-left-color: var(--red); }
-          .brief-amber { background: #fff3e1; border-left-color: var(--amber); }
-          .brief-green { background: #e7f7ed; border-left-color: var(--green); }
-          .brief-blue { background: #eff6ff; border-left-color: var(--blue); }
-          .brief-purple { background: #f5f3ff; border-left-color: var(--purple); }
-          .brief-title { font-weight: 900; margin-bottom: 7px; color: #1f2937; }
-          .brief-line { color: #334155; font-size: 14px; line-height: 1.45; margin: 3px 0; }
-          .brief-small { color: #64748b; font-size: 14px; }
-          .start-button {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-top: 26px;
-            width: 100%;
-            background: var(--red);
-            color: white;
-            border: 0;
-            border-radius: 12px;
-            padding: 16px 20px;
-            text-decoration: none;
-            font-weight: 900;
-            box-shadow: 0 12px 26px rgba(217,70,46,0.22);
-          }
-          .secondary-link { display: block; text-align: center; margin-top: 14px; color: #64748b; font-size: 13px; text-decoration: none; }
-          @media (max-width: 720px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-          @media (max-width: 560px) {
-            body { padding: 16px; align-items: flex-start; }
-            .brief-card { padding: 24px; margin-top: 20px; }
-            .logo-row { justify-content: center; align-items: flex-start; }
-            .logo-row img { width: 92px; height: 92px; }
-            h1 { font-size: 26px; }
-            .metric-grid { grid-template-columns: 1fr; }
-          }
-        </style>
-      </head>
-      <body>
-        <main class="brief-card">
-          <div class="logo-row">
-            <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none';">
-            <div>
-              <div class="brief-pill">Dispatcher briefing — ${escapeHtml(todayLabel)}</div>
-              <h1>${escapeHtml(greeting)}, ${escapeHtml(agentName)}.</h1>
-              <p class="intro">Here’s the operational picture for the shift. Revenue has been removed from this dispatcher summary.</p>
-            </div>
+  const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hour12: false }).format(new Date()));
+  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const todayLabel = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+  }).format(new Date());
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Start shift</title>
+      <style>
+        :root {
+          --red: #d9462e;
+          --green: #22a851;
+          --amber: #f59e0b;
+          --blue: #2563eb;
+          --purple: #7c3aed;
+          --charcoal: #26323a;
+          --muted: #637083;
+          --bg: #f5f6f8;
+          --border: #e5e7eb;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          min-height: 100vh;
+          font-family: Arial, sans-serif;
+          color: #1f2937;
+          background:
+            linear-gradient(rgba(17,24,39,0.68), rgba(17,24,39,0.68)),
+            radial-gradient(circle at top left, rgba(34,168,81,0.14), transparent 34%),
+            #1f2937;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 28px;
+        }
+        .brief-card {
+          width: min(820px, 100%);
+          background: white;
+          border-radius: 24px;
+          padding: 34px;
+          box-shadow: 0 28px 90px rgba(0,0,0,0.36);
+          border: 1px solid rgba(255,255,255,0.65);
+        }
+        .logo-row { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+        .logo-row img { width: 78px; height: 78px; object-fit: contain; border-radius: 16px; background: #fff; }
+        .brief-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          background: #fee2e2;
+          color: var(--red);
+          border-radius: 999px;
+          padding: 8px 14px;
+          font-size: 12px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .brief-pill::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: var(--red); display: inline-block; }
+        h1 { margin: 18px 0 6px; font-size: 31px; line-height: 1.1; letter-spacing: -0.02em; color: #1f2937; }
+        .intro { color: var(--muted); margin: 0 0 24px; line-height: 1.45; }
+        .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0 22px; }
+        .metric-card {
+          display: block;
+          text-decoration: none;
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          padding: 14px;
+          background: #f8fafc;
+          color: #1f2937;
+        }
+        .metric-card span { display: block; color: #64748b; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.05em; line-height: 1.25; min-height: 30px; }
+        .metric-card strong { display: block; margin-top: 8px; font-size: 30px; line-height: 1; }
+        .metric-card.red { border-color: #fecaca; background: #fff1f2; }
+        .metric-card.amber { border-color: #fde68a; background: #fffbeb; }
+        .metric-card.blue { border-color: #bfdbfe; background: #eff6ff; }
+        .metric-card.purple { border-color: #ddd6fe; background: #f5f3ff; }
+        .metric-card.green { border-color: #bbf7d0; background: #f0fdf4; }
+        .brief-item {
+          border-radius: 14px;
+          padding: 15px 17px;
+          margin: 12px 0;
+          border-left: 5px solid;
+        }
+        .brief-red { background: #fde9e7; border-left-color: var(--red); }
+        .brief-amber { background: #fff3e1; border-left-color: var(--amber); }
+        .brief-green { background: #e7f7ed; border-left-color: var(--green); }
+        .brief-blue { background: #eff6ff; border-left-color: var(--blue); }
+        .brief-purple { background: #f5f3ff; border-left-color: var(--purple); }
+        .brief-title { font-weight: 900; margin-bottom: 7px; color: #1f2937; }
+        .brief-line { color: #334155; font-size: 14px; line-height: 1.45; margin: 3px 0; }
+        .brief-small { color: #64748b; font-size: 14px; }
+        .start-button {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-top: 26px;
+          width: 100%;
+          background: var(--red);
+          color: white;
+          border: 0;
+          border-radius: 12px;
+          padding: 16px 20px;
+          text-decoration: none;
+          font-weight: 900;
+          box-shadow: 0 12px 26px rgba(217,70,46,0.22);
+        }
+        .secondary-link { display: block; text-align: center; margin-top: 14px; color: #64748b; font-size: 13px; text-decoration: none; }
+        @media (max-width: 720px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 560px) {
+          body { padding: 16px; align-items: flex-start; }
+          .brief-card { padding: 24px; margin-top: 20px; }
+          .logo-row { justify-content: center; align-items: flex-start; }
+          .logo-row img { width: 92px; height: 92px; }
+          h1 { font-size: 26px; }
+          .metric-grid { grid-template-columns: 1fr; }
+        }
+      </style>
+    </head>
+    <body>
+      <main class="brief-card">
+        <div class="logo-row">
+          <img src="/brand-logo.png" alt="Your Dispatch Partner" onerror="this.style.display='none';">
+          <div>
+            <div class="brief-pill">Operations briefing — ${escapeHtml(todayLabel)}</div>
+            <h1>${escapeHtml(greeting)}, ${escapeHtml(agentName)}.</h1>
+            <p class="intro">Here’s what needs attention before you start your shift.</p>
           </div>
+        </div>
 
-          <div class="metric-grid">
-            ${metric("Calls taken today", callsTakenTodayResult.rows[0]?.count, "/call-wallboard", "blue")}
-            ${metric("Active jobs today", activeJobsTodayResult.rows[0]?.count, "/jobs", "green")}
-            ${metric("Jobs not yet closed", notClosedResult.rows[0]?.count, "/jobs", "amber")}
-            ${metric("Disputed jobs", disputedJobsResult.rows[0]?.count, "/disputes", "purple")}
-            ${metric("Part-paid follow-up", paymentFollowUpResult.rows[0]?.count, "/payment-chasing", "red")}
-            ${metric("Invoices not sent", invoicesNotSentResult.rows[0]?.count, "/invoices", "amber")}
-          </div>
+        <div class="metric-grid">
+          ${metric("Calls taken today", callsTakenToday, "/call-wallboard", "blue")}
+          ${metric("Active jobs today", activeJobsToday, "/jobs", "green")}
+          ${metric("Jobs not yet closed", jobsNotClosed, "/jobs", "amber")}
+          ${metric("Disputed jobs", disputedJobs, "/disputes", "purple")}
+          ${metric("Payment follow-up", paymentFollowUp, "/payment-chasing", "red")}
+          ${metric("Invoices not sent", invoicesNotSent, "/invoices", "amber")}
+        </div>
 
-          <section class="brief-item brief-red">
-            <div class="brief-title">Open jobs waiting to be assigned</div>
-            ${openList}
-          </section>
+        <section class="brief-item brief-red">
+          <div class="brief-title">Open jobs waiting to be assigned</div>
+          ${openList}
+        </section>
 
-          <section class="brief-item brief-amber">
-            <div class="brief-title">Assigned jobs awaiting completion</div>
-            ${assignedList}
-          </section>
+        <section class="brief-item brief-amber">
+          <div class="brief-title">Assigned jobs awaiting completion</div>
+          ${assignedList}
+        </section>
 
-          <section class="brief-item brief-purple">
-            <div class="brief-title">Disputed jobs</div>
-            ${disputeList}
-          </section>
+        <section class="brief-item brief-purple">
+          <div class="brief-title">Disputed jobs</div>
+          ${disputeList}
+        </section>
 
-          <section class="brief-item brief-red">
-            <div class="brief-title">Partially paid / unpaid jobs needing follow-up</div>
-            ${followUpList}
-          </section>
+        <section class="brief-item brief-red">
+          <div class="brief-title">Partially paid / unpaid jobs needing follow-up</div>
+          ${followUpList}
+        </section>
 
-          <section class="brief-item brief-blue">
-            <div class="brief-title">Invoices not yet sent</div>
-            ${invoiceList}
-          </section>
+        <section class="brief-item brief-blue">
+          <div class="brief-title">Invoices not yet sent</div>
+          ${invoiceList}
+        </section>
 
-          <section class="brief-item brief-green">
-            <div class="brief-title">Technician availability</div>
-            <div class="brief-line">${Number(tech.available || 0)} available · ${Number(tech.on_job || 0)} on job · ${Number(tech.soon || 0)} available soon</div>
-          </section>
+        <section class="brief-item brief-green">
+          <div class="brief-title">Technician availability</div>
+          <div class="brief-line">${Number(tech.available || 0)} available · ${Number(tech.on_job || 0)} on job · ${Number(tech.soon || 0)} available soon</div>
+        </section>
 
-          <a class="start-button" href="/call-wallboard">Start shift — enter portal</a>
-          <a class="secondary-link" href="/jobs">Go straight to Dispatch Board</a>
-        </main>
-      </body>
-      </html>
-    `);
-  } catch (error) {
-    console.error("Start shift error:", error);
-    res.redirect("/call-wallboard");
-  }
+        <a class="start-button" href="/call-wallboard">Start shift — enter portal</a>
+        <a class="secondary-link" href="/jobs">Go straight to Dispatch Board</a>
+      </main>
+    </body>
+    </html>
+  `);
 });
-app.get("/", (req, res) => res.redirect("/call-wallboard"));
+app.get("/", (req, res) => res.redirect("/start-shift"));
 
 app.get("/call-wallboard", async (req, res) => {
   try {
