@@ -4948,53 +4948,219 @@ app.get("/reports/management", async (req, res) => {
   }
 });
 
+function managementReportCard(title, value, hint, href, accent = "") {
+  return `
+    <a class="panel report-focus-card ${accent}" href="${href}" style="text-decoration:none;color:inherit;display:block;">
+      <div class="muted" style="text-transform:uppercase;font-weight:900;letter-spacing:.08em;">${escapeHtml(title)}</div>
+      <div class="big-total">${value}</div>
+      <div class="subtitle">${escapeHtml(hint || "Click to view details")}</div>
+    </a>
+  `;
+}
+
+function reportDetailBackLink(type) {
+  const labels = {
+    paid_week: "Revenue this week",
+    awaiting: "Awaiting payment",
+    disputed: "Disputed jobs",
+    chargebacks: "Chargebacks"
+  };
+  return labels[type] || "Report detail";
+}
+
+app.get("/reports/detail", async (req, res) => {
+  try {
+    const type = String(req.query.type || "paid_week");
+    const nowParts = londonDateParts();
+    const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+    const weekStart = startOfWeekMonday(today);
+    const tomorrow = addDays(today, 1);
+
+    let title = reportDetailBackLink(type);
+    let rows = [];
+    let total = 0;
+    let tableHead = `<tr><th>Date</th><th>Job</th><th>Postcode</th><th>Customer</th><th>Technician</th><th>Status</th><th>Amount</th><th>Notes</th></tr>`;
+    let tableBody = "";
+
+    if (type === "paid_week") {
+      const result = await pool.query(`
+        SELECT j.*, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
+          AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
+          AND (j.status = 'fully_paid' OR j.customer_paid = TRUE)
+        ORDER BY COALESCE(j.closed_at, j.updated_at, j.created_at) DESC
+      `, [weekStart, tomorrow]);
+      rows = result.rows;
+      total = rows.reduce((sum, job) => sum + Number(job.final_value || 0), 0);
+      tableBody = rows.map(job => `
+        <tr>
+          <td>${formatDateTime(job.closed_at || job.updated_at || job.created_at)}</td>
+          <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong></a></td>
+          <td><strong>${escapeHtml(job.postcode || "-")}</strong></td>
+          <td>${escapeHtml(job.customer_name || "-")}</td>
+          <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+          <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+          <td><strong>${money(job.final_value || 0)}</strong></td>
+          <td>Fully paid revenue this week</td>
+        </tr>
+      `).join("");
+    } else if (type === "awaiting") {
+      const result = await pool.query(`
+        SELECT j.*, t.name AS technician_name,
+               pc.last_chase_date, pc.next_follow_up_date, pc.last_outcome
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        LEFT JOIN LATERAL (
+          SELECT chase_date AS last_chase_date, next_follow_up_date, outcome AS last_outcome
+          FROM payment_chases
+          WHERE job_id = j.id
+          ORDER BY chase_date DESC NULLS LAST, created_at DESC
+          LIMIT 1
+        ) pc ON TRUE
+        WHERE j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm')
+           OR (COALESCE(j.final_value, 0) > 0 AND COALESCE(j.customer_paid, FALSE) = FALSE AND j.closed_at IS NOT NULL)
+        ORDER BY COALESCE(pc.next_follow_up_date, j.closed_at, j.updated_at, j.created_at) ASC NULLS LAST
+      `);
+      rows = result.rows;
+      total = rows.reduce((sum, job) => sum + Number(job.final_value || 0), 0);
+      tableBody = rows.map(job => `
+        <tr>
+          <td>${formatDateTime(job.closed_at || job.updated_at || job.created_at)}</td>
+          <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong></a></td>
+          <td><strong>${escapeHtml(job.postcode || "-")}</strong></td>
+          <td>${escapeHtml(job.customer_name || "-")}</td>
+          <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+          <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+          <td><strong>${money(job.final_value || 0)}</strong></td>
+          <td>
+            ${job.last_chase_date ? `Last chased: ${escapeHtml(chaseDateInputValue(job.last_chase_date))}<br>` : `No chase logged<br>`}
+            ${job.last_outcome ? `Outcome: ${escapeHtml(job.last_outcome)}<br>` : ""}
+            ${job.next_follow_up_date ? `Next follow-up: ${escapeHtml(chaseDateInputValue(job.next_follow_up_date))}` : ""}
+          </td>
+        </tr>
+      `).join("");
+    } else if (type === "disputed") {
+      const result = await pool.query(`
+        SELECT j.*, t.name AS technician_name,
+               d.id AS dispute_id, d.status AS dispute_status, d.disputed_amount, d.complaint_type, d.created_at AS dispute_created_at
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        LEFT JOIN disputes d ON d.job_id = j.id AND d.status NOT IN ('resolved', 'rejected', 'refund_processed')
+        WHERE j.status = 'disputed' OR d.id IS NOT NULL
+        ORDER BY COALESCE(d.created_at, j.closed_at, j.updated_at, j.created_at) DESC
+      `);
+      rows = result.rows;
+      total = rows.reduce((sum, job) => sum + Number(job.disputed_amount || job.final_value || 0), 0);
+      tableBody = rows.map(job => `
+        <tr>
+          <td>${formatDateTime(job.dispute_created_at || job.closed_at || job.updated_at || job.created_at)}</td>
+          <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong></a>${job.dispute_id ? `<br><a class="muted" href="/disputes/${job.dispute_id}">Dispute case</a>` : ""}</td>
+          <td><strong>${escapeHtml(job.postcode || "-")}</strong></td>
+          <td>${escapeHtml(job.customer_name || "-")}</td>
+          <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+          <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+          <td><strong>${money(job.disputed_amount || job.final_value || 0)}</strong></td>
+          <td>${escapeHtml(job.complaint_type || "Marked as disputed")}${job.dispute_status ? `<br>${escapeHtml(disputeStatusLabel(job.dispute_status))}` : ""}</td>
+        </tr>
+      `).join("");
+    } else if (type === "chargebacks") {
+      const result = await pool.query(`
+        SELECT d.*, j.job_number, j.postcode, j.customer_name, j.final_value, j.status AS job_status, t.name AS technician_name
+        FROM disputes d
+        LEFT JOIN jobs j ON j.id = d.job_id
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        WHERE d.chargeback = TRUE
+          AND d.status NOT IN ('resolved', 'rejected')
+        ORDER BY d.created_at DESC
+      `);
+      rows = result.rows;
+      total = rows.reduce((sum, row) => sum + Number(row.disputed_amount || row.refund_amount || row.final_value || 0), 0);
+      tableBody = rows.map(row => `
+        <tr>
+          <td>${formatDateTime(row.created_at)}</td>
+          <td>${row.job_id ? `<a href="/jobs/${row.job_id}/edit"><strong>${escapeHtml(row.job_number || jobNumber(row.job_id))}</strong></a><br><a class="muted" href="/disputes/${row.id}">Dispute case</a>` : "-"}</td>
+          <td><strong>${escapeHtml(row.postcode || "-")}</strong></td>
+          <td>${escapeHtml(row.customer_name || "-")}</td>
+          <td>${escapeHtml(row.technician_name || "Unassigned")}</td>
+          <td>${escapeHtml(disputeStatusLabel(row.status))}</td>
+          <td><strong>${money(row.disputed_amount || row.refund_amount || row.final_value || 0)}</strong></td>
+          <td>${escapeHtml(row.complaint_type || "Chargeback")}</td>
+        </tr>
+      `).join("");
+    }
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>${escapeHtml(title)}</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>${escapeHtml(title)}</h1>
+        <div class="subtitle">Detailed data behind the Reports metric, including dates and technician names.</div>
+        <div class="page-actions"><a class="action-button dark" href="/reports">Back to Reports</a></div>
+        <div class="metric-grid">
+          ${miniMetric("Total value", money(total), `${rows.length} record${rows.length === 1 ? "" : "s"}`)}
+        </div>
+        <div class="panel">
+          <h2>${escapeHtml(title)} details</h2>
+          <table>
+            <thead>${tableHead}</thead>
+            <tbody>${tableBody || `<tr><td colspan="8" class="muted">No records found.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Report detail error:", error);
+    res.status(500).send(`Report detail error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
 app.get("/reports", async (req, res) => {
   try {
     const nowParts = londonDateParts();
     const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
-    const dayRange = { label: "Today", start: today, end: addDays(today, 1) };
-    const weekRange = { label: "This week", start: startOfWeekMonday(today), end: addDays(today, 1) };
-    const monthRange = { label: "This month", start: makeDate(nowParts.year, nowParts.month, 1), end: addDays(today, 1) };
-    const selectedRange = buildReportRange(req.query);
+    const weekStart = startOfWeekMonday(today);
+    const tomorrow = addDays(today, 1);
 
-    const [dayCounts, weekCounts, monthCounts, selectedCounts, dayRevenue, weekRevenue, monthRevenue, selectedRevenue, campaignPerformance] = await Promise.all([
-      jobCountSummary(dayRange.start, dayRange.end),
-      jobCountSummary(weekRange.start, weekRange.end),
-      jobCountSummary(monthRange.start, monthRange.end),
-      jobCountSummary(selectedRange.start, selectedRange.end),
-      revenueSummaryByTechnician(dayRange.start, dayRange.end),
-      revenueSummaryByTechnician(weekRange.start, weekRange.end),
-      revenueSummaryByTechnician(monthRange.start, monthRange.end),
-      revenueSummaryByTechnician(selectedRange.start, selectedRange.end),
+    const [paidWeek, awaiting, disputed, chargebacks] = await Promise.all([
       pool.query(`
-        SELECT
-          COALESCE(NULLIF(j.source_campaign, ''), 'Unknown') AS campaign,
-          COUNT(*)::int AS job_count,
-          COUNT(*) FILTER (WHERE j.status IN ('closed', 'fully_paid_private', 'invoiced_account', 'invoice_sent_accounts'))::int AS finished_jobs,
-          COALESCE(SUM(COALESCE(j.final_value, 0)), 0)::numeric AS income,
-          COALESCE(SUM(COALESCE(j.materials_cost, 0)), 0)::numeric AS material_cost,
-          COALESCE(AVG(NULLIF(j.final_value, 0)), 0)::numeric AS average_job_value,
-          COUNT(*) FILTER (WHERE j.status = 'awaiting_payment')::int AS awaiting_payment_jobs
+        SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(final_value, 0)), 0)::numeric AS value
+        FROM jobs
+        WHERE COALESCE(closed_at, updated_at, created_at) >= $1
+          AND COALESCE(closed_at, updated_at, created_at) < $2
+          AND (status = 'fully_paid' OR customer_paid = TRUE)
+      `, [weekStart, tomorrow]),
+      pool.query(`
+        SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(final_value, 0)), 0)::numeric AS value
+        FROM jobs
+        WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm')
+           OR (COALESCE(final_value, 0) > 0 AND COALESCE(customer_paid, FALSE) = FALSE AND closed_at IS NOT NULL)
+      `),
+      pool.query(`
+        SELECT COUNT(DISTINCT COALESCE(j.id, d.job_id))::int AS count,
+               COALESCE(SUM(COALESCE(d.disputed_amount, j.final_value, 0)), 0)::numeric AS value
         FROM jobs j
-        WHERE j.created_at >= $1 AND j.created_at < $2
-        GROUP BY COALESCE(NULLIF(j.source_campaign, ''), 'Unknown')
-        ORDER BY income DESC, job_count DESC, campaign ASC
-      `, [selectedRange.start, selectedRange.end])
+        FULL OUTER JOIN disputes d ON d.job_id = j.id AND d.status NOT IN ('resolved', 'rejected', 'refund_processed')
+        WHERE j.status = 'disputed' OR d.id IS NOT NULL
+      `),
+      pool.query(`
+        SELECT COUNT(*)::int AS count,
+               COALESCE(SUM(COALESCE(disputed_amount, refund_amount, j.final_value, 0)), 0)::numeric AS value
+        FROM disputes d
+        LEFT JOIN jobs j ON j.id = d.job_id
+        WHERE d.chargeback = TRUE
+          AND d.status NOT IN ('resolved', 'rejected')
+      `)
     ]);
 
-    const countSummaryRow = (label, counts) => `
-      <tr>
-        <td><strong>${escapeHtml(label)}</strong></td>
-        <td>${Number(counts.total_jobs || 0)}</td>
-        <td>${Number(counts.open_jobs || 0)}</td>
-        <td>${Number(counts.assigned_jobs || 0)}</td>
-        <td>${Number(counts.completed_jobs || 0)}</td>
-        <td>${Number(counts.awaiting_payment_jobs || 0)}</td>
-        <td>${Number(counts.fully_paid_private_jobs || 0)}</td>
-        <td>${Number(counts.invoiced_account_jobs || 0)}</td>
-        <td>${Number(counts.closed_jobs || 0)}</td>
-      </tr>
-    `;
+    const paidRow = paidWeek.rows[0] || {};
+    const awaitingRow = awaiting.rows[0] || {};
+    const disputedRow = disputed.rows[0] || {};
+    const chargebackRow = chargebacks.rows[0] || {};
 
     res.send(`
       <!DOCTYPE html>
@@ -5003,71 +5169,31 @@ app.get("/reports", async (req, res) => {
       <body>
         ${nav(req)}
         <h1>Reports</h1>
-        <div class="subtitle">Job count and revenue reporting. Job counts are based on when the client order was created. Revenue uses the close/update date and final job value.</div>
+        <div class="subtitle">Clean management overview. Click any metric to see the underlying jobs, dates and technician names.</div>
 
         <div class="page-actions">
-          ${reportPeriodLinks(selectedRange.range)}
           <a class="action-button" href="/reports/management?range=this_month">Management Report</a>
-          <a class="action-button amber" href="/reports/jobs.csv?range=${encodeURIComponent(selectedRange.range)}&from=${encodeURIComponent(selectedRange.fromValue)}&to=${encodeURIComponent(selectedRange.toValue)}">Download jobs CSV</a>
+          <a class="action-button amber" href="/reports/jobs.csv?range=this_week">Download jobs CSV</a>
           <a class="action-button dark" href="/reports/invoices.csv">Invoices CSV</a>
           <a class="action-button dark" href="/reports/calls.csv">Calls CSV</a>
         </div>
 
-        <div class="panel">
-          <h2>Custom report range</h2>
-          <form method="GET" action="/reports" class="grid-3">
-            <input type="hidden" name="range" value="custom">
-            <div>
-              <label>From</label>
-              <input type="date" name="from" value="${escapeHtml(selectedRange.fromValue)}">
-            </div>
-            <div>
-              <label>To</label>
-              <input type="date" name="to" value="${escapeHtml(selectedRange.toValue)}">
-            </div>
-            <div style="display:flex; align-items:end;">
-              <button type="submit">Run custom report</button>
-            </div>
-          </form>
+        <div class="metric-grid">
+          ${managementReportCard("Revenue this week", money(paidRow.value || 0), `Fully paid · ${Number(paidRow.count || 0)} job${Number(paidRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=paid_week", "")}
+          ${managementReportCard("Awaiting payment", money(awaitingRow.value || 0), `${Number(awaitingRow.count || 0)} job${Number(awaitingRow.count || 0) === 1 ? "" : "s"} needs money chasing`, "/reports/detail?type=awaiting", "")}
+          ${managementReportCard("Disputed", money(disputedRow.value || 0), `${Number(disputedRow.count || 0)} disputed record${Number(disputedRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=disputed", "")}
+          ${managementReportCard("Chargebacks", money(chargebackRow.value || 0), `${Number(chargebackRow.count || 0)} chargeback record${Number(chargebackRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=chargebacks", "")}
         </div>
 
         <div class="panel">
-          <h2>Job count summary</h2>
+          <h2>What each number means</h2>
           <table>
-            <thead>
-              <tr><th>Period</th><th>Total</th><th>Open</th><th>Assigned</th><th>Completed</th><th>Awaiting payment</th><th>Fully paid private</th><th>Invoiced account</th><th>Closed</th></tr>
-            </thead>
+            <thead><tr><th>Metric</th><th>Meaning</th><th>Action</th></tr></thead>
             <tbody>
-              ${countSummaryRow("Today", dayCounts)}
-              ${countSummaryRow("This week", weekCounts)}
-              ${countSummaryRow("This month", monthCounts)}
-              ${selectedRange.range === "custom" ? countSummaryRow(selectedRange.label, selectedCounts) : ""}
-            </tbody>
-          </table>
-        </div>
-
-        ${revenueTable("Revenue by technician — Today", dayRevenue)}
-        ${revenueTable("Revenue by technician — This week", weekRevenue)}
-        ${revenueTable("Revenue by technician — This month", monthRevenue)}
-        ${selectedRange.range === "custom" ? revenueTable(`Revenue by technician — ${selectedRange.label}`, selectedRevenue) : ""}
-
-        <div class="panel">
-          <h2>Campaign / source performance — ${escapeHtml(selectedRange.label)}</h2>
-          <table>
-            <thead><tr><th>Campaign</th><th>Jobs</th><th>Finished</th><th>Income</th><th>Materials</th><th>Net after materials</th><th>Average value</th><th>Awaiting payment</th></tr></thead>
-            <tbody>
-              ${campaignPerformance.rows.map(row => `
-                <tr>
-                  <td><strong>${escapeHtml(row.campaign || "Unknown")}</strong></td>
-                  <td>${Number(row.job_count || 0)}</td>
-                  <td>${Number(row.finished_jobs || 0)}</td>
-                  <td>${money(row.income || 0)}</td>
-                  <td>${money(row.material_cost || 0)}</td>
-                  <td>${money(Number(row.income || 0) - Number(row.material_cost || 0))}</td>
-                  <td>${money(row.average_job_value || 0)}</td>
-                  <td>${Number(row.awaiting_payment_jobs || 0)}</td>
-                </tr>
-              `).join("") || `<tr><td colspan="8" class="muted">No campaign data for this range.</td></tr>`}
+              <tr><td><strong>Revenue this week</strong></td><td>Fully paid jobs closed or updated this week.</td><td>Click to view paid jobs by date and technician.</td></tr>
+              <tr><td><strong>Awaiting payment</strong></td><td>Jobs marked awaiting payment, awaiting balance, sent to PM, or closed but not paid.</td><td>Click to chase payment and view follow-up notes.</td></tr>
+              <tr><td><strong>Disputed</strong></td><td>Jobs marked disputed or linked to an open dispute case.</td><td>Click to review dispute value, job and technician.</td></tr>
+              <tr><td><strong>Chargebacks</strong></td><td>Open dispute records where chargeback has been raised.</td><td>Click to view chargeback cases.</td></tr>
             </tbody>
           </table>
         </div>
@@ -5075,8 +5201,8 @@ app.get("/reports", async (req, res) => {
       </html>
     `);
   } catch (error) {
-    console.error("Reports page error:", error);
-    res.status(500).send("Reports page error. Check Render logs.");
+    console.error("Reports overview error:", error);
+    res.status(500).send(`Reports overview error: ${escapeHtml(error.message)}. Check Render logs.`);
   }
 });
 
