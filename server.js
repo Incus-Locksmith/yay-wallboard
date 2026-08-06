@@ -5312,6 +5312,8 @@ app.get("/jobs", async (req, res) => {
     const selectedTechnician = (req.query.technician || "all").trim();
     const selectedCampaign = (req.query.campaign || "all").trim();
     const selectedDate = (req.query.date || "all").trim();
+    const customDateFrom = (req.query.date_from || "").trim();
+    const customDateTo = (req.query.date_to || "").trim();
     const search = (req.query.search || "").trim();
 
     const where = [];
@@ -5347,6 +5349,22 @@ app.get("/jobs", async (req, res) => {
       where.push(`j.created_at >= date_trunc('week', NOW())`);
     } else if (selectedDate === "month") {
       where.push(`j.created_at >= date_trunc('month', NOW())`);
+    } else if (selectedDate === "custom") {
+      const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+      if (validDate(customDateFrom) && validDate(customDateTo)) {
+        params.push(customDateFrom, customDateTo);
+        where.push(`(
+          DATE(j.created_at) BETWEEN $${params.length - 1}::date AND $${params.length}::date
+          OR DATE(j.scheduled_at) BETWEEN $${params.length - 1}::date AND $${params.length}::date
+          OR DATE(j.closed_at) BETWEEN $${params.length - 1}::date AND $${params.length}::date
+        )`);
+      } else if (validDate(customDateFrom)) {
+        params.push(customDateFrom);
+        where.push(`(DATE(j.created_at) >= $${params.length}::date OR DATE(j.scheduled_at) >= $${params.length}::date OR DATE(j.closed_at) >= $${params.length}::date)`);
+      } else if (validDate(customDateTo)) {
+        params.push(customDateTo);
+        where.push(`(DATE(j.created_at) <= $${params.length}::date OR DATE(j.scheduled_at) <= $${params.length}::date OR DATE(j.closed_at) <= $${params.length}::date)`);
+      }
     }
 
     if (search) {
@@ -5449,7 +5467,8 @@ app.get("/jobs", async (req, res) => {
       { value: "today", label: "Today" },
       { value: "yesterday", label: "Yesterday" },
       { value: "week", label: "This week" },
-      { value: "month", label: "This month" }
+      { value: "month", label: "This month" },
+      { value: "custom", label: "Custom date range" }
     ];
 
     const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
@@ -5578,7 +5597,10 @@ app.get("/jobs", async (req, res) => {
           .tech-name { color: #111827; font-size: 13px; font-weight: 900; }
           .tech-status { color: #64748b; font-size: 12px; }
           .board-filter-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
-          .board-filters { display: grid; grid-template-columns: minmax(320px, 2.2fr) minmax(165px, 1fr) minmax(165px, 1fr) minmax(165px, 1fr) minmax(150px, .9fr) auto; gap: 14px; align-items: center; }
+          .board-filters { display: grid; grid-template-columns: minmax(260px, 1.6fr) minmax(150px, .9fr) minmax(150px, .9fr) minmax(150px, .9fr) minmax(150px, .9fr) auto; gap: 14px; align-items: center; }
+          .custom-date-range { display: none; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(180px, 240px)); gap: 14px; align-items: end; padding-top: 4px; }
+          .custom-date-range.is-visible { display: grid; }
+          .custom-date-range label { display: block; font-size: 12px; color: #667085; font-weight: 900; text-transform: uppercase; margin-bottom: 5px; }
           .board-filters input, .board-filters select { min-height: 44px; border: 1px solid #d1d5db; background: #f9fafb; color: #111827; border-radius: 12px; padding: 10px 12px; }
           .board-filters button { min-height: 44px; border-radius: 12px; padding: 10px 16px; background: #2563eb; }
           .board-content-grid { display: grid; grid-template-columns: minmax(760px, 1fr) minmax(330px, 370px); gap: 22px; align-items: start; }
@@ -5652,9 +5674,31 @@ app.get("/jobs", async (req, res) => {
               <select name="status">${optionList(statusFilterOptions, selectedStatus || "active")}</select>
               <select name="technician">${optionList(technicianOptions, selectedTechnician || "all")}</select>
               <select name="campaign">${optionList(campaignOptions, selectedCampaign || "all")}</select>
-              <select name="date">${optionList(dateOptions, selectedDate || "all")}</select>
+              <select name="date" id="board_date_filter">${optionList(dateOptions, selectedDate || "all")}</select>
               <button type="submit">Apply</button>
+              <div id="custom_date_range" class="custom-date-range${selectedDate === "custom" ? " is-visible" : ""}">
+                <div>
+                  <label>From date</label>
+                  <input type="date" name="date_from" value="${escapeHtml(customDateFrom)}">
+                </div>
+                <div>
+                  <label>To date</label>
+                  <input type="date" name="date_to" value="${escapeHtml(customDateTo)}">
+                </div>
+              </div>
             </form>
+            <script>
+              const boardDateFilter = document.getElementById("board_date_filter");
+              const customDateRange = document.getElementById("custom_date_range");
+              function toggleBoardCustomDates() {
+                if (!boardDateFilter || !customDateRange) return;
+                customDateRange.classList.toggle("is-visible", boardDateFilter.value === "custom");
+              }
+              if (boardDateFilter) {
+                boardDateFilter.addEventListener("change", toggleBoardCustomDates);
+                toggleBoardCustomDates();
+              }
+            </script>
           </section>
 
           <section class="board-content-grid">
