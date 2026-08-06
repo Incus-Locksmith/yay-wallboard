@@ -2244,6 +2244,7 @@ async function initDb() {
   `);
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS job_id INTEGER NOT NULL;`);
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS chase_date DATE NOT NULL DEFAULT CURRENT_DATE;`);
+  await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS action_taken TEXT;`);
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS outcome TEXT;`);
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS next_follow_up_date DATE;`);
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS notes TEXT;`);
@@ -2251,6 +2252,10 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_job_idx ON job_payment_chases (job_id, chase_date DESC, created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_follow_up_idx ON job_payment_chases (next_follow_up_date);`);
+
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_close_note TEXT;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS campaigns (
@@ -4655,9 +4660,10 @@ app.get("/payment-chasing", async (req, res) => {
   try {
     const selected = String(req.query.view || "active").trim();
     const today = dateInputValue(new Date());
+    const unpaidWhere = `(j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid'))`;
     const where = selected === "due"
-      ? `WHERE (j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid')) AND pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE`
-      : `WHERE j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid')`;
+      ? `WHERE ${unpaidWhere} AND pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE`
+      : `WHERE ${unpaidWhere}`;
 
     const result = await pool.query(`
       WITH latest_chase AS (
@@ -4668,20 +4674,38 @@ app.get("/payment-chasing", async (req, res) => {
         SELECT job_id, COUNT(*)::int AS chase_count
         FROM job_payment_chases
         GROUP BY job_id
+      ), chase_history AS (
+        SELECT
+          job_id,
+          json_agg(json_build_object(
+            'id', id,
+            'chase_date', chase_date,
+            'action_taken', action_taken,
+            'outcome', outcome,
+            'next_follow_up_date', next_follow_up_date,
+            'notes', notes,
+            'chased_by', chased_by,
+            'created_at', created_at
+          ) ORDER BY chase_date DESC, created_at DESC, id DESC) AS history
+        FROM job_payment_chases
+        GROUP BY job_id
       )
       SELECT
         j.*, t.name AS technician_name,
         pc.chase_date AS last_chase_date,
+        pc.action_taken AS last_action_taken,
         pc.outcome AS last_chase_outcome,
         pc.next_follow_up_date,
         pc.notes AS last_chase_notes,
         pc.chased_by AS last_chased_by,
         pc.created_at AS last_chase_logged_at,
-        COALESCE(cc.chase_count, 0)::int AS chase_count
+        COALESCE(cc.chase_count, 0)::int AS chase_count,
+        COALESCE(ch.history, '[]'::json) AS chase_history
       FROM jobs j
       LEFT JOIN technicians t ON t.id = j.assigned_technician_id
       LEFT JOIN latest_chase pc ON pc.job_id = j.id
       LEFT JOIN chase_counts cc ON cc.job_id = j.id
+      LEFT JOIN chase_history ch ON ch.job_id = j.id
       ${where}
       ORDER BY
         CASE WHEN pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE THEN 0 ELSE 1 END,
@@ -4693,12 +4717,14 @@ app.get("/payment-chasing", async (req, res) => {
     const rows = result.rows;
     const dueCount = rows.filter(row => row.next_follow_up_date && chaseDateInputValue(row.next_follow_up_date) <= today).length;
     const noChaseCount = rows.filter(row => !row.last_chase_date).length;
+    const totalAttempts = rows.reduce((sum, row) => sum + Number(row.chase_count || 0), 0);
     const totalOwed = rows.reduce((sum, row) => sum + Number(row.final_value || 0), 0);
     const totalMaterials = rows.reduce((sum, row) => sum + Number(row.materials_cost || 0), 0);
 
     const cards = `
       <div class="metric-grid">
-        <div class="metric-card"><div class="metric-label">Jobs needing chase</div><div class="metric-value">${rows.length}</div></div>
+        <div class="metric-card"><div class="metric-label">Open payment chase logs</div><div class="metric-value">${rows.length}</div></div>
+        <div class="metric-card"><div class="metric-label">Total chase attempts</div><div class="metric-value">${totalAttempts}</div></div>
         <div class="metric-card"><div class="metric-label">Follow-up due</div><div class="metric-value">${dueCount}</div></div>
         <div class="metric-card"><div class="metric-label">Never chased</div><div class="metric-value">${noChaseCount}</div></div>
         <div class="metric-card"><div class="metric-label">Value outstanding</div><div class="metric-value">${money(totalOwed)}</div></div>
@@ -4706,25 +4732,75 @@ app.get("/payment-chasing", async (req, res) => {
       </div>
     `;
 
+    function chaseHistoryList(job) {
+      const history = Array.isArray(job.chase_history) ? job.chase_history : [];
+      if (!history.length) return `<div class="chase-history empty">No chase attempts logged yet.</div>`;
+      return `<div class="chase-history">
+        <div class="chase-history-title">${Number(job.chase_count || 0)} payment chase attempt${Number(job.chase_count || 0) === 1 ? "" : "s"}</div>
+        ${history.map((chase, index) => `
+          <div class="chase-attempt">
+            <div class="attempt-number">#${history.length - index}</div>
+            <div>
+              <strong>${escapeHtml(chaseDateInputValue(chase.chase_date))}</strong>
+              ${chase.action_taken ? ` · ${escapeHtml(chase.action_taken)}` : ""}
+              <br><span>${escapeHtml(chase.outcome || "No outcome entered")}</span>
+              ${chase.notes ? `<br><span class="muted">Notes: ${escapeHtml(chase.notes)}</span>` : ""}
+              ${chase.next_follow_up_date ? `<br><span class="muted">Next follow-up: ${escapeHtml(chaseDateInputValue(chase.next_follow_up_date))}</span>` : ""}
+              <br><span class="muted">Logged by ${escapeHtml(chase.chased_by || "Unknown")} on ${escapeHtml(formatDateTime(chase.created_at))}</span>
+            </div>
+          </div>
+        `).join("")}
+      </div>`;
+    }
+
     const body = rows.map(job => `
       <tr>
-        <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""}</strong></a><br><span class="muted">${escapeHtml(job.customer_name || "—")} ${job.customer_phone ? `· ${escapeHtml(job.customer_phone)}` : ""}</span></td>
-        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span><br><span class="muted">${escapeHtml(job.technician_name || "Unassigned")}</span></td>
-        <td><strong>${money(job.final_value || 0)}</strong><br><span class="muted">Paid: ${job.customer_paid ? "Yes" : "No"}</span></td>
-        <td>${job.last_chase_date ? `${escapeHtml(chaseDateInputValue(job.last_chase_date))}<br><span class="muted">${escapeHtml(job.last_chased_by || "Unknown")}</span>` : `<span class="muted">Not chased yet</span>`}</td>
-        <td>${escapeHtml(job.last_chase_outcome || "—")}${job.last_chase_notes ? `<br><span class="muted">${escapeHtml(job.last_chase_notes)}</span>` : ""}</td>
+        <td>
+          <a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""}</strong></a><br>
+          <span class="muted">${escapeHtml(job.customer_name || "—")} ${job.customer_phone ? `· ${escapeHtml(job.customer_phone)}` : ""}</span><br>
+          <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+        </td>
+        <td>
+          <strong>${money(job.final_value || 0)}</strong><br>
+          <span class="muted">Paid: ${job.customer_paid ? "Yes" : "No"}</span><br>
+          <span class="muted">Tech: ${escapeHtml(job.technician_name || "Unassigned")}</span>
+        </td>
+        <td>
+          ${job.last_chase_date ? `<strong>${escapeHtml(chaseDateInputValue(job.last_chase_date))}</strong><br><span class="muted">${escapeHtml(job.last_action_taken || "Action not recorded")}</span><br><span class="muted">${escapeHtml(job.last_chased_by || "Unknown")}</span>` : `<span class="muted">Not chased yet</span>`}
+        </td>
+        <td>
+          ${job.last_chase_outcome ? escapeHtml(job.last_chase_outcome) : `<span class="muted">—</span>`}
+          ${job.last_chase_notes ? `<br><span class="muted">${escapeHtml(job.last_chase_notes)}</span>` : ""}
+        </td>
         <td>${job.next_follow_up_date ? `<strong>${escapeHtml(chaseDateInputValue(job.next_follow_up_date))}</strong>` : `<span class="muted">Not set</span>`}</td>
         <td>
-          <form method="POST" action="/jobs/${job.id}/payment-chase" class="mini-inline-form">
-            <input type="date" name="chase_date" value="${escapeHtml(today)}" title="Chase date">
-            <input name="outcome" placeholder="Outcome" required>
-            <input type="date" name="next_follow_up_date" title="Next follow-up">
-            <input name="notes" placeholder="Notes">
-            <button type="submit">Log chase</button>
+          <form method="POST" action="/jobs/${job.id}/payment-chase" class="chase-form">
+            <label>Chase date<input type="date" name="chase_date" value="${escapeHtml(today)}" required></label>
+            <label>Action taken
+              <select name="action_taken" required>
+                <option value="">Select action</option>
+                <option>Called client</option>
+                <option>Left voicemail</option>
+                <option>Sent SMS</option>
+                <option>Sent WhatsApp</option>
+                <option>Sent email</option>
+                <option>Sent invoice reminder</option>
+                <option>Contacted PM / account client</option>
+                <option>Other</option>
+              </select>
+            </label>
+            <label>Outcome<input name="outcome" placeholder="e.g. promised payment today" required></label>
+            <label>Next follow-up<input type="date" name="next_follow_up_date"></label>
+            <label>Notes<input name="notes" placeholder="Extra notes"></label>
+            <button type="submit">Log attempt</button>
           </form>
-          <div class="muted">${Number(job.chase_count || 0)} chase${Number(job.chase_count || 0) === 1 ? "" : "s"} logged</div>
+          <form method="POST" action="/jobs/${job.id}/payment-chase/close" class="close-chase-form" onsubmit="return confirm('Close this payment chase log as paid/resolved?');">
+            <input name="close_note" placeholder="Close note, e.g. paid by card" required>
+            <button type="submit" class="red-button">Mark paid / close chase</button>
+          </form>
         </td>
       </tr>
+      <tr class="history-row"><td colspan="6">${chaseHistoryList(job)}</td></tr>
     `).join("");
 
     res.send(`
@@ -4734,27 +4810,39 @@ app.get("/payment-chasing", async (req, res) => {
         <title>Payment Chasing</title>
         <style>
           ${sharedStyles()}
-          .mini-inline-form { display:grid; grid-template-columns: 120px minmax(150px,1fr) 120px minmax(120px,1fr) auto; gap:8px; align-items:center; }
-          .mini-inline-form input { min-width:0; padding:9px; }
-          .mini-inline-form button { padding:9px 12px; white-space:nowrap; }
-          @media (max-width: 980px) { .mini-inline-form { grid-template-columns: 1fr; } }
+          .chase-form { display:grid; grid-template-columns: 130px 170px minmax(180px,1fr) 130px minmax(160px,1fr) auto; gap:8px; align-items:end; }
+          .chase-form label { font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em; }
+          .chase-form input, .chase-form select { width:100%; margin-top:4px; padding:9px; min-width:0; }
+          .chase-form button { padding:10px 12px; white-space:nowrap; }
+          .close-chase-form { display:flex; gap:8px; margin-top:10px; align-items:center; }
+          .close-chase-form input { flex:1; padding:9px; min-width:180px; }
+          .red-button { background:#dc2626 !important; }
+          .chase-history { background:#f8fafc; border:1px solid #e2e8f0; border-radius:14px; padding:12px; }
+          .chase-history.empty { color:#64748b; }
+          .chase-history-title { font-weight:900; margin-bottom:8px; }
+          .chase-attempt { display:grid; grid-template-columns:44px 1fr; gap:10px; padding:9px 0; border-top:1px solid #e2e8f0; }
+          .chase-attempt:first-of-type { border-top:0; }
+          .attempt-number { width:34px; height:34px; border-radius:999px; background:#111827; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:12px; }
+          .history-row td { padding-top:0; border-top:0; }
+          @media (max-width: 1200px) { .chase-form { grid-template-columns: 1fr 1fr; } .close-chase-form { flex-direction:column; align-items:stretch; } }
+          @media (max-width: 700px) { .chase-form { grid-template-columns: 1fr; } }
         </style>
       </head>
       <body>
         ${nav(req)}
         <h1>Payment Chasing</h1>
-        <div class="subtitle">Track partially or completely unpaid jobs. Every chase records the date, outcome, user and next follow-up date.</div>
+        <div class="subtitle">Track each chase attempt, the action taken, the outcome, and the next follow-up date. Close the chase once the payment has been received.</div>
         <div class="page-actions">
-          <a class="action-button ${selected === "active" ? "dark" : ""}" href="/payment-chasing">All unpaid / part-paid jobs</a>
+          <a class="action-button ${selected === "active" ? "dark" : ""}" href="/payment-chasing">Open payment chases</a>
           <a class="action-button ${selected === "due" ? "dark" : ""}" href="/payment-chasing?view=due">Follow-up due</a>
           <a class="action-button" href="/jobs">Back to Dispatch Board</a>
         </div>
         ${cards}
         <div class="panel">
-          <h2>Jobs requiring payment chase</h2>
+          <h2>Open payment chase logs</h2>
           <table>
-            <thead><tr><th>Job / customer</th><th>Status / tech</th><th>Value</th><th>Last chased</th><th>Outcome</th><th>Next follow-up</th><th>Log chase</th></tr></thead>
-            <tbody>${body || `<tr><td colspan="7" class="muted">No unpaid or part-paid jobs need chasing.</td></tr>`}</tbody>
+            <thead><tr><th>Job / customer</th><th>Value / tech</th><th>Last action</th><th>Last outcome</th><th>Next follow-up</th><th>Log next attempt / close</th></tr></thead>
+            <tbody>${body || `<tr><td colspan="6" class="muted">No open payment chase logs.</td></tr>`}</tbody>
           </table>
         </div>
       </body>
@@ -4771,22 +4859,23 @@ app.post("/jobs/:id/payment-chase", async (req, res) => {
     const id = Number(req.params.id);
     const body = req.body;
     const chaseDate = body.chase_date || dateInputValue(new Date());
+    const actionTaken = String(body.action_taken || "").trim();
     const nextFollowUp = body.next_follow_up_date || null;
     const outcome = String(body.outcome || "").trim();
     const notes = String(body.notes || "").trim();
     const changedBy = currentAgentName(req);
 
     await pool.query(`
-      INSERT INTO job_payment_chases (job_id, chase_date, outcome, next_follow_up_date, notes, chased_by, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
-    `, [id, chaseDate, outcome, nextFollowUp, notes, changedBy]);
+      INSERT INTO job_payment_chases (job_id, chase_date, action_taken, outcome, next_follow_up_date, notes, chased_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    `, [id, chaseDate, actionTaken, outcome, nextFollowUp, notes, changedBy]);
 
     await addJobAuditEntry(
       id,
       "payment_chase_logged",
       "Payment chase",
       "—",
-      `${chaseDate}${outcome ? ` · ${outcome}` : ""}${nextFollowUp ? ` · next ${nextFollowUp}` : ""}`,
+      `${chaseDate}${actionTaken ? ` · ${actionTaken}` : ""}${outcome ? ` · ${outcome}` : ""}${nextFollowUp ? ` · next ${nextFollowUp}` : ""}`,
       changedBy
     );
 
@@ -4795,6 +4884,39 @@ app.post("/jobs/:id/payment-chase", async (req, res) => {
   } catch (error) {
     console.error("Payment chase save error:", error);
     res.status(500).send(`Payment chase save error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+app.post("/jobs/:id/payment-chase/close", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const closeNote = String(req.body.close_note || "").trim();
+    const changedBy = currentAgentName(req);
+
+    await pool.query(`
+      UPDATE jobs
+      SET customer_paid = TRUE,
+          status = 'fully_paid',
+          payment_chase_closed_at = NOW(),
+          payment_chase_closed_by = $2,
+          payment_chase_close_note = $3,
+          updated_at = NOW()
+      WHERE id = $1
+    `, [id, changedBy, closeNote]);
+
+    await addJobAuditEntry(
+      id,
+      "payment_chase_closed",
+      "Payment chase",
+      "Open",
+      `Closed as paid/resolved${closeNote ? ` · ${closeNote}` : ""}`,
+      changedBy
+    );
+
+    res.redirect('/payment-chasing');
+  } catch (error) {
+    console.error("Payment chase close error:", error);
+    res.status(500).send(`Payment chase close error: ${escapeHtml(error.message)}. Check Render logs.`);
   }
 });
 
