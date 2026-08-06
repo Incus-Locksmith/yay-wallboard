@@ -892,33 +892,29 @@ function quarterHourTimeOptions(selectedTime = "") {
   return opts.join("");
 }
 
+function isValid24HourTime(value) {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || "").trim());
+}
+
 function compactScheduledTimePicker(prefix, selectedTime = "") {
   const selected = String(selectedTime || "").trim();
-  const selectedHour = selected && selected.includes(":") ? selected.split(":")[0] : "09";
-  const selectedMinute = selected && selected.includes(":") ? selected.split(":")[1] : "00";
-  const safeSelected = selected || `${selectedHour}:${selectedMinute}`;
-  const hourButtons = Array.from({ length: 24 }, (_, hour) => {
-    const value = String(hour).padStart(2, "0");
-    return `<button type="button" class="time-hour-chip ${value === selectedHour ? "active" : ""}" data-hour="${value}" data-target="${prefix}">${value}</button>`;
-  }).join("");
-  const minuteOptions = ["00", "15", "30", "45"].map(minute => `
-    <button type="button" class="minute-pill ${minute === selectedMinute ? "active" : ""}" data-minute="${minute}" data-target="${prefix}">:${minute}</button>
-  `).join("");
   return `
-    <div class="appointment-time-picker" data-time-picker="${prefix}">
-      <div class="appointment-time-header">
-        <span>Time</span>
-        <strong id="${prefix}_display">${escapeHtml(safeSelected)}</strong>
-      </div>
-      <div class="appointment-time-body">
-        <div class="hour-chip-grid" aria-label="Scheduled hour">${hourButtons}</div>
-        <div class="minute-buttons" aria-label="Scheduled minutes">${minuteOptions}</div>
-      </div>
-      <div class="appointment-time-actions">
-        <button type="button" class="time-reset" data-target="${prefix}">Reset</button>
-        <button type="button" class="time-confirm" data-target="${prefix}">✓</button>
-      </div>
-      <input type="hidden" id="${prefix}_time" name="scheduled_time" value="${escapeHtml(safeSelected)}">
+    <div class="scheduled-time-simple">
+      <label for="${prefix}_time">Time</label>
+      <input
+        type="text"
+        id="${prefix}_time"
+        name="scheduled_time"
+        value="${escapeHtml(selected)}"
+        placeholder="09:00"
+        inputmode="numeric"
+        maxlength="5"
+        pattern="([01][0-9]|2[0-3]):[0-5][0-9]"
+        title="Enter the time in 24 hour format, for example 09:00 or 14:30"
+        autocomplete="off"
+        oninput="this.value = this.value.replace(/[^0-9:]/g, '').slice(0, 5); if (this.value.length === 2 && !this.value.includes(':')) this.value += ':';"
+      >
+      <small class="muted">24-hour time only, e.g. 09:00 or 14:30.</small>
     </div>
   `;
 }
@@ -926,7 +922,7 @@ function compactScheduledTimePicker(prefix, selectedTime = "") {
 function parseScheduledTimestamp(body) {
   const date = String(body.scheduled_date || "").trim();
   const time = String(body.scheduled_time || "").trim();
-  if (date && time) return `${date} ${time}`;
+  if (date && time && isValid24HourTime(time)) return `${date} ${time}`;
   return parseOptionalTimestamp(body.scheduled_at);
 }
 
@@ -6156,8 +6152,8 @@ app.get("/jobs/new", async (req, res) => {
                     <input id="eta_other" name="eta_other" placeholder="Other ETA" style="display:none; margin-top:8px;">
                     <div id="scheduled_box" style="display:none; margin-top:10px;">
                       <label>Scheduled date and time</label>
-                      <div class="form-grid-2" style="margin-top:6px;">
-                        <input type="date" id="scheduled_date" name="scheduled_date">
+                      <div class="form-grid-2" style="margin-top:6px; align-items:start;">
+                        <div><label>Date</label><input type="date" id="scheduled_date" name="scheduled_date"></div>
                         ${compactScheduledTimePicker("scheduled", "")}
                       </div>
                       <input type="hidden" id="scheduled_at" name="scheduled_at">
@@ -6270,72 +6266,39 @@ app.get("/jobs/new", async (req, res) => {
           function toggleEtaFields() {
             if (!etaSelect) return;
             if (etaOther) etaOther.style.display = etaSelect.value === "Other" ? "block" : "none";
-            if (scheduledBox) scheduledBox.style.display = etaSelect.value === "Scheduled" ? "grid" : "none";
+            if (scheduledBox) scheduledBox.style.display = etaSelect.value === "Scheduled" ? "block" : "none";
           }
-          function initCompactTimePicker(prefix) {
-            const root = document.querySelector('[data-time-picker="' + prefix + '"]');
-            const hidden = document.getElementById(prefix + "_time");
-            const display = document.getElementById(prefix + "_display");
-            const hourButtons = Array.from(document.querySelectorAll('.time-hour-chip[data-target="' + prefix + '"]'));
-            const minuteButtons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
-            const resetButton = document.querySelector('.time-reset[data-target="' + prefix + '"]');
-            const confirmButton = document.querySelector('.time-confirm[data-target="' + prefix + '"]');
-            if (!root || !hidden || !display || !hourButtons.length || !minuteButtons.length) return;
-            function activeValue(buttons, key) {
-              const active = buttons.find(button => button.classList.contains("active"));
-              return active ? active.dataset[key] : "";
+          function validate24HourScheduledTime(dateId, timeId) {
+            const scheduledDate = document.getElementById(dateId);
+            const scheduledTime = document.getElementById(timeId);
+            if (!scheduledDate || !scheduledTime || !scheduledDate.value || !scheduledTime.value) return true;
+            const value = scheduledTime.value.trim();
+            const ok = /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+            if (!ok) {
+              alert("Please enter the scheduled time in 24 hour format, for example 09:00 or 14:30.");
+              scheduledTime.focus();
+              return false;
             }
-            function syncTime() {
-              const hour = activeValue(hourButtons, "hour") || "09";
-              const minute = activeValue(minuteButtons, "minute") || "00";
-              const value = hour + ":" + minute;
-              hidden.value = value;
-              display.textContent = value;
-            }
-            hourButtons.forEach(button => {
-              button.addEventListener("click", () => {
-                hourButtons.forEach(item => item.classList.remove("active"));
-                button.classList.add("active");
-                syncTime();
-              });
-            });
-            minuteButtons.forEach(button => {
-              button.addEventListener("click", () => {
-                minuteButtons.forEach(item => item.classList.remove("active"));
-                button.classList.add("active");
-                syncTime();
-              });
-            });
-            if (resetButton) {
-              resetButton.addEventListener("click", () => {
-                hourButtons.forEach(item => item.classList.toggle("active", item.dataset.hour === "09"));
-                minuteButtons.forEach(item => item.classList.toggle("active", item.dataset.minute === "00"));
-                syncTime();
-              });
-            }
-            if (confirmButton) {
-              confirmButton.addEventListener("click", () => {
-                root.classList.add("confirmed");
-                setTimeout(() => root.classList.remove("confirmed"), 550);
-              });
-            }
-            syncTime();
+            return true;
           }
-          initCompactTimePicker("scheduled");
 
           function combineScheduledDateTime() {
             const scheduledDate = document.getElementById("scheduled_date");
             const scheduledTime = document.getElementById("scheduled_time");
             const scheduledAt = document.getElementById("scheduled_at");
-            if (!scheduledAt) return;
-            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+            if (!scheduledAt) return true;
+            if (!validate24HourScheduledTime("scheduled_date", "scheduled_time")) return false;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value.trim() : "";
+            return true;
           }
           if (etaSelect) {
             etaSelect.addEventListener("change", toggleEtaFields);
             toggleEtaFields();
           }
           const createOrderForm = document.querySelector('form[action="/jobs/create"]');
-          if (createOrderForm) createOrderForm.addEventListener("submit", combineScheduledDateTime);
+          if (createOrderForm) createOrderForm.addEventListener("submit", event => {
+            if (!combineScheduledDateTime()) event.preventDefault();
+          });
         </script>
       </body>
       </html>
@@ -6656,7 +6619,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
                     <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
-                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px;"><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}">${compactScheduledTimePicker("edit_scheduled", scheduledTimeValue(job.scheduled_at))}</div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
+                    <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px; align-items:start;"><div><label>Date</label><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}"></div>${compactScheduledTimePicker("edit_scheduled", scheduledTimeValue(job.scheduled_at))}</div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
                     <div class="wide"><label>Dispatcher notes</label><textarea name="dispatcher_notes" rows="3">${escapeHtml(job.dispatcher_notes)}</textarea></div>
@@ -6755,71 +6718,37 @@ app.get("/jobs/:id/edit", async (req, res) => {
             if (quickEtaOther) quickEtaOther.style.display = quickEtaSelect.value === "Other" ? "block" : "none";
             if (quickScheduledBox) quickScheduledBox.style.display = quickEtaSelect.value === "Scheduled" ? "block" : "none";
           }
-          function initCompactTimePicker(prefix) {
-            const root = document.querySelector('[data-time-picker="' + prefix + '"]');
-            const hidden = document.getElementById(prefix + "_time");
-            const display = document.getElementById(prefix + "_display");
-            const hourButtons = Array.from(document.querySelectorAll('.time-hour-chip[data-target="' + prefix + '"]'));
-            const minuteButtons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
-            const resetButton = document.querySelector('.time-reset[data-target="' + prefix + '"]');
-            const confirmButton = document.querySelector('.time-confirm[data-target="' + prefix + '"]');
-            if (!root || !hidden || !display || !hourButtons.length || !minuteButtons.length) return;
-            function activeValue(buttons, key) {
-              const active = buttons.find(button => button.classList.contains("active"));
-              return active ? active.dataset[key] : "";
+          function validate24HourScheduledTime(dateId, timeId) {
+            const scheduledDate = document.getElementById(dateId);
+            const scheduledTime = document.getElementById(timeId);
+            if (!scheduledDate || !scheduledTime || !scheduledDate.value || !scheduledTime.value) return true;
+            const value = scheduledTime.value.trim();
+            const ok = /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+            if (!ok) {
+              alert("Please enter the scheduled time in 24 hour format, for example 09:00 or 14:30.");
+              scheduledTime.focus();
+              return false;
             }
-            function syncTime() {
-              const hour = activeValue(hourButtons, "hour") || "09";
-              const minute = activeValue(minuteButtons, "minute") || "00";
-              const value = hour + ":" + minute;
-              hidden.value = value;
-              display.textContent = value;
-            }
-            hourButtons.forEach(button => {
-              button.addEventListener("click", () => {
-                hourButtons.forEach(item => item.classList.remove("active"));
-                button.classList.add("active");
-                syncTime();
-              });
-            });
-            minuteButtons.forEach(button => {
-              button.addEventListener("click", () => {
-                minuteButtons.forEach(item => item.classList.remove("active"));
-                button.classList.add("active");
-                syncTime();
-              });
-            });
-            if (resetButton) {
-              resetButton.addEventListener("click", () => {
-                hourButtons.forEach(item => item.classList.toggle("active", item.dataset.hour === "09"));
-                minuteButtons.forEach(item => item.classList.toggle("active", item.dataset.minute === "00"));
-                syncTime();
-              });
-            }
-            if (confirmButton) {
-              confirmButton.addEventListener("click", () => {
-                root.classList.add("confirmed");
-                setTimeout(() => root.classList.remove("confirmed"), 550);
-              });
-            }
-            syncTime();
+            return true;
           }
-          initCompactTimePicker("quick_scheduled");
-          initCompactTimePicker("edit_scheduled");
 
           function combineQuickScheduledDateTime() {
             const scheduledDate = document.getElementById("quick_scheduled_date");
             const scheduledTime = document.getElementById("quick_scheduled_time");
             const scheduledAt = document.getElementById("quick_scheduled_at");
-            if (!scheduledAt) return;
-            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+            if (!scheduledAt) return true;
+            if (!validate24HourScheduledTime("quick_scheduled_date", "quick_scheduled_time")) return false;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value.trim() : "";
+            return true;
           }
           if (quickEtaSelect) {
             quickEtaSelect.addEventListener("change", toggleQuickEtaFields);
             toggleQuickEtaFields();
           }
           const quickAppointmentForm = document.querySelector('form[action="/jobs/${job.id}/quick-appointment"]');
-          if (quickAppointmentForm) quickAppointmentForm.addEventListener("submit", combineQuickScheduledDateTime);
+          if (quickAppointmentForm) quickAppointmentForm.addEventListener("submit", event => {
+            if (!combineQuickScheduledDateTime()) event.preventDefault();
+          });
 
           const editEtaSelect = document.getElementById("edit_eta_select");
           const editEtaOther = document.getElementById("edit_eta_other");
@@ -6833,15 +6762,19 @@ app.get("/jobs/:id/edit", async (req, res) => {
             const scheduledDate = document.getElementById("edit_scheduled_date");
             const scheduledTime = document.getElementById("edit_scheduled_time");
             const scheduledAt = document.getElementById("edit_scheduled_at");
-            if (!scheduledAt) return;
-            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value : "";
+            if (!scheduledAt) return true;
+            if (!validate24HourScheduledTime("edit_scheduled_date", "edit_scheduled_time")) return false;
+            scheduledAt.value = scheduledDate && scheduledTime && scheduledDate.value && scheduledTime.value ? scheduledDate.value + "T" + scheduledTime.value.trim() : "";
+            return true;
           }
           if (editEtaSelect) {
             editEtaSelect.addEventListener("change", toggleEditEtaFields);
             toggleEditEtaFields();
           }
           const editOrderForm = document.querySelector('form[action="/jobs/${job.id}/update"]');
-          if (editOrderForm) editOrderForm.addEventListener("submit", combineEditScheduledDateTime);
+          if (editOrderForm) editOrderForm.addEventListener("submit", event => {
+            if (!combineEditScheduledDateTime()) event.preventDefault();
+          });
         </script>
       </body>
       </html>
