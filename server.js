@@ -894,21 +894,31 @@ function quarterHourTimeOptions(selectedTime = "") {
 
 function compactScheduledTimePicker(prefix, selectedTime = "") {
   const selected = String(selectedTime || "").trim();
-  const selectedHour = selected && selected.includes(":") ? selected.split(":")[0] : "";
-  const selectedMinute = selected && selected.includes(":") ? selected.split(":")[1] : "";
-  const hourOptions = [`<option value="">Hour</option>`];
-  for (let hour = 0; hour < 24; hour += 1) {
+  const selectedHour = selected && selected.includes(":") ? selected.split(":")[0] : "09";
+  const selectedMinute = selected && selected.includes(":") ? selected.split(":")[1] : "00";
+  const safeSelected = selected || `${selectedHour}:${selectedMinute}`;
+  const hourButtons = Array.from({ length: 24 }, (_, hour) => {
     const value = String(hour).padStart(2, "0");
-    hourOptions.push(`<option value="${value}" ${value === selectedHour ? "selected" : ""}>${value}</option>`);
-  }
+    return `<button type="button" class="time-hour-chip ${value === selectedHour ? "active" : ""}" data-hour="${value}" data-target="${prefix}">${value}</button>`;
+  }).join("");
   const minuteOptions = ["00", "15", "30", "45"].map(minute => `
     <button type="button" class="minute-pill ${minute === selectedMinute ? "active" : ""}" data-minute="${minute}" data-target="${prefix}">:${minute}</button>
   `).join("");
   return `
-    <div class="time-picker" data-time-picker="${prefix}">
-      <select id="${prefix}_hour" class="hour-select" aria-label="Scheduled hour">${hourOptions.join("")}</select>
-      <div class="minute-buttons" aria-label="Scheduled minutes">${minuteOptions}</div>
-      <input type="hidden" id="${prefix}_time" name="scheduled_time" value="${escapeHtml(selected)}">
+    <div class="appointment-time-picker" data-time-picker="${prefix}">
+      <div class="appointment-time-header">
+        <span>Time</span>
+        <strong id="${prefix}_display">${escapeHtml(safeSelected)}</strong>
+      </div>
+      <div class="appointment-time-body">
+        <div class="hour-chip-grid" aria-label="Scheduled hour">${hourButtons}</div>
+        <div class="minute-buttons" aria-label="Scheduled minutes">${minuteOptions}</div>
+      </div>
+      <div class="appointment-time-actions">
+        <button type="button" class="time-reset" data-target="${prefix}">Reset</button>
+        <button type="button" class="time-confirm" data-target="${prefix}">✓</button>
+      </div>
+      <input type="hidden" id="${prefix}_time" name="scheduled_time" value="${escapeHtml(safeSelected)}">
     </div>
   `;
 }
@@ -5928,34 +5938,95 @@ app.get("/jobs/new", async (req, res) => {
           }
           .tel-wrap input { border-top-left-radius: 0; border-bottom-left-radius: 0; }
           .muted-light { color: #6b7280; font-size: 12px; }
-          .time-picker {
-            display: grid;
-            grid-template-columns: 92px 1fr;
-            gap: 8px;
+          .appointment-time-picker {
+            width: 100%;
+            max-width: 360px;
+            border: 1px solid #d7dee8;
+            border-radius: 18px;
+            background: #ffffff;
+            box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
+            overflow: hidden;
+          }
+          .appointment-time-header {
+            display: flex;
             align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px;
+            border-bottom: 1px solid #eef2f7;
+            color: #334155;
+            font-size: 12px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .06em;
           }
-          .time-picker .hour-select { min-width: 92px; }
-          .minute-buttons {
+          .appointment-time-header strong {
+            min-width: 72px;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: #e5e7eb;
+            color: #111827;
+            text-align: center;
+            font-size: 14px;
+            letter-spacing: 0;
+          }
+          .appointment-time-body { padding: 12px 14px; }
+          .hour-chip-grid {
             display: grid;
-            grid-template-columns: repeat(4, minmax(46px, 1fr));
+            grid-template-columns: repeat(6, 1fr);
             gap: 6px;
+            margin-bottom: 10px;
           }
+          .time-hour-chip,
           .minute-pill {
-            min-height: 38px;
-            border: 1px solid #bfc7d1;
-            border-radius: 8px;
+            min-height: 34px;
+            border: 1px solid #d7dee8;
+            border-radius: 999px;
             background: #ffffff;
             color: #111827;
-            font-weight: 800;
+            font-weight: 900;
             cursor: pointer;
           }
+          .minute-buttons {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+          }
+          .time-hour-chip.active,
           .minute-pill.active {
-            background: #2563eb;
+            background: #1e88ff;
             color: #ffffff;
-            border-color: #2563eb;
+            border-color: #1e88ff;
+            box-shadow: 0 6px 14px rgba(30, 136, 255, 0.28);
+          }
+          .appointment-time-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px 14px;
+          }
+          .time-reset {
+            border: 0;
+            background: #f1f5f9;
+            color: #334155;
+            border-radius: 999px;
+            padding: 9px 13px;
+            font-weight: 900;
+            cursor: pointer;
+          }
+          .time-confirm {
+            width: 42px;
+            height: 42px;
+            border: 0;
+            border-radius: 999px;
+            background: #1e88ff;
+            color: #ffffff;
+            font-size: 20px;
+            font-weight: 900;
+            cursor: pointer;
           }
           @media (max-width: 520px) {
-            .time-picker { grid-template-columns: 1fr; }
+            .appointment-time-picker { max-width: none; }
+            .hour-chip-grid { grid-template-columns: repeat(4, 1fr); }
           }
           @media (max-width: 800px) {
             .form-grid-2, .form-grid-3, .customer-line, .phone-line, .postcode-row { grid-template-columns: 1fr; }
@@ -6202,26 +6273,52 @@ app.get("/jobs/new", async (req, res) => {
             if (scheduledBox) scheduledBox.style.display = etaSelect.value === "Scheduled" ? "grid" : "none";
           }
           function initCompactTimePicker(prefix) {
-            const hour = document.getElementById(prefix + "_hour");
+            const root = document.querySelector('[data-time-picker="' + prefix + '"]');
             const hidden = document.getElementById(prefix + "_time");
-            const buttons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
-            if (!hour || !hidden || !buttons.length) return;
-            function selectedMinute() {
+            const display = document.getElementById(prefix + "_display");
+            const hourButtons = Array.from(document.querySelectorAll('.time-hour-chip[data-target="' + prefix + '"]'));
+            const minuteButtons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
+            const resetButton = document.querySelector('.time-reset[data-target="' + prefix + '"]');
+            const confirmButton = document.querySelector('.time-confirm[data-target="' + prefix + '"]');
+            if (!root || !hidden || !display || !hourButtons.length || !minuteButtons.length) return;
+            function activeValue(buttons, key) {
               const active = buttons.find(button => button.classList.contains("active"));
-              return active ? active.dataset.minute : "";
+              return active ? active.dataset[key] : "";
             }
             function syncTime() {
-              const minute = selectedMinute();
-              hidden.value = hour.value && minute ? hour.value + ":" + minute : "";
+              const hour = activeValue(hourButtons, "hour") || "09";
+              const minute = activeValue(minuteButtons, "minute") || "00";
+              const value = hour + ":" + minute;
+              hidden.value = value;
+              display.textContent = value;
             }
-            hour.addEventListener("change", syncTime);
-            buttons.forEach(button => {
+            hourButtons.forEach(button => {
               button.addEventListener("click", () => {
-                buttons.forEach(item => item.classList.remove("active"));
+                hourButtons.forEach(item => item.classList.remove("active"));
                 button.classList.add("active");
                 syncTime();
               });
             });
+            minuteButtons.forEach(button => {
+              button.addEventListener("click", () => {
+                minuteButtons.forEach(item => item.classList.remove("active"));
+                button.classList.add("active");
+                syncTime();
+              });
+            });
+            if (resetButton) {
+              resetButton.addEventListener("click", () => {
+                hourButtons.forEach(item => item.classList.toggle("active", item.dataset.hour === "09"));
+                minuteButtons.forEach(item => item.classList.toggle("active", item.dataset.minute === "00"));
+                syncTime();
+              });
+            }
+            if (confirmButton) {
+              confirmButton.addEventListener("click", () => {
+                root.classList.add("confirmed");
+                setTimeout(() => root.classList.remove("confirmed"), 550);
+              });
+            }
             syncTime();
           }
           initCompactTimePicker("scheduled");
@@ -6659,26 +6756,52 @@ app.get("/jobs/:id/edit", async (req, res) => {
             if (quickScheduledBox) quickScheduledBox.style.display = quickEtaSelect.value === "Scheduled" ? "block" : "none";
           }
           function initCompactTimePicker(prefix) {
-            const hour = document.getElementById(prefix + "_hour");
+            const root = document.querySelector('[data-time-picker="' + prefix + '"]');
             const hidden = document.getElementById(prefix + "_time");
-            const buttons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
-            if (!hour || !hidden || !buttons.length) return;
-            function selectedMinute() {
+            const display = document.getElementById(prefix + "_display");
+            const hourButtons = Array.from(document.querySelectorAll('.time-hour-chip[data-target="' + prefix + '"]'));
+            const minuteButtons = Array.from(document.querySelectorAll('.minute-pill[data-target="' + prefix + '"]'));
+            const resetButton = document.querySelector('.time-reset[data-target="' + prefix + '"]');
+            const confirmButton = document.querySelector('.time-confirm[data-target="' + prefix + '"]');
+            if (!root || !hidden || !display || !hourButtons.length || !minuteButtons.length) return;
+            function activeValue(buttons, key) {
               const active = buttons.find(button => button.classList.contains("active"));
-              return active ? active.dataset.minute : "";
+              return active ? active.dataset[key] : "";
             }
             function syncTime() {
-              const minute = selectedMinute();
-              hidden.value = hour.value && minute ? hour.value + ":" + minute : "";
+              const hour = activeValue(hourButtons, "hour") || "09";
+              const minute = activeValue(minuteButtons, "minute") || "00";
+              const value = hour + ":" + minute;
+              hidden.value = value;
+              display.textContent = value;
             }
-            hour.addEventListener("change", syncTime);
-            buttons.forEach(button => {
+            hourButtons.forEach(button => {
               button.addEventListener("click", () => {
-                buttons.forEach(item => item.classList.remove("active"));
+                hourButtons.forEach(item => item.classList.remove("active"));
                 button.classList.add("active");
                 syncTime();
               });
             });
+            minuteButtons.forEach(button => {
+              button.addEventListener("click", () => {
+                minuteButtons.forEach(item => item.classList.remove("active"));
+                button.classList.add("active");
+                syncTime();
+              });
+            });
+            if (resetButton) {
+              resetButton.addEventListener("click", () => {
+                hourButtons.forEach(item => item.classList.toggle("active", item.dataset.hour === "09"));
+                minuteButtons.forEach(item => item.classList.toggle("active", item.dataset.minute === "00"));
+                syncTime();
+              });
+            }
+            if (confirmButton) {
+              confirmButton.addEventListener("click", () => {
+                root.classList.add("confirmed");
+                setTimeout(() => root.classList.remove("confirmed"), 550);
+              });
+            }
             syncTime();
           }
           initCompactTimePicker("quick_scheduled");
