@@ -1139,6 +1139,10 @@ function normalisePostcode(postcode) {
   return compactPostcode(postcode);
 }
 
+function cleanPostcode(postcode) {
+  return normalisePostcode(postcode);
+}
+
 async function lookupPostcodeLocation(postcode) {
   const clean = normalisePostcode(postcode);
   if (!clean) {
