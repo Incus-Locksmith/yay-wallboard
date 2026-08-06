@@ -7900,8 +7900,14 @@ app.get("/customers/history", async (req, res) => {
 
 app.get("/dispatch", async (req, res) => {
   try {
-    const customerPostcode = (req.query.postcode || "").trim().toUpperCase();
+    const customerPostcode = cleanPostcode(req.query.postcode || "");
     const jobType = (req.query.job_type || "").trim();
+
+    function postcodeDistrict(value) {
+      const clean = cleanPostcode(value || "");
+      const match = clean.match(/^([A-Z]{1,2}\d{1,2}[A-Z]?)/);
+      return match ? match[1] : clean;
+    }
 
     let customerLocation = null;
     let customerLocationMessage = "";
@@ -7966,6 +7972,7 @@ app.get("/dispatch", async (req, res) => {
           priority: tech.priority || "Normal",
           availableFrom: tech.available_from || "Now / check",
           locationPostcode: item.location.postcode || "",
+          locationDistrict: postcodeDistrict(item.location.postcode || ""),
           locationSource: item.location.source || "",
           skills: tech.skills || "",
           notes: tech.notes || "",
@@ -7975,10 +7982,13 @@ app.get("/dispatch", async (req, res) => {
         };
       });
 
+    const customerDistrict = postcodeDistrict(customerPostcode);
+
     const mapData = {
       customer: customerLocation && customerLocation.ok
         ? {
             postcode: customerPostcode,
+            district: customerDistrict,
             latitude: customerLocation.latitude,
             longitude: customerLocation.longitude,
             precision: customerLocation.precision
@@ -7987,7 +7997,132 @@ app.get("/dispatch", async (req, res) => {
       technicians: mapTechnicians
     };
 
+    const districtLabels = [
+      { code: "W1", name: "West End", lat: 51.5136, lng: -0.1443 },
+      { code: "W2", name: "Paddington", lat: 51.5158, lng: -0.1760 },
+      { code: "W3", name: "Acton", lat: 51.5087, lng: -0.2678 },
+      { code: "W4", name: "Chiswick", lat: 51.4927, lng: -0.2630 },
+      { code: "W5", name: "Ealing", lat: 51.5130, lng: -0.3015 },
+      { code: "W6", name: "Hammersmith", lat: 51.4920, lng: -0.2260 },
+      { code: "W7", name: "Hanwell", lat: 51.5117, lng: -0.3360 },
+      { code: "W8", name: "Kensington", lat: 51.5019, lng: -0.1948 },
+      { code: "W9", name: "Maida Vale", lat: 51.5272, lng: -0.1899 },
+      { code: "W10", name: "North Kensington", lat: 51.5232, lng: -0.2161 },
+      { code: "W11", name: "Notting Hill", lat: 51.5121, lng: -0.2054 },
+      { code: "W12", name: "Shepherd's Bush", lat: 51.5055, lng: -0.2247 },
+      { code: "W13", name: "West Ealing", lat: 51.5136, lng: -0.3200 },
+      { code: "W14", name: "West Kensington", lat: 51.4947, lng: -0.2071 },
+      { code: "NW1", name: "Camden", lat: 51.5350, lng: -0.1420 },
+      { code: "NW2", name: "Cricklewood", lat: 51.5580, lng: -0.2206 },
+      { code: "NW3", name: "Hampstead", lat: 51.5563, lng: -0.1744 },
+      { code: "NW4", name: "Hendon", lat: 51.5860, lng: -0.2250 },
+      { code: "NW5", name: "Kentish Town", lat: 51.5500, lng: -0.1415 },
+      { code: "NW6", name: "Kilburn", lat: 51.5435, lng: -0.1960 },
+      { code: "NW7", name: "Mill Hill", lat: 51.6150, lng: -0.2440 },
+      { code: "NW8", name: "St John's Wood", lat: 51.5335, lng: -0.1720 },
+      { code: "NW9", name: "Colindale", lat: 51.5870, lng: -0.2550 },
+      { code: "NW10", name: "Willesden", lat: 51.5450, lng: -0.2560 },
+      { code: "NW11", name: "Golders Green", lat: 51.5765, lng: -0.1970 },
+      { code: "N1", name: "Islington", lat: 51.5390, lng: -0.1010 },
+      { code: "N2", name: "East Finchley", lat: 51.5900, lng: -0.1650 },
+      { code: "N3", name: "Finchley", lat: 51.6000, lng: -0.1950 },
+      { code: "N4", name: "Finsbury Park", lat: 51.5700, lng: -0.1050 },
+      { code: "N5", name: "Highbury", lat: 51.5520, lng: -0.0990 },
+      { code: "N6", name: "Highgate", lat: 51.5720, lng: -0.1480 },
+      { code: "N7", name: "Holloway", lat: 51.5540, lng: -0.1200 },
+      { code: "N8", name: "Crouch End", lat: 51.5830, lng: -0.1230 },
+      { code: "N10", name: "Muswell Hill", lat: 51.5900, lng: -0.1420 },
+      { code: "N15", name: "Seven Sisters", lat: 51.5820, lng: -0.0750 },
+      { code: "N16", name: "Stoke Newington", lat: 51.5620, lng: -0.0730 },
+      { code: "E1", name: "Whitechapel", lat: 51.5160, lng: -0.0610 },
+      { code: "E2", name: "Bethnal Green", lat: 51.5290, lng: -0.0630 },
+      { code: "E3", name: "Bow", lat: 51.5270, lng: -0.0240 },
+      { code: "E5", name: "Clapton", lat: 51.5580, lng: -0.0540 },
+      { code: "E8", name: "Hackney", lat: 51.5430, lng: -0.0640 },
+      { code: "E9", name: "Homerton", lat: 51.5450, lng: -0.0380 },
+      { code: "E10", name: "Leyton", lat: 51.5650, lng: -0.0140 },
+      { code: "E11", name: "Leytonstone", lat: 51.5680, lng: 0.0080 },
+      { code: "E13", name: "Plaistow", lat: 51.5280, lng: 0.0270 },
+      { code: "E14", name: "Canary Wharf", lat: 51.5050, lng: -0.0180 },
+      { code: "E15", name: "Stratford", lat: 51.5420, lng: 0.0050 },
+      { code: "E17", name: "Walthamstow", lat: 51.5860, lng: -0.0200 },
+      { code: "SE1", name: "Southwark", lat: 51.5010, lng: -0.0890 },
+      { code: "SE3", name: "Blackheath", lat: 51.4680, lng: 0.0120 },
+      { code: "SE5", name: "Camberwell", lat: 51.4730, lng: -0.0910 },
+      { code: "SE8", name: "Deptford", lat: 51.4800, lng: -0.0270 },
+      { code: "SE10", name: "Greenwich", lat: 51.4820, lng: -0.0040 },
+      { code: "SE11", name: "Kennington", lat: 51.4880, lng: -0.1080 },
+      { code: "SE13", name: "Lewisham", lat: 51.4620, lng: -0.0040 },
+      { code: "SE14", name: "New Cross", lat: 51.4750, lng: -0.0370 },
+      { code: "SE15", name: "Peckham", lat: 51.4710, lng: -0.0660 },
+      { code: "SE16", name: "Rotherhithe", lat: 51.4950, lng: -0.0520 },
+      { code: "SE18", name: "Woolwich", lat: 51.4890, lng: 0.0670 },
+      { code: "SE19", name: "Crystal Palace", lat: 51.4190, lng: -0.0820 },
+      { code: "SE23", name: "Forest Hill", lat: 51.4410, lng: -0.0490 },
+      { code: "SE25", name: "South Norwood", lat: 51.3990, lng: -0.0750 },
+      { code: "SW1", name: "Victoria", lat: 51.4970, lng: -0.1350 },
+      { code: "SW2", name: "Brixton Hill", lat: 51.4450, lng: -0.1260 },
+      { code: "SW3", name: "Chelsea", lat: 51.4900, lng: -0.1660 },
+      { code: "SW4", name: "Clapham", lat: 51.4620, lng: -0.1380 },
+      { code: "SW5", name: "Earl's Court", lat: 51.4910, lng: -0.1910 },
+      { code: "SW6", name: "Fulham", lat: 51.4800, lng: -0.1970 },
+      { code: "SW7", name: "South Kensington", lat: 51.4960, lng: -0.1740 },
+      { code: "SW8", name: "Nine Elms", lat: 51.4790, lng: -0.1320 },
+      { code: "SW9", name: "Brixton", lat: 51.4630, lng: -0.1120 },
+      { code: "SW11", name: "Battersea", lat: 51.4660, lng: -0.1700 },
+      { code: "SW12", name: "Balham", lat: 51.4450, lng: -0.1500 },
+      { code: "SW14", name: "Mortlake", lat: 51.4650, lng: -0.2670 },
+      { code: "SW15", name: "Putney", lat: 51.4600, lng: -0.2180 },
+      { code: "SW16", name: "Streatham", lat: 51.4270, lng: -0.1280 },
+      { code: "SW17", name: "Tooting", lat: 51.4300, lng: -0.1650 },
+      { code: "SW18", name: "Wandsworth", lat: 51.4540, lng: -0.1900 },
+      { code: "SW19", name: "Wimbledon", lat: 51.4210, lng: -0.2070 },
+      { code: "SW20", name: "Raynes Park", lat: 51.4090, lng: -0.2300 },
+      { code: "HA0", name: "Wembley", lat: 51.5510, lng: -0.3050 },
+      { code: "HA1", name: "Harrow", lat: 51.5790, lng: -0.3370 },
+      { code: "HA2", name: "South Harrow", lat: 51.5650, lng: -0.3520 },
+      { code: "HA3", name: "Kenton", lat: 51.5920, lng: -0.3160 },
+      { code: "HA4", name: "Ruislip", lat: 51.5730, lng: -0.4120 },
+      { code: "HA5", name: "Pinner", lat: 51.5940, lng: -0.3820 },
+      { code: "HA6", name: "Northwood", lat: 51.6110, lng: -0.4230 },
+      { code: "HA7", name: "Stanmore", lat: 51.6170, lng: -0.3140 },
+      { code: "HA8", name: "Edgware", lat: 51.6130, lng: -0.2750 },
+      { code: "HA9", name: "Wembley Park", lat: 51.5580, lng: -0.2820 },
+      { code: "UB1", name: "Southall", lat: 51.5110, lng: -0.3750 },
+      { code: "UB3", name: "Hayes", lat: 51.5060, lng: -0.4210 },
+      { code: "UB6", name: "Greenford", lat: 51.5400, lng: -0.3450 },
+      { code: "UB8", name: "Uxbridge", lat: 51.5460, lng: -0.4780 },
+      { code: "TW3", name: "Hounslow", lat: 51.4700, lng: -0.3610 },
+      { code: "TW7", name: "Isleworth", lat: 51.4750, lng: -0.3350 },
+      { code: "TW9", name: "Richmond", lat: 51.4630, lng: -0.3000 },
+      { code: "KT1", name: "Kingston", lat: 51.4090, lng: -0.3060 },
+      { code: "CR0", name: "Croydon", lat: 51.3760, lng: -0.0980 },
+      { code: "CR2", name: "South Croydon", lat: 51.3480, lng: -0.0930 },
+      { code: "BR1", name: "Bromley", lat: 51.4070, lng: 0.0170 },
+      { code: "IG1", name: "Ilford", lat: 51.5590, lng: 0.0740 },
+      { code: "RM1", name: "Romford", lat: 51.5760, lng: 0.1830 }
+    ];
+
+    const visibleDistricts = districtLabels.filter(label => {
+      if (!customerLocation || !customerLocation.ok) return true;
+      return distanceMiles(customerLocation.latitude, customerLocation.longitude, label.lat, label.lng) <= 18 || label.code === customerDistrict;
+    });
+
     const mapDataJson = JSON.stringify(mapData).replace(/</g, "\\u003c");
+    const districtLabelsJson = JSON.stringify(visibleDistricts).replace(/</g, "\\u003c");
+
+    const topTechCards = mapTechnicians.slice(0, 6).map(tech => {
+      const distanceText = tech.distance === null ? "Distance unknown" : `${tech.distance} miles`;
+      const etaText = tech.distance === null ? "Check ETA" : `${Math.max(12, Math.round(tech.distance * 3))} mins est.`;
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${tech.latitude},${tech.longitude}`)}`;
+      return `
+        <a class="tech-rank-card" href="${mapsUrl}" target="_blank" rel="noopener">
+          <span class="rank-number">${tech.rank}</span>
+          <span class="rank-main"><strong>${escapeHtml(tech.name)}</strong><small>${escapeHtml(tech.locationDistrict || tech.locationPostcode || "No postcode")} · ${escapeHtml(tech.status || "")}</small></span>
+          <span class="rank-distance"><strong>${escapeHtml(distanceText)}</strong><small>${escapeHtml(etaText)}</small></span>
+        </a>
+      `;
+    }).join("");
 
     const rows = candidatesWithDistance.map((item, index) => {
       const tech = item.tech;
@@ -8014,6 +8149,10 @@ app.get("/dispatch", async (req, res) => {
       `;
     }).join("");
 
+    const customerMapsUrl = mapData.customer
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${mapData.customer.latitude},${mapData.customer.longitude}`)}`
+      : "https://www.google.com/maps/search/London";
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -8027,7 +8166,7 @@ app.get("/dispatch", async (req, res) => {
           .leaflet-pane, .leaflet-tile, .leaflet-marker-icon, .leaflet-marker-shadow, .leaflet-tile-container, .leaflet-pane > svg, .leaflet-pane > canvas, .leaflet-zoom-box, .leaflet-image-layer, .leaflet-layer { position: absolute; left: 0; top: 0; }
           .leaflet-container { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.5; }
           .leaflet-tile, .leaflet-marker-icon, .leaflet-marker-shadow { user-select: none; -webkit-user-drag: none; }
-          .leaflet-tile { filter: inherit; visibility: hidden; }
+          .leaflet-tile { filter: saturate(.85) contrast(.95) brightness(1.04); visibility: hidden; }
           .leaflet-tile-loaded { visibility: inherit; }
           .leaflet-zoom-animated { transform-origin: 0 0; }
           .leaflet-map-pane { z-index: 400; }
@@ -8043,76 +8182,166 @@ app.get("/dispatch", async (req, res) => {
           .leaflet-right { right: 0; }
           .leaflet-bottom { bottom: 0; }
           .leaflet-left { left: 0; }
-          .leaflet-control-zoom { border: 2px solid rgba(0,0,0,0.2); background-clip: padding-box; border-radius: 4px; margin-left: 10px; margin-top: 10px; }
-          .leaflet-control-zoom a { background-color: white; border-bottom: 1px solid #ccc; color: black; display: block; height: 26px; line-height: 26px; text-align: center; text-decoration: none; width: 26px; margin: 0; font-size: 18px; }
+          .leaflet-control-zoom { border: 1px solid #d7dee8; background-clip: padding-box; border-radius: 10px; margin-left: 12px; margin-top: 12px; overflow:hidden; box-shadow:0 8px 20px rgba(15,23,42,.12); }
+          .leaflet-control-zoom a { background-color: white; border-bottom: 1px solid #e5e7eb; color: #111827; display: block; height: 34px; line-height: 34px; text-align: center; text-decoration: none; width: 34px; margin: 0; font-size: 20px; font-weight:800; }
           .leaflet-popup { position: absolute; text-align: center; margin-bottom: 20px; }
-          .leaflet-popup-content-wrapper { background: white; border-radius: 12px; padding: 1px; text-align: left; box-shadow: 0 3px 14px rgba(0,0,0,0.4); }
-          .leaflet-popup-content { margin: 13px 19px; line-height: 1.45; color: #111827; }
+          .leaflet-popup-content-wrapper { background: white; border-radius: 14px; padding: 1px; text-align: left; box-shadow: 0 16px 40px rgba(15,23,42,.22); }
+          .leaflet-popup-content { margin: 14px 18px; line-height: 1.45; color: #111827; }
           .leaflet-popup-tip-container { width: 40px; height: 20px; position: absolute; left: 50%; margin-left: -20px; overflow: hidden; pointer-events: none; }
-          .leaflet-popup-tip { width: 17px; height: 17px; padding: 1px; margin: -10px auto 0; background: white; transform: rotate(45deg); box-shadow: 0 3px 14px rgba(0,0,0,0.4); }
-          form.search { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 15px; }
-          .notice { background: #1f2937; border-left: 5px solid #f59e0b; border-radius: 10px; padding: 18px; margin-bottom: 25px; color: #d1d5db; }
-          .notice.good { border-left-color: #16a34a; }
-          .notice.bad { border-left-color: #dc2626; }
-          #dispatch-map { height: 680px; width: 100%; border-radius: 16px; overflow: hidden; border: 1px solid #374151; background: #111827; margin-bottom: 28px; }
-          .map-summary { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 16px 20px; margin-bottom: 20px; color: #d1d5db; display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
-          .legend-item { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-          .legend-dot { width: 13px; height: 13px; border-radius: 50%; display: inline-block; }
-          .dot-customer { background: #a855f7; }
-          .dot-available { background: #16a34a; }
-          .dot-soon { background: #f59e0b; }
-          .dot-onjob { background: #2563eb; }
-          .dot-other { background: #6b7280; }
-          .marker-label { background: white; border: 2px solid #111827; border-radius: 999px; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; color: #111827; font-weight: bold; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
-          .marker-customer { background: #a855f7; color: white; }
-          .marker-available { background: #16a34a; color: white; }
-          .marker-soon { background: #f59e0b; color: black; }
-          .marker-onjob { background: #2563eb; color: white; }
-          .marker-other { background: #6b7280; color: white; }
-          @media (max-width: 900px) { form.search { grid-template-columns: 1fr; } #dispatch-map { height: 540px; } }
+          .leaflet-popup-tip { width: 17px; height: 17px; padding: 1px; margin: -10px auto 0; background: white; transform: rotate(45deg); box-shadow: 0 3px 14px rgba(0,0,0,0.25); }
+          .map-page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin-bottom:16px; }
+          .map-title-wrap h1 { margin-bottom:4px; }
+          .map-actions { display:flex; gap:10px; flex-wrap:wrap; }
+          .map-search-panel { margin-bottom:0; }
+          form.map-search { display:grid; grid-template-columns: 2fr 1.2fr auto; gap:14px; align-items:end; }
+          .dispatch-map-layout { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:16px; align-items:stretch; }
+          .map-frame { position:relative; background:#fff; border:1px solid #dfe5ee; border-radius:18px; overflow:hidden; box-shadow:0 14px 34px rgba(15,23,42,.08); }
+          #dispatch-map { height: 720px; width: 100%; background: #f8fafc; }
+          .map-footer-note { position:absolute; left:14px; right:14px; bottom:14px; background:rgba(255,255,255,.92); border:1px solid #dfe5ee; border-radius:12px; padding:10px 12px; font-size:12px; color:#475569; box-shadow:0 10px 25px rgba(15,23,42,.08); z-index:750; }
+          .map-legend { position:absolute; left:14px; bottom:62px; background:rgba(255,255,255,.94); border:1px solid #dfe5ee; border-radius:14px; padding:14px; box-shadow:0 14px 28px rgba(15,23,42,.12); z-index:760; min-width:190px; }
+          .map-legend h4 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#334155; }
+          .legend-item { display:flex; align-items:center; gap:8px; font-size:13px; margin:8px 0; color:#475569; }
+          .legend-dot { width:13px; height:13px; border-radius:50%; display:inline-block; }
+          .dot-customer { background:#dc2626; }
+          .dot-available { background:#16a34a; }
+          .dot-soon { background:#f59e0b; }
+          .dot-onjob { background:#2563eb; }
+          .dot-boundary { width:24px; height:0; border-top:2px dashed #a855f7; border-radius:0; }
+          .district-label { background:rgba(255,255,255,.72); border:1px solid rgba(168,85,247,.25); color:#8b5cf6; font-weight:900; font-size:20px; letter-spacing:.02em; padding:2px 8px; border-radius:10px; text-shadow:0 1px 0 #fff; box-shadow:0 4px 10px rgba(15,23,42,.04); }
+          .district-label small { display:block; color:#475569; font-size:9px; font-weight:700; letter-spacing:0; text-align:center; margin-top:-2px; }
+          .district-label.active { background:#fff7ed; border-color:#fb923c; color:#dc2626; transform:scale(1.08); }
+          .marker-pin { width:34px; height:34px; border-radius:999px 999px 999px 4px; transform:rotate(-45deg); display:flex; align-items:center; justify-content:center; color:white; font-weight:900; border:3px solid white; box-shadow:0 7px 18px rgba(15,23,42,.32); }
+          .marker-pin span { transform:rotate(45deg); display:block; font-size:12px; }
+          .marker-customer { background:#dc2626; }
+          .marker-available { background:#16a34a; }
+          .marker-soon { background:#f59e0b; color:#111827; }
+          .marker-onjob { background:#2563eb; }
+          .marker-other { background:#6b7280; }
+          .map-side-panel { background:white; border:1px solid #dfe5ee; border-radius:18px; padding:18px; box-shadow:0 14px 34px rgba(15,23,42,.08); display:flex; flex-direction:column; gap:16px; min-height:720px; }
+          .side-section { border-bottom:1px solid #e5e7eb; padding-bottom:15px; }
+          .side-section:last-child { border-bottom:0; padding-bottom:0; }
+          .side-kicker { font-size:11px; color:#64748b; font-weight:900; text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px; }
+          .current-job-box { display:flex; gap:12px; align-items:center; }
+          .job-pin-icon { width:42px; height:42px; border-radius:14px; background:#fee2e2; color:#dc2626; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:22px; }
+          .current-job-box h2 { margin:0 0 3px; font-size:20px; }
+          .current-job-box p { margin:0; color:#64748b; }
+          .mini-metrics { display:grid; grid-template-columns:repeat(3,1fr); border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; }
+          .mini-metric { padding:12px; border-right:1px solid #e5e7eb; }
+          .mini-metric:last-child { border-right:0; }
+          .mini-metric small { display:block; color:#64748b; font-size:10px; font-weight:900; text-transform:uppercase; margin-bottom:4px; }
+          .mini-metric strong { font-size:15px; }
+          .tech-rank-card { display:grid; grid-template-columns:32px 1fr auto; gap:10px; align-items:center; text-decoration:none; color:#111827; border:1px solid #e5e7eb; border-radius:12px; padding:10px; margin-bottom:8px; background:#fff; }
+          .tech-rank-card:hover { border-color:#93c5fd; background:#f8fbff; }
+          .rank-number { width:28px; height:28px; border-radius:9px; background:#111827; color:white; display:flex; align-items:center; justify-content:center; font-weight:900; }
+          .rank-main small, .rank-distance small { display:block; color:#64748b; font-size:11px; margin-top:2px; }
+          .rank-distance { text-align:right; color:#16a34a; }
+          .area-list { display:grid; gap:9px; font-size:13px; color:#334155; }
+          .area-list div { display:grid; grid-template-columns:110px 1fr; gap:10px; }
+          .area-list strong { color:#64748b; }
+          .map-table-panel { margin-top:18px; }
+          @media (max-width: 1100px) { .dispatch-map-layout { grid-template-columns:1fr; } .map-side-panel { min-height:auto; } }
+          @media (max-width: 900px) { form.map-search { grid-template-columns:1fr; } #dispatch-map { height:540px; } .map-page-head { flex-direction:column; } .map-legend { position:relative; left:auto; bottom:auto; margin:12px; z-index:1; } .map-footer-note { position:relative; left:auto; right:auto; bottom:auto; margin:12px; z-index:1; } }
         </style>
       </head>
       <body>
         ${nav(req)}
-        <h1>Dispatch Map</h1>
-        <div class="subtitle">Search a postcode to zoom into that region only</div>
-        <div class="panel">
-          <form class="search" method="GET" action="/dispatch">
-            <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. SE13 5BY">
-            <input name="job_type" value="${escapeHtml(jobType)}" placeholder="Job type e.g. lockout, uPVC">
+        <div class="map-page-head">
+          <div class="map-title-wrap">
+            <h1>Dispatch Map</h1>
+            <div class="subtitle">District view · postcode-led dispatch map for London jobs</div>
+          </div>
+          <div class="map-actions">
+            <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
+            <a class="action-button green" href="/jobs/new">+ Create Order</a>
+          </div>
+        </div>
+
+        <div class="panel map-search-panel">
+          <form class="map-search" method="GET" action="/dispatch">
+            <label>Search postcode or place
+              <input name="postcode" value="${escapeHtml(customerPostcode)}" placeholder="Customer postcode e.g. SE13 5BY">
+            </label>
+            <label>Job type
+              <input name="job_type" value="${escapeHtml(jobType)}" placeholder="Job type e.g. lockout, uPVC">
+            </label>
             <button type="submit">Find Locksmith</button>
           </form>
         </div>
-        ${
-          customerPostcode
-            ? `<div class="notice ${customerLocation && customerLocation.ok ? "good" : "bad"}"><strong>${escapeHtml(customerPostcode)}</strong> — ${escapeHtml(customerLocationMessage)}<br>The map is zoomed into this postcode region. Technician pins shown are within roughly 25 miles.</div>`
-            : `<div class="notice">Enter a customer postcode to zoom into that area and show nearby locksmiths.</div>`
-        }
-        <div class="map-summary">
-          <div class="legend-item"><span class="legend-dot dot-customer"></span>Customer</div>
-          <div class="legend-item"><span class="legend-dot dot-available"></span>Available</div>
-          <div class="legend-item"><span class="legend-dot dot-soon"></span>Available soon</div>
-          <div class="legend-item"><span class="legend-dot dot-onjob"></span>On job</div>
-          <div class="legend-item"><span class="legend-dot dot-other"></span>Other usable status</div>
-          <div class="legend-item muted">Straight-line distance only, not driving time.</div>
+
+        <div class="dispatch-map-layout">
+          <div class="map-frame">
+            <div id="dispatch-map"></div>
+            <div class="map-legend">
+              <h4>Map key</h4>
+              <div class="legend-item"><span class="legend-dot dot-customer"></span> Customer location</div>
+              <div class="legend-item"><span class="legend-dot dot-available"></span> Available technician</div>
+              <div class="legend-item"><span class="legend-dot dot-soon"></span> Available soon</div>
+              <div class="legend-item"><span class="legend-dot dot-onjob"></span> On job</div>
+              <div class="legend-item"><span class="legend-dot dot-boundary"></span> Postcode district guide</div>
+            </div>
+            <div class="map-footer-note">Showing a cleaner district view with postcode labels and main roads. Zoom in for more street detail when needed.</div>
+          </div>
+
+          <aside class="map-side-panel">
+            <div class="side-section">
+              <div class="side-kicker">Current job</div>
+              <div class="current-job-box">
+                <div class="job-pin-icon">⌖</div>
+                <div>
+                  <h2>${customerPostcode ? escapeHtml(customerPostcode) : "No postcode"}</h2>
+                  <p>${customerPostcode ? `${escapeHtml(customerDistrict || "")}${jobType ? ` · ${escapeHtml(jobType)}` : ""}` : "Enter a postcode to rank nearby technicians"}</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="side-section">
+              <div class="mini-metrics">
+                <div class="mini-metric"><small>Straight line</small><strong>${mapTechnicians[0] && mapTechnicians[0].distance !== null ? `${escapeHtml(String(mapTechnicians[0].distance))} miles` : "—"}</strong></div>
+                <div class="mini-metric"><small>Best ETA</small><strong>${mapTechnicians[0] && mapTechnicians[0].distance !== null ? `${Math.max(12, Math.round(mapTechnicians[0].distance * 3))} mins` : "—"}</strong></div>
+                <div class="mini-metric"><small>Techs shown</small><strong>${mapTechnicians.length}</strong></div>
+              </div>
+            </div>
+
+            <div class="side-section">
+              <div class="side-kicker">Nearest available locksmiths</div>
+              ${topTechCards || `<p class="muted">Enter a postcode or add technician postcodes to show ranked technicians.</p>`}
+            </div>
+
+            <div class="side-section">
+              <div class="side-kicker">Area information</div>
+              <div class="area-list">
+                <div><strong>Postcode district</strong><span>${customerDistrict ? escapeHtml(customerDistrict) : "—"}</span></div>
+                <div><strong>Location result</strong><span>${customerPostcode ? escapeHtml(customerLocationMessage || "Not searched") : "—"}</span></div>
+                <div><strong>Major roads</strong><span>Shown on base map</span></div>
+                <div><strong>Map style</strong><span>District labels + reduced street clutter</span></div>
+              </div>
+            </div>
+
+            <a class="action-button dark" href="${customerMapsUrl}" target="_blank" rel="noopener">Open in Google Maps</a>
+          </aside>
         </div>
-        <div id="dispatch-map"></div>
-        <h2>Ranked Technician List</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Rank</th><th>Technician</th><th>Status</th><th>Priority</th><th>Available From</th><th>Location</th><th>Distance</th><th>Skills</th><th>Notes</th><th>Last Updated</th>
-            </tr>
-          </thead>
-          <tbody>${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}</tbody>
-        </table>
+
+        <div class="panel map-table-panel">
+          <h2>Ranked Technician List</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th><th>Technician</th><th>Status</th><th>Priority</th><th>Available From</th><th>Location</th><th>Distance</th><th>Skills</th><th>Notes</th><th>Last Updated</th>
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="10">No available technicians found</td></tr>`}</tbody>
+          </table>
+        </div>
         <script>
           const mapData = ${mapDataJson};
-          const map = L.map("dispatch-map", { scrollWheelZoom: true });
+          const districtLabels = ${districtLabelsJson};
+          const customerDistrict = ${JSON.stringify(customerDistrict || "")};
+          const map = L.map("dispatch-map", { scrollWheelZoom: true, zoomControl: true });
 
-          L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+            subdomains: "abcd",
             maxZoom: 19,
-            attribution: "&copy; OpenStreetMap contributors"
+            attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
           }).addTo(map);
 
           setTimeout(function() { map.invalidateSize(); }, 250);
@@ -8121,8 +8350,7 @@ app.get("/dispatch", async (req, res) => {
           const hasCustomer = !!mapData.customer;
 
           if (hasCustomer) {
-            const zoomLevel = mapData.customer.precision === "Exact" ? 14 : 12;
-            map.setView([mapData.customer.latitude, mapData.customer.longitude], zoomLevel);
+            map.setView([mapData.customer.latitude, mapData.customer.longitude], 11);
           } else {
             map.setView(defaultLondonCentre, 10);
           }
@@ -8139,40 +8367,57 @@ app.get("/dispatch", async (req, res) => {
             return "marker-other";
           }
 
-          function makeNumberIcon(number, className) {
+          function makePinIcon(label, className) {
             return L.divIcon({
               className: "",
-              html: '<div class="marker-label ' + className + '">' + number + '</div>',
-              iconSize: [30, 30],
-              iconAnchor: [15, 15],
-              popupAnchor: [0, -15]
+              html: '<div class="marker-pin ' + className + '"><span>' + label + '</span></div>',
+              iconSize: [38, 38],
+              iconAnchor: [19, 36],
+              popupAnchor: [0, -34]
             });
           }
+
+          function makeDistrictIcon(label) {
+            const activeClass = label.code === customerDistrict ? " active" : "";
+            return L.divIcon({
+              className: "",
+              html: '<div class="district-label' + activeClass + '">' + safeText(label.code) + '<small>' + safeText(label.name) + '</small></div>',
+              iconSize: [86, 38],
+              iconAnchor: [43, 19]
+            });
+          }
+
+          districtLabels.forEach(function(label) {
+            L.marker([label.lat, label.lng], { icon: makeDistrictIcon(label), interactive: false, keyboard: false }).addTo(map);
+          });
 
           if (mapData.customer) {
             const customerLatLng = [mapData.customer.latitude, mapData.customer.longitude];
 
-            L.marker(customerLatLng, { icon: makeNumberIcon("C", "marker-customer") })
+            L.marker(customerLatLng, { icon: makePinIcon("C", "marker-customer") })
               .addTo(map)
-              .bindPopup("<strong>Customer</strong><br>" + safeText(mapData.customer.postcode) + "<br>Precision: " + safeText(mapData.customer.precision))
+              .bindPopup("<strong>Customer</strong><br>" + safeText(mapData.customer.postcode) + "<br>District: " + safeText(mapData.customer.district) + "<br>Precision: " + safeText(mapData.customer.precision))
               .openPopup();
 
             L.circle(customerLatLng, {
-              radius: mapData.customer.precision === "Exact" ? 1200 : 4500,
-              color: "#a855f7",
-              fillColor: "#a855f7",
-              fillOpacity: 0.08,
+              radius: mapData.customer.precision === "Exact" ? 1800 : 4500,
+              color: "#dc2626",
+              dashArray: "8 8",
+              fillColor: "#f97316",
+              fillOpacity: 0.10,
               weight: 2
             }).addTo(map);
           }
 
-          const technicianBounds = [];
+          const bounds = [];
+          if (mapData.customer) bounds.push([mapData.customer.latitude, mapData.customer.longitude]);
 
           mapData.technicians.forEach(function(tech) {
             const latLng = [tech.latitude, tech.longitude];
-            technicianBounds.push(latLng);
+            bounds.push(latLng);
 
             const distanceText = tech.distance === null ? "Distance unavailable" : tech.distance + " miles";
+            const etaText = tech.distance === null ? "Check ETA" : Math.max(12, Math.round(tech.distance * 3)) + " mins estimate";
 
             const popupHtml =
               "<strong>#" + safeText(tech.rank) + " " + safeText(tech.name) + "</strong><br>" +
@@ -8180,18 +8425,19 @@ app.get("/dispatch", async (req, res) => {
               "<strong>Status:</strong> " + safeText(tech.status) + "<br>" +
               "<strong>Priority:</strong> " + safeText(tech.priority) + "<br>" +
               "<strong>Available:</strong> " + safeText(tech.availableFrom) + "<br>" +
-              "<strong>Location:</strong> " + safeText(tech.locationPostcode) + " (" + safeText(tech.locationSource) + ")<br>" +
+              "<strong>Postcode:</strong> " + safeText(tech.locationPostcode) + "<br>" +
               "<strong>Distance:</strong> " + safeText(distanceText) + "<br>" +
+              "<strong>ETA:</strong> " + safeText(etaText) + "<br>" +
               "<strong>Skills:</strong> " + safeText(tech.skills) + "<br>" +
               "<strong>Notes:</strong> " + safeText(tech.notes);
 
-            L.marker(latLng, { icon: makeNumberIcon(tech.rank, markerClassForStatus(tech.status)) })
+            L.marker(latLng, { icon: makePinIcon(tech.rank, markerClassForStatus(tech.status)) })
               .addTo(map)
               .bindPopup(popupHtml);
           });
 
-          if (!hasCustomer && technicianBounds.length > 0) {
-            map.fitBounds(technicianBounds, { padding: [45, 45], maxZoom: 11 });
+          if (bounds.length > 1) {
+            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 11 });
           }
         </script>
       </body>
@@ -8199,7 +8445,7 @@ app.get("/dispatch", async (req, res) => {
     `);
   } catch (error) {
     console.error("Dispatch page error:", error);
-    res.status(500).send("Dispatch page error. Check Render logs.");
+    res.status(500).send(`Dispatch page error: ${escapeHtml(error.message)}. Check Render logs.`);
   }
 });
 
