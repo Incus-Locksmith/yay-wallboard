@@ -2016,6 +2016,11 @@ async function initDb() {
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
+  const techPinRows = (await pool.query(`SELECT id FROM technicians WHERE technician_pin IS NULL OR technician_pin = ''`)).rows;
+  for (const row of techPinRows) {
+    await pool.query(`UPDATE technicians SET technician_pin = $1 WHERE id = $2`, [makeTechnicianPin(), row.id]);
+  }
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS current_latitude NUMERIC(10,7);`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS current_longitude NUMERIC(10,7);`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS location_accuracy NUMERIC(10,2);`);
@@ -8561,6 +8566,7 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
       <a class="tab ${active === 'disputes' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/disputes">${escapeHtml(disputeLabel)}</a>
       <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
       <a class="tab" href="/tech-checkin/${escapeHtml(token)}">Status check-in</a>
+      <a class="tab" href="/tech-workspace/${escapeHtml(token)}/logout">Lock dashboard</a>
     </div>
   `;
 }
@@ -8568,6 +8574,11 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
 
 async function ensureTechnicianWorkspaceSchema() {
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
+  const techPinRows = (await pool.query(`SELECT id FROM technicians WHERE technician_pin IS NULL OR technician_pin = ''`)).rows;
+  for (const row of techPinRows) {
+    await pool.query(`UPDATE technicians SET technician_pin = $1 WHERE id = $2`, [makeTechnicianPin(), row.id]);
+  }
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_technician_id INTEGER;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
@@ -8618,6 +8629,73 @@ async function getTechnicianByToken(token) {
   return result.rows[0];
 }
 
+function makeTechnicianPin() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function makeTechnicianSessionCookie(token) {
+  const payload = Buffer.from(JSON.stringify({ token, createdAt: Date.now() })).toString("base64url");
+  return `${payload}.${signValue(payload)}`;
+}
+
+function readTechnicianSession(req, token) {
+  const raw = parseCookies(req).tech_workspace_session;
+  if (!raw || !raw.includes(".")) return null;
+  const [payload, signature] = raw.split(".");
+  const expected = signValue(payload);
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  } catch (error) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!decoded.token || decoded.token !== token) return null;
+    const maxAgeMs = 1000 * 60 * 60 * 24 * 30;
+    if (!decoded.createdAt || Date.now() - decoded.createdAt > maxAgeMs) return null;
+    return decoded;
+  } catch (error) {
+    return null;
+  }
+}
+
+function setTechnicianSessionCookie(res, token) {
+  const cookieValue = makeTechnicianSessionCookie(token);
+  res.setHeader(
+    "Set-Cookie",
+    `tech_workspace_session=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=${60 * 60 * 24 * 30}`
+  );
+}
+
+function clearTechnicianSessionCookie(res) {
+  res.setHeader("Set-Cookie", "tech_workspace_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0");
+}
+
+function isTechnicianWorkspaceLoggedIn(req, token) {
+  return !!readTechnicianSession(req, token);
+}
+
+function technicianLoginPage(token, tech, errorMessage = "") {
+  return technicianPortalShell('Technician PIN required', `
+    <div class="wrap" style="max-width:520px;margin:40px auto;">
+      <div class="panel">
+        <h1>Technician secure access</h1>
+        <p class="job-sub">This dashboard is locked to the intended technician. Enter your private 4-digit PIN to view jobs, disputes and income summary.</p>
+        ${errorMessage ? `<div class="empty" style="border-left:6px solid #dc2626;">${escapeHtml(errorMessage)}</div>` : ''}
+        <form method="POST" action="/tech-workspace/${escapeHtml(token)}/login">
+          <label>Technician</label>
+          <input value="${escapeHtml(tech.name || 'Technician')}" readonly>
+          <br><br>
+          <label>Private PIN</label>
+          <input name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4-digit PIN" required autofocus>
+          <br><br>
+          <button class="button red" type="submit">Unlock my dashboard</button>
+        </form>
+      </div>
+    </div>
+  `);
+}
+
 async function getOpenDisputesForTechnician(tech) {
   const result = await pool.query(`
     SELECT
@@ -8650,12 +8728,38 @@ async function getOpenDisputesForTechnician(tech) {
   return result.rows;
 }
 
+
+app.post('/tech-workspace/:token/login', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    const enteredPin = String(req.body.pin || '').replace(/\D/g, '');
+    const storedPin = String(tech.technician_pin || '').replace(/\D/g, '');
+    if (!storedPin || enteredPin !== storedPin) {
+      return res.status(403).send(technicianLoginPage(token, tech, 'Incorrect PIN. Please check the private PIN issued by the office.'));
+    }
+    setTechnicianSessionCookie(res, token);
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+  } catch (error) {
+    console.error('Technician PIN login error:', error);
+    res.status(500).send('Technician PIN login error. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/logout', async (req, res) => {
+  clearTechnicianSessionCookie(res);
+  res.redirect(`/tech-workspace/${encodeURIComponent(req.params.token)}`);
+});
+
 app.get('/tech-workspace/:token', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
 
     const statusFilter = (req.query.status || '').trim();
     const postcode = (req.query.postcode || '').trim();
@@ -8767,6 +8871,7 @@ app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
 
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
     await pool.query(`
@@ -8796,6 +8901,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
 
     const result = await pool.query(`
       SELECT * FROM jobs
@@ -8852,6 +8958,7 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
 
     const netValue = parseMoneyInput(req.body.net_value || req.body.final_value);
     const vatAmount = calculateVatFromNet(netValue);
@@ -8931,6 +9038,7 @@ app.get('/tech-workspace/:token/summary', async (req, res) => {
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
 
     const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
     const period = req.query.period || 'today';
@@ -9032,6 +9140,7 @@ app.get('/tech-workspace/:token/disputes', async (req, res) => {
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
 
     const disputes = await getOpenDisputesForTechnician(tech);
     const rows = disputes.map(dispute => `
@@ -9521,6 +9630,7 @@ app.post("/tech-checkin/:token", async (req, res) => {
 
 app.get("/technicians", async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const result = await pool.query(`
       SELECT *
       FROM technicians
@@ -9571,7 +9681,7 @@ app.get("/technicians", async (req, res) => {
               <button type="submit">Edit</button>
             </form>
             <br><br>
-            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Workspace link</a>
+            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Workspace link</a><div class="audit">PIN: ${escapeHtml(tech.technician_pin || '')}</div>
           </td>
         </tr>
       `;
@@ -9629,6 +9739,7 @@ app.get("/technicians", async (req, res) => {
 
 app.get("/technicians/edit", async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const id = req.query.id;
     const result = await pool.query(`SELECT * FROM technicians WHERE id = $1`, [id]);
     const tech = result.rows[0];
@@ -9666,9 +9777,12 @@ app.get("/technicians/edit", async (req, res) => {
           <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician check-in page</a>
           <br><br>
           <h2>Technician Workspace Link</h2>
-          <div class="help">This is the technician's active jobs, close-job and income summary portal.</div>
+          <div class="help">This is the technician's active jobs, close-job and income summary portal. The link now also requires the private PIN below, so another technician cannot open this dashboard from the link alone.</div>
           <br>
           <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace/${tech.checkin_token || ""}`}">
+          <br><br>
+          <label>Private workspace PIN</label>
+          <input class="copy-input" readonly value="${escapeHtml(tech.technician_pin || '')}">
           <br><br>
           <a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician workspace</a>
         </div>
@@ -9678,6 +9792,7 @@ app.get("/technicians/edit", async (req, res) => {
             <input type="hidden" name="id" value="${tech.id}">
             <input name="name" value="${escapeHtml(tech.name)}" placeholder="Name" required>
             <input name="phone" value="${escapeHtml(tech.phone)}" placeholder="Phone">
+            <input name="technician_pin" value="${escapeHtml(tech.technician_pin || '')}" placeholder="Workspace PIN e.g. 1234" maxlength="4" inputmode="numeric">
             <input name="base_postcode" value="${escapeHtml(tech.base_postcode)}" placeholder="Base postcode">
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
             <select name="status">${statusOptions}</select>
@@ -9703,7 +9818,9 @@ app.get("/technicians/edit", async (req, res) => {
 
 app.post("/technicians/save", async (req, res) => {
   try {
+    await ensureTechnicianWorkspaceSchema();
     const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, skills, notes } = req.body;
+    const technicianPin = String(req.body.technician_pin || '').replace(/\D/g, '').slice(0, 4) || makeTechnicianPin();
     const agentName = currentAgentName(req);
 
     if (id) {
@@ -9711,17 +9828,17 @@ app.post("/technicians/save", async (req, res) => {
         UPDATE technicians
         SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
             status = $5, priority = $6, available_from = $7, skills = $8,
-            notes = $9, updated_by = $10, updated_at = NOW()
-        WHERE id = $11
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, agentName, id]);
+            notes = $9, technician_pin = $10, updated_by = $11, updated_at = NOW()
+        WHERE id = $12
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, technicianPin, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, skills, notes, updated_by, checkin_token, updated_at
+          available_from, skills, notes, updated_by, checkin_token, technician_pin, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-      `, [name, phone, base_postcode, current_postcode, status, priority || "Normal", available_from, skills, notes, agentName, makeCheckinToken()]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, agentName, makeCheckinToken(), technicianPin]);
     }
 
     res.redirect("/technicians");
