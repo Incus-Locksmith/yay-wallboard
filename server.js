@@ -4660,7 +4660,7 @@ app.get("/payment-chasing", async (req, res) => {
   try {
     const selected = String(req.query.view || "active").trim();
     const today = dateInputValue(new Date());
-    const unpaidWhere = `(j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid'))`;
+    const unpaidWhere = `(j.payment_chase_closed_at IS NULL AND (j.status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed') OR (j.closed_at IS NOT NULL AND COALESCE(j.customer_paid, FALSE) = FALSE AND COALESCE(j.final_value, 0) > 0 AND COALESCE(j.status, '') <> 'fully_paid'))) `;
     const where = selected === "due"
       ? `WHERE ${unpaidWhere} AND pc.next_follow_up_date IS NOT NULL AND pc.next_follow_up_date <= CURRENT_DATE`
       : `WHERE ${unpaidWhere}`;
@@ -4786,6 +4786,7 @@ app.get("/payment-chasing", async (req, res) => {
                 <option>Sent email</option>
                 <option>Sent invoice reminder</option>
                 <option>Contacted PM / account client</option>
+                <option>Disputed</option>
                 <option>Other</option>
               </select>
             </label>
@@ -4878,6 +4879,114 @@ app.post("/jobs/:id/payment-chase", async (req, res) => {
       `${chaseDate}${actionTaken ? ` · ${actionTaken}` : ""}${outcome ? ` · ${outcome}` : ""}${nextFollowUp ? ` · next ${nextFollowUp}` : ""}`,
       changedBy
     );
+
+    if (actionTaken.toLowerCase() === "disputed") {
+      const jobResult = await pool.query(`
+        SELECT j.*, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        WHERE j.id = $1
+      `, [id]);
+      const job = jobResult.rows[0] || {};
+
+      const historyResult = await pool.query(`
+        SELECT chase_date, action_taken, outcome, next_follow_up_date, notes, chased_by, created_at
+        FROM job_payment_chases
+        WHERE job_id = $1
+        ORDER BY chase_date ASC, created_at ASC, id ASC
+      `, [id]);
+
+      const chaseLines = historyResult.rows.map((chase, index) => {
+        const pieces = [
+          `#${index + 1}`,
+          chaseDateInputValue(chase.chase_date),
+          chase.action_taken || "Action not recorded",
+          chase.outcome || "No outcome recorded"
+        ];
+        let line = pieces.join(" - ");
+        if (chase.notes) line += ` | Notes: ${chase.notes}`;
+        if (chase.next_follow_up_date) line += ` | Next follow-up: ${chaseDateInputValue(chase.next_follow_up_date)}`;
+        if (chase.chased_by) line += ` | By: ${chase.chased_by}`;
+        return line;
+      }).join("\n");
+
+      const disputeSummary = [
+        `Payment chase escalated to dispute on ${chaseDateInputValue(chaseDate)} by ${changedBy}.`,
+        `Job: ${job.job_number || jobNumber(id)}${job.postcode ? ` / ${job.postcode}` : ""}`,
+        job.customer_name ? `Customer: ${job.customer_name}` : "",
+        job.customer_phone ? `Phone: ${job.customer_phone}` : "",
+        job.technician_name ? `Technician: ${job.technician_name}` : "",
+        `Outstanding / disputed value: ${money(job.final_value || 0)}`,
+        "",
+        "Payment chase history:",
+        chaseLines || "No chase history recorded."
+      ].filter(line => line !== "").join("\n");
+
+      const existingDispute = await pool.query(`
+        SELECT id
+        FROM disputes
+        WHERE job_id = $1
+          AND status NOT IN ('resolved', 'rejected', 'refund_processed')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `, [id]);
+
+      let disputeId;
+      if (existingDispute.rows[0]) {
+        disputeId = existingDispute.rows[0].id;
+        await pool.query(`
+          UPDATE disputes
+          SET status = 'open_dispute',
+              complaint_type = COALESCE(NULLIF(complaint_type, ''), 'Payment chase escalated'),
+              disputed_amount = COALESCE(disputed_amount, $2),
+              complaint_summary = $3,
+              updated_by = $4,
+              updated_at = NOW()
+          WHERE id = $1
+        `, [disputeId, parseMoneyInput(job.final_value), disputeSummary, changedBy]);
+      } else {
+        const insert = await pool.query(`
+          INSERT INTO disputes (
+            job_id, customer_name, customer_phone, technician_id, complaint_type,
+            disputed_amount, refund_amount, chargeback, status, complaint_summary,
+            resolution_notes, created_by, updated_by, resolved_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,NULL,FALSE,'open_dispute',$7,'',$8,$8,NULL)
+          RETURNING id
+        `, [
+          id,
+          job.customer_name || "",
+          compactPhone(job.customer_phone || ""),
+          job.assigned_technician_id || null,
+          "Payment chase escalated",
+          parseMoneyInput(job.final_value),
+          disputeSummary,
+          changedBy
+        ]);
+        disputeId = insert.rows[0].id;
+      }
+
+      await pool.query(`
+        UPDATE jobs
+        SET status = 'disputed',
+            payment_chase_closed_at = NOW(),
+            payment_chase_closed_by = $2,
+            payment_chase_close_note = 'Escalated to dispute',
+            updated_at = NOW()
+        WHERE id = $1
+      `, [id, changedBy]);
+
+      await addJobAuditEntry(
+        id,
+        "payment_chase_escalated_to_dispute",
+        "Payment chase",
+        "Open payment chase",
+        `Escalated to dispute #${disputeId}`,
+        changedBy
+      );
+
+      res.redirect(`/disputes/${disputeId}`);
+      return;
+    }
 
     const back = req.headers.referer && String(req.headers.referer).includes('/payment-chasing') ? '/payment-chasing' : `/jobs/${id}/edit`;
     res.redirect(back);
