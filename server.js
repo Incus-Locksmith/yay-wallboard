@@ -2018,6 +2018,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS return_to_work_date DATE;`);
   const techPinRows = (await pool.query(`SELECT id FROM technicians WHERE technician_pin IS NULL OR technician_pin = ''`)).rows;
   for (const row of techPinRows) {
     await pool.query(`UPDATE technicians SET technician_pin = $1 WHERE id = $2`, [makeTechnicianPin(), row.id]);
@@ -5603,8 +5604,63 @@ app.get("/api/postcoder-addresses", async (req, res) => {
 });
 
 
-function technicianOptions(technicians, selectedId = "") {
-  return technicians.map(tech => `<option value="${tech.id}" ${String(tech.id) === String(selectedId || "") ? "selected" : ""}>${escapeHtml(tech.name)}${tech.status ? ` — ${escapeHtml(tech.status)}` : ""}</option>`).join("");
+
+function dateInputValue(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function targetDateForAssignment(eta, scheduledAt) {
+  if (eta === "Scheduled" && scheduledAt) return dateInputValue(scheduledAt);
+  return dateInputValue(new Date());
+}
+
+function technicianCanBeAssignedOn(tech, targetDateValue) {
+  if (!tech) return false;
+  const status = String(tech.status || "").toLowerCase();
+  if (status.includes("do not use")) return false;
+  if (status.includes("available") || status.includes("soon") || status.includes("job")) return true;
+
+  const target = dateInputValue(targetDateValue || new Date());
+  const returnDate = dateInputValue(tech.return_to_work_date);
+  if (!returnDate) return false;
+  return returnDate <= target;
+}
+
+function technicianUnavailableReason(tech, targetDateValue) {
+  if (!tech) return "Technician not found.";
+  const status = tech.status || "Unavailable";
+  const target = dateInputValue(targetDateValue || new Date());
+  const returnDate = dateInputValue(tech.return_to_work_date);
+  if (String(status).toLowerCase().includes("do not use")) return `${tech.name} is marked Do not use.`;
+  if (!returnDate) return `${tech.name} is ${status} and has no return-to-work date set.`;
+  return `${tech.name} is ${status} until ${returnDate}. This job is for ${target}.`;
+}
+
+async function assertTechnicianAssignableForJob(technicianId, targetDateValue) {
+  if (!technicianId) return;
+  const result = await pool.query(`SELECT id, name, status, return_to_work_date, active FROM technicians WHERE id = $1`, [technicianId]);
+  const tech = result.rows[0];
+  if (!tech || tech.active === false) throw new Error("Selected technician is not active.");
+  if (!technicianCanBeAssignedOn(tech, targetDateValue)) {
+    throw new Error(technicianUnavailableReason(tech, targetDateValue));
+  }
+}
+
+function technicianOptions(technicians, selectedId = "", targetDateValue = null) {
+  return technicians.map(tech => {
+    const selected = String(tech.id) === String(selectedId || "") ? "selected" : "";
+    const assignableForTarget = targetDateValue ? technicianCanBeAssignedOn(tech, targetDateValue) : true;
+    const disabled = !assignableForTarget && !selected ? "disabled" : "";
+    const returnDate = dateInputValue(tech.return_to_work_date);
+    const labelBits = [tech.name];
+    if (tech.status) labelBits.push(tech.status);
+    if (returnDate) labelBits.push(`returns ${returnDate}`);
+    return `<option value="${tech.id}" data-status="${escapeHtml(tech.status || '')}" data-return-date="${escapeHtml(returnDate)}" ${selected} ${disabled}>${escapeHtml(labelBits.join(" — "))}</option>`;
+  }).join("");
 }
 
 function accountTemplateOptions(templates, selectedId = "") {
@@ -6143,7 +6199,7 @@ app.get("/jobs/new", async (req, res) => {
     const addressesJson = JSON.stringify(addresses).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
     const addressOptions = addresses.map((address, index) => `<option value="${index}">${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</option>`).join("");
 
-    const technicians = (await pool.query(`SELECT id, name, status FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`SELECT id, name, status, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
     const templates = (await pool.query(`SELECT id, template_name, customer_name, customer_address, customer_postcode FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 
@@ -6566,7 +6622,7 @@ app.get("/jobs/new", async (req, res) => {
                 <div class="form-grid-3">
                   <div class="field">
                     <label>Technician</label>
-                    <select name="assigned_technician_id"><option value="">-</option>${technicianOptions(technicians)}</select>
+                    <select name="assigned_technician_id"><option value="">-</option>${technicianOptions(technicians)}</select><div class="helper-line">Unavailable technicians can only be assigned if their return-to-work date is on or before the job date.</div>
                   </div>
                   <div class="field">
                     <label>Status</label>
@@ -6749,6 +6805,10 @@ app.get("/jobs/new", async (req, res) => {
 app.post("/jobs/create", async (req, res) => {
   try {
     const body = req.body;
+    const createEta = normaliseEta(body);
+    const createScheduledAt = createEta === "Scheduled" ? parseScheduledTimestamp(body) : null;
+    const createTechId = parseOptionalInt(body.assigned_technician_id);
+    await assertTechnicianAssignableForJob(createTechId, targetDateForAssignment(createEta, createScheduledAt));
     const result = await pool.query(`
       INSERT INTO jobs (
         customer_name, customer_phone, customer_alt_phone, customer_email,
@@ -6792,9 +6852,9 @@ app.post("/jobs/create", async (req, res) => {
       body.expected_payment_method || "Unknown",
       body.account_job === "true",
       parseOptionalInt(body.account_template_id),
-      parseOptionalInt(body.assigned_technician_id),
-      normaliseEta(body),
-      normaliseEta(body) === "Scheduled" ? parseScheduledTimestamp(body) : null,
+      createTechId,
+      createEta,
+      createScheduledAt,
       currentAgentName(req),
       body.dispatcher_notes,
       body.status || "open"
@@ -6806,7 +6866,7 @@ app.post("/jobs/create", async (req, res) => {
     res.redirect(`/jobs/${id}/summary`);
   } catch (error) {
     console.error("Create job error:", error);
-    res.status(500).send("Could not create job");
+    res.status(500).send(`Could not create job: ${escapeHtml(error.message)}`);
   }
 });
 
@@ -6878,7 +6938,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
     `, [id]);
     if (!jobResult.rows.length) return res.status(404).send("Job not found");
     const job = jobResult.rows[0];
-    const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
     const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const campaignOptions = await getCampaignOptions(job.source_campaign || "Unknown");
     const summary = jobTechnicianSummary(job);
@@ -7057,7 +7117,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
-                    <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select></div>
+                    <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select><div class="helper-line">Assignment is checked against the job date.</div><div class="helper-line">System will block unavailable technicians unless their return-to-work date covers the appointment date.</div></div>
                     <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px; align-items:start;"><div><label>Date</label><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}"></div>${compactScheduledTimePicker("edit_scheduled", scheduledTimeValue(job.scheduled_at))}</div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
@@ -7256,12 +7316,13 @@ app.post("/jobs/:id/quick-appointment", async (req, res) => {
     const eta = normaliseEta(req.body);
     const scheduledAt = eta === "Scheduled" ? parseScheduledTimestamp(req.body) : null;
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    await assertTechnicianAssignableForJob(oldJob && oldJob.assigned_technician_id, targetDateForAssignment(eta, scheduledAt));
     await pool.query(`UPDATE jobs SET eta = $1, scheduled_at = $2, updated_at = NOW() WHERE id = $3`, [eta, scheduledAt, id]);
     await logJobChanges(id, oldJob, { eta, scheduled_at: scheduledAt }, currentAgentName(req), "appointment_changed");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick appointment update error:", error);
-    res.status(500).send("Could not update appointment time");
+    res.status(500).send(`Could not update appointment time: ${escapeHtml(error.message)}`);
   }
 });
 
@@ -7270,6 +7331,7 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
     const id = Number(req.params.id);
     const technicianId = parseOptionalInt(req.body.assigned_technician_id);
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id])).rows[0];
+    await assertTechnicianAssignableForJob(technicianId, targetDateForAssignment(oldJob && oldJob.eta, oldJob && oldJob.scheduled_at));
     const newStatus = technicianId !== null && oldJob && oldJob.status === "open" ? "assigned" : oldJob ? oldJob.status : "open";
     await pool.query(`
       UPDATE jobs
@@ -7282,7 +7344,7 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Quick assign error:", error);
-    res.status(500).send("Could not assign technician");
+    res.status(500).send(`Could not assign technician: ${escapeHtml(error.message)}`);
   }
 });
 
@@ -7324,6 +7386,7 @@ app.post("/jobs/:id/update", async (req, res) => {
       dispatcher_notes: body.dispatcher_notes,
       status: body.status || "open"
     };
+    await assertTechnicianAssignableForJob(newValues.assigned_technician_id, targetDateForAssignment(newValues.eta, newValues.scheduled_at));
     await pool.query(`
       UPDATE jobs SET
         customer_name=$1, customer_phone=$2, customer_alt_phone=$3, customer_email=$4,
@@ -7370,7 +7433,7 @@ app.post("/jobs/:id/update", async (req, res) => {
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Update job error:", error);
-    res.status(500).send("Could not update job");
+    res.status(500).send(`Could not update job: ${escapeHtml(error.message)}`);
   }
 });
 
@@ -8618,6 +8681,7 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
 async function ensureTechnicianWorkspaceSchema() {
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS return_to_work_date DATE;`);
   const techPinRows = (await pool.query(`SELECT id FROM technicians WHERE technician_pin IS NULL OR technician_pin = ''`)).rows;
   for (const row of techPinRows) {
     await pool.query(`UPDATE technicians SET technician_pin = $1 WHERE id = $2`, [makeTechnicianPin(), row.id]);
@@ -9846,6 +9910,7 @@ app.get("/technicians", async (req, res) => {
           <td><span class="pill ${statusClass}">${escapeHtml(tech.status)}</span></td>
           <td><span class="pill ${priorityBadgeClass}">${escapeHtml(priority)}</span></td>
           <td>${escapeHtml(tech.available_from)}</td>
+          <td>${escapeHtml(dateInputValue(tech.return_to_work_date) || "—")}</td>
           <td>${escapeHtml(tech.skills)}</td>
           <td>${escapeHtml(tech.notes)}</td>
           <td>
@@ -9898,6 +9963,7 @@ app.get("/technicians", async (req, res) => {
               <option>Normal</option><option>Push</option><option>High priority</option><option>Do not prioritise</option>
             </select>
             <input name="available_from" placeholder="Available from e.g. 15:30">
+            <input type="date" name="return_to_work_date" title="Return to work date">
             <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
             <button type="submit">Save Technician</button>
             <textarea name="notes" placeholder="Notes"></textarea>
@@ -9905,9 +9971,9 @@ app.get("/technicians", async (req, res) => {
         </div>
         <table>
           <thead>
-            <tr><th>Name</th><th>Phone</th><th>Base</th><th>Current</th><th>Status</th><th>Priority</th><th>Available From</th><th>Skills</th><th>Notes</th><th>Last Updated</th><th>GPS Check-In</th><th>Edit / Link</th></tr>
+            <tr><th>Name</th><th>Phone</th><th>Base</th><th>Current</th><th>Status</th><th>Priority</th><th>Available From</th><th>Return to Work</th><th>Skills</th><th>Notes</th><th>Last Updated</th><th>GPS Check-In</th><th>Edit / Link</th></tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="12">No technicians added yet</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="13">No technicians added yet</td></tr>`}</tbody>
         </table>
       </body>
       </html>
@@ -9979,6 +10045,7 @@ app.get("/technicians/edit", async (req, res) => {
             <select name="status">${statusOptions}</select>
             <select name="priority">${priorityOptions}</select>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
+            <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
             <textarea name="notes" placeholder="Notes">${escapeHtml(tech.notes)}</textarea>
@@ -10000,7 +10067,7 @@ app.get("/technicians/edit", async (req, res) => {
 app.post("/technicians/save", async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
-    const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, skills, notes } = req.body;
+    const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, return_to_work_date, skills, notes } = req.body;
     const technicianPin = String(req.body.technician_pin || '').replace(/\D/g, '').slice(0, 4) || makeTechnicianPin();
     const agentName = currentAgentName(req);
 
@@ -10008,18 +10075,18 @@ app.post("/technicians/save", async (req, res) => {
       await pool.query(`
         UPDATE technicians
         SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
-            status = $5, priority = $6, available_from = $7, skills = $8,
-            notes = $9, technician_pin = $10, updated_by = $11, updated_at = NOW()
-        WHERE id = $12
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, technicianPin, agentName, id]);
+            status = $5, priority = $6, available_from = $7, return_to_work_date = $8, skills = $9,
+            notes = $10, technician_pin = $11, updated_by = $12, updated_at = NOW()
+        WHERE id = $13
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, skills, notes, updated_by, checkin_token, technician_pin, updated_at
+          available_from, return_to_work_date, skills, notes, updated_by, checkin_token, technician_pin, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, skills, notes, agentName, makeCheckinToken(), technicianPin]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, agentName, makeCheckinToken(), technicianPin]);
     }
 
     res.redirect("/technicians");
