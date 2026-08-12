@@ -8878,7 +8878,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
     // Match by this technician ID, and also by any duplicate technician record with the same name.
     // This protects us if a technician was added twice or a job was assigned to an older Ruben/Michele/etc record.
     const values = [tech.id, tech.name];
-    let where = `WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))) AND COALESCE(j.status, 'open') NOT IN ('closed', 'invoiced_account')`;
+    let where = `WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))) AND COALESCE(j.status, 'open') NOT IN ('closed', 'invoiced_account', 'fully_paid', 'sent_to_pm', 'awaiting_balance', 'awaiting_payment', 'disputed', 'cancelled_by_client_before_arrival', 'cancelled_onsite')`;
     if (statusFilter) { values.push(statusFilter); where += ` AND j.status = $${values.length}`; }
     if (postcode) { values.push(`%${postcode}%`); where += ` AND COALESCE(j.postcode, '') ILIKE $${values.length}`; }
     if (phone) { values.push(`%${phone}%`); where += ` AND COALESCE(j.customer_phone, '') ILIKE $${values.length}`; }
@@ -9033,24 +9033,66 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
           <h1>Close job</h1>
           <p class="job-sub"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> · ${escapeHtml(job.job_type || '')} · ${escapeHtml(job.customer_name || '')}</p>
           <p class="job-sub">${escapeHtml(techJobAddress(job) || '')}</p>
-          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
+            <p class="job-sub">Enter the NET value only. VAT is calculated automatically at 20%.</p>
             <div class="field-grid">
-              <div><label>NET job value</label><input name="net_value" value="${job.net_value || ''}" placeholder="£ ex VAT"></div>
-              <div><label>Payment method</label><select name="payment_method">${techPaymentOptions(job.payment_method || '')}</select></div>
-              <div><label>Customer paid?</label><select name="customer_paid"><option value="yes" ${job.customer_paid ? 'selected' : ''}>Yes</option><option value="no" ${!job.customer_paid ? 'selected' : ''}>No</option></select></div>
-              <div><label>New status</label><select name="status">
-                <option value="closed">Closed</option>
-                <option value="awaiting_payment">Awaiting payment</option>
-                <option value="invoiced_account">Invoice sent to Acc Dept</option>
-              </select></div>
-              <div class="full"><label>Materials used</label><textarea name="materials_used" placeholder="e.g. Euro cylinder, night latch, screws">${escapeHtml(job.materials_used || '')}</textarea></div>
-              <div><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost || ''}" placeholder="£"></div>
+              <div><label>NET job value</label><input id="techNetValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : '')}" inputmode="decimal" placeholder="£ ex VAT" required></div>
+              <div><label>UK VAT 20%</label><input id="techVatValue" value="" readonly></div>
+              <div><label>Full value inc VAT</label><input id="techGrossValue" value="" readonly></div>
+              <div><label>Customer paid?</label><select name="customer_paid"><option value="true" ${job.customer_paid ? 'selected' : ''}>Yes</option><option value="false" ${!job.customer_paid ? 'selected' : ''}>No</option></select></div>
+              <div><label>Payment method 1</label><select id="techPaymentMethod1" name="payment_method_1" onchange="toggleTechClosePaymentRules()"><option value="">Select method</option>${optionList(splitPaymentMethods, job.payment_method_1 || job.payment_method || job.expected_payment_method || '')}</select></div>
+              <div><label>Payment amount 1</label><input name="payment_amount_1" value="${job.payment_amount_1 !== null && job.payment_amount_1 !== undefined ? Number(job.payment_amount_1).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : '')}" inputmode="decimal" placeholder="£"></div>
+              <div><label>Payment method 2 / split payment</label><select id="techPaymentMethod2" name="payment_method_2" onchange="toggleTechClosePaymentRules()"><option value="">No split payment</option>${optionList(splitPaymentMethods, job.payment_method_2 || '')}</select></div>
+              <div><label>Payment amount 2</label><input name="payment_amount_2" value="${job.payment_amount_2 !== null && job.payment_amount_2 !== undefined ? Number(job.payment_amount_2).toFixed(2) : ''}" inputmode="decimal" placeholder="£"></div>
+              <div><label>Final close status</label><select name="status">${literalClosingStatusOptions(job.status || (job.customer_paid ? 'fully_paid' : 'awaiting_payment'))}</select></div>
+              <div><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ''}" inputmode="decimal" placeholder="£"></div>
               <div><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || 'Completed')}</select></div>
+            </div>
+            <div id="techInvoicePhotosBox" class="panel" style="margin-top:14px; display:none; background:#0f172a; color:white;">
+              <label>The correct invoice has been used and completed, photos are also on file</label>
+              <select name="invoice_photos_confirmed"><option value="false" ${!job.invoice_photos_confirmed ? 'selected' : ''}>No</option><option value="true" ${job.invoice_photos_confirmed ? 'selected' : ''}>Yes</option></select>
+            </div>
+            <div id="techCardRulesBox" class="panel" style="margin-top:14px; display:none; background:#0f172a; color:white;">
+              <div class="field-grid">
+                <div><label>Was this card payment AMEX?</label><select id="techCardIsAmex" name="card_is_amex" onchange="toggleTechClosePaymentRules()"><option value="false" ${!job.card_is_amex ? 'selected' : ''}>No</option><option value="true" ${job.card_is_amex ? 'selected' : ''}>Yes</option></select></div>
+                <div id="techAmexIdBox" style="display:none;"><label>AMEX ID from client provided?</label><select name="amex_id_provided"><option value="false" ${!job.amex_id_provided ? 'selected' : ''}>No</option><option value="true" ${job.amex_id_provided ? 'selected' : ''}>Yes</option></select></div>
+              </div>
+            </div>
+            <div class="field-grid" style="margin-top:14px;">
+              <div class="full"><label>Materials used</label><textarea name="materials_used" placeholder="e.g. Euro cylinder, night latch, screws">${escapeHtml(job.materials_used || '')}</textarea></div>
               <div class="full"><label>Technician notes</label><textarea name="tech_notes" placeholder="Any notes for the office">${escapeHtml(job.tech_notes || '')}</textarea></div>
+              <div class="full"><label>Close notes</label><textarea name="close_notes" placeholder="Anything the office should know">${escapeHtml(job.close_notes || '')}</textarea></div>
             </div>
             <br>
             <button class="button red" type="submit">Submit close job</button>
           </form>
+          <script>
+            function recalcTechCloseValues(){
+              const netInput = document.getElementById('techNetValue');
+              const vatInput = document.getElementById('techVatValue');
+              const grossInput = document.getElementById('techGrossValue');
+              const net = Number(String(netInput.value || '').replace(/[^0-9.-]/g, '')) || 0;
+              const vat = Math.round(net * 0.20 * 100) / 100;
+              const gross = Math.round((net + vat) * 100) / 100;
+              vatInput.value = '£' + vat.toFixed(2);
+              grossInput.value = '£' + gross.toFixed(2);
+            }
+            function selectedTechPaymentMethods(){
+              return [document.getElementById('techPaymentMethod1')?.value || '', document.getElementById('techPaymentMethod2')?.value || ''].map(v => v.toLowerCase());
+            }
+            function toggleTechClosePaymentRules(){
+              const methods = selectedTechPaymentMethods();
+              const hasCard = methods.some(v => v.includes('card'));
+              const hasBankOrCard = hasCard || methods.some(v => v.includes('bank transfer'));
+              document.getElementById('techInvoicePhotosBox').style.display = hasBankOrCard ? 'block' : 'none';
+              document.getElementById('techCardRulesBox').style.display = hasCard ? 'block' : 'none';
+              const isAmex = document.getElementById('techCardIsAmex')?.value === 'true';
+              document.getElementById('techAmexIdBox').style.display = hasCard && isAmex ? 'block' : 'none';
+            }
+            document.getElementById('techNetValue').addEventListener('input', recalcTechCloseValues);
+            recalcTechCloseValues();
+            toggleTechClosePaymentRules();
+          </script>
         </div>
       </div>
     `;
@@ -9070,24 +9112,37 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
     if (!tech) return res.status(404).send('Invalid technician link');
     if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
 
-    const netValue = parseMoneyInput(req.body.net_value || req.body.final_value);
+    const body = req.body;
+    const netValue = parseMoneyInput(body.net_value || body.final_value);
     const vatAmount = calculateVatFromNet(netValue);
     const finalValue = calculateGrossFromNet(netValue);
-    const materialsCost = parseMoneyInput(req.body.materials_cost);
-    const allowedStatuses = ['closed', 'awaiting_payment', 'invoiced_account'];
-    const newStatus = allowedStatuses.includes(req.body.status) ? req.body.status : 'closed';
+    const includesCard = closePaymentIncludesCard(body);
+    const isAmex = includesCard && body.card_is_amex === 'true';
+    const amexIdProvided = isAmex && body.amex_id_provided === 'true';
+    if (isAmex && !amexIdProvided) {
+      return res.status(400).send('AMEX payment selected. Please confirm that ID from the client has been provided.');
+    }
+    const selectedStatus = closingJobStatuses.some(item => item.value === body.status) ? body.status : 'fully_paid';
     const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
     const techCloseValues = {
       net_value: netValue,
       vat_amount: vatAmount,
       final_value: finalValue,
-      payment_method: req.body.payment_method || '',
-      customer_paid: req.body.customer_paid === 'yes',
-      materials_used: req.body.materials_used || '',
-      materials_cost: materialsCost,
-      outcome: req.body.outcome || '',
-      tech_notes: req.body.tech_notes || '',
-      status: newStatus
+      payment_method: buildSplitPaymentSummary(body),
+      payment_method_1: body.payment_method_1 || '',
+      payment_amount_1: parseMoneyInput(body.payment_amount_1),
+      payment_method_2: body.payment_method_2 || '',
+      payment_amount_2: parseMoneyInput(body.payment_amount_2),
+      invoice_photos_confirmed: closePaymentRequiresInvoicePhotos(body) ? body.invoice_photos_confirmed === 'true' : false,
+      card_is_amex: isAmex,
+      amex_id_provided: amexIdProvided,
+      customer_paid: body.customer_paid === 'true',
+      materials_used: body.materials_used || '',
+      materials_cost: parseMoneyInput(body.materials_cost),
+      outcome: body.outcome || '',
+      tech_notes: body.tech_notes || '',
+      close_notes: body.close_notes || '',
+      status: selectedStatus
     };
 
     await pool.query(`
@@ -9096,29 +9151,45 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
           vat_amount = $2,
           final_value = $3,
           payment_method = $4,
-          customer_paid = $5,
-          materials_used = $6,
-          materials_cost = $7,
-          outcome = $8,
-          tech_notes = $9,
-          status = $10,
-          closed_by = $11,
+          payment_method_1 = $5,
+          payment_amount_1 = $6,
+          payment_method_2 = $7,
+          payment_amount_2 = $8,
+          invoice_photos_confirmed = $9,
+          card_is_amex = $10,
+          amex_id_provided = $11,
+          customer_paid = $12,
+          materials_used = $13,
+          materials_cost = $14,
+          outcome = $15,
+          tech_notes = $16,
+          close_notes = $17,
+          status = $18,
+          closed_by = $19,
           closed_at = COALESCE(closed_at, NOW()),
           tech_updated_at = NOW(),
-          tech_close_submitted_by = $11,
+          tech_close_submitted_by = $19,
           updated_at = NOW()
-      WHERE id = $12
-        AND (assigned_technician_id = $13 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($14)))
+      WHERE id = $20
+        AND (assigned_technician_id = $21 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($22)))
     `, [
       techCloseValues.net_value,
       techCloseValues.vat_amount,
       techCloseValues.final_value,
       techCloseValues.payment_method,
+      techCloseValues.payment_method_1,
+      techCloseValues.payment_amount_1,
+      techCloseValues.payment_method_2,
+      techCloseValues.payment_amount_2,
+      techCloseValues.invoice_photos_confirmed,
+      techCloseValues.card_is_amex,
+      techCloseValues.amex_id_provided,
       techCloseValues.customer_paid,
       techCloseValues.materials_used,
       techCloseValues.materials_cost,
       techCloseValues.outcome,
       techCloseValues.tech_notes,
+      techCloseValues.close_notes,
       techCloseValues.status,
       tech.name,
       req.params.id,
