@@ -948,6 +948,7 @@ const auditFieldLabels = {
   postcode: "Postcode",
   job_type: "Category",
   job_description: "Job description",
+  lock_change_keys: "Lock change keys",
   urgency: "Urgency",
   source_campaign: "Campaign/source",
   quoted_price: "Quoted price",
@@ -2125,6 +2126,7 @@ async function initDb() {
       udprn TEXT,
       job_type TEXT,
       job_description TEXT,
+      lock_change_keys TEXT,
       urgency TEXT DEFAULT 'Normal',
       source_campaign TEXT,
       quoted_price NUMERIC(10,2),
@@ -2173,6 +2175,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS latitude NUMERIC(12,8);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS longitude NUMERIC(12,8);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS udprn TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lock_change_keys TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_campaign TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS quoted_price NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS starting_price NUMERIC(10,2);`);
@@ -5656,6 +5659,7 @@ function jobTechnicianSummary(job) {
 
   const jobLine = [job.job_type || "Job", job.job_description || ""].filter(hasFilledValue).join(" - ");
   add("Job", jobLine);
+  if (job.job_type === "LOCK CHANGE") add("Keys", job.lock_change_keys || "Not asked");
 
   addMoney("Start price", job.starting_price !== null && job.starting_price !== undefined ? job.starting_price : job.quoted_price);
   addMoney("Call out agreed", job.call_out_agreed);
@@ -6479,12 +6483,24 @@ app.get("/jobs/new", async (req, res) => {
                 <div class="form-grid-2">
                   <div class="field">
                     <label>Category</label>
-                    <select name="job_type">${optionList(categoryOptions, "Locksmith")}</select>
+                    <select id="create_job_type" name="job_type">${optionList(categoryOptions, "LOCKED OUT")}</select>
                   </div>
                   <div class="field">
                     <label>Campaign</label>
                     <select name="source_campaign">${optionList(campaignOptions, "Unknown")}</select>
                   </div>
+                </div>
+
+                <div class="wide-field" id="lock_change_keys_box" style="display:none;">
+                  <label>Lock change prompt</label>
+                  <div class="helper-line" style="margin-bottom:8px; font-weight:800; color:#111827;">Ask the customer: Do you have the keys?</div>
+                  <select id="lock_change_keys" name="lock_change_keys">
+                    <option value="">Not asked / not applicable</option>
+                    <option value="Yes - customer has keys">Yes - customer has keys</option>
+                    <option value="No - gain access and change lock">No - gain access and change lock</option>
+                    <option value="Unknown - confirm with customer">Unknown - confirm with customer</option>
+                  </select>
+                  <div class="helper-line">This appears when the category is LOCK CHANGE so the technician knows if access is also required.</div>
                 </div>
 
                 <div class="wide-field">
@@ -6669,6 +6685,18 @@ app.get("/jobs/new", async (req, res) => {
             toggleOffsitePayment();
           }
 
+
+          const jobTypeSelect = document.querySelector('select[name="job_type"]');
+          const lockChangeKeysBox = document.getElementById("lock_change_keys_box");
+          function toggleLockChangePrompt() {
+            if (!jobTypeSelect || !lockChangeKeysBox) return;
+            lockChangeKeysBox.style.display = jobTypeSelect.value === "LOCK CHANGE" ? "block" : "none";
+          }
+          if (jobTypeSelect) {
+            jobTypeSelect.addEventListener("change", toggleLockChangePrompt);
+            toggleLockChangePrompt();
+          }
+
           const etaSelect = document.getElementById("eta_select");
           const etaOther = document.getElementById("eta_other");
           const scheduledBox = document.getElementById("scheduled_box");
@@ -6725,14 +6753,14 @@ app.post("/jobs/create", async (req, res) => {
       INSERT INTO jobs (
         customer_name, customer_phone, customer_alt_phone, customer_email,
         address_line_1, address_line_2, address_line_3, town, county, postcode, latitude, longitude, udprn,
-        job_type, job_description, urgency, source_campaign, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
+        job_type, job_description, lock_change_keys, urgency, source_campaign, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
         account_job, account_template_id, assigned_technician_id, eta, scheduled_at, dispatcher_name, dispatcher_notes, status,
         created_at, updated_at
       ) VALUES (
         $1,$2,$3,$4,
         $5,$6,$7,$8,$9,$10,$11,$12,$13,
-        $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-        $26,$27,$28,$29,$30,$31,$32,$33,
+        $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+        $27,$28,$29,$30,$31,$32,$33,$34,
         NOW(), NOW()
       ) RETURNING id
     `, [
@@ -6751,6 +6779,7 @@ app.post("/jobs/create", async (req, res) => {
       body.udprn,
       body.job_type,
       body.job_description,
+      body.job_type === "LOCK CHANGE" ? (body.lock_change_keys || "Not asked / not applicable") : null,
       body.urgency || "Normal",
       body.source_campaign,
       parseMoneyInput(body.quoted_price),
@@ -6984,6 +7013,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                   <div class="info-block"><strong>Bill payer</strong><span>${escapeHtml(job.offsite_payment ? (job.bill_payer_name || "—") : (job.customer_name || "—"))}${(job.offsite_payment ? job.bill_payer_phone : job.customer_phone) ? ` · <a href="${escapeHtml(payerTel)}">${escapeHtml(job.offsite_payment ? job.bill_payer_phone : job.customer_phone)}</a>` : ""}</span></div>
                   <div class="info-block"><strong>Address</strong><div>${jobAddressBlock(job) || "—"}</div></div>
                   <div class="info-block"><strong>Job</strong><span>${escapeHtml(job.job_type || "—")} · ${escapeHtml(job.source_campaign || "No campaign")}</span><div class="muted-note">${escapeHtml(job.job_description || "No description entered.")}</div></div>
+                  ${job.job_type === "LOCK CHANGE" ? `<div class="info-block"><strong>Lock change prompt</strong><span>Do you have the keys?</span><div class="muted-note">${escapeHtml(job.lock_change_keys || "Not asked / not applicable")}</div></div>` : ""}
                   <div class="info-block"><strong>Scheduled date/time</strong><span>${escapeHtml(job.scheduled_at ? scheduledDisplay(job.scheduled_at) : "—")}</span></div>
                 </div>
               </div>
@@ -7014,8 +7044,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Town</label><input name="town" value="${escapeHtml(job.town)}"></div>
                     <div><label>County</label><input name="county" value="${escapeHtml(job.county)}"></div>
                     <div><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
-                    <div><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
+                    <div><label>Job type</label><select id="edit_job_type" name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
                     <div><label>Source / campaign</label><select name="source_campaign">${optionList(campaignOptions, job.source_campaign || "Unknown")}</select></div>
+                    <div id="edit_lock_change_keys_box" style="display:none;"><label>Lock change prompt — Do you have the keys?</label><select name="lock_change_keys">${optionList(["Not asked / not applicable", "Yes - customer has keys", "No - gain access and change lock", "Unknown - confirm with customer"], job.lock_change_keys || "Not asked / not applicable")}</select></div>
                     <div><label>Starting price £</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
                     <div><label>Call out agreed £</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
                     <div><label>Start price of locks £</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
@@ -7116,6 +7147,18 @@ app.get("/jobs/:id/edit", async (req, res) => {
             box.select();
             document.execCommand("copy");
             alert("Technician summary copied.");
+          }
+
+
+          const editJobTypeSelect = document.getElementById("edit_job_type");
+          const editLockChangeKeysBox = document.getElementById("edit_lock_change_keys_box");
+          function toggleEditLockChangePrompt() {
+            if (!editJobTypeSelect || !editLockChangeKeysBox) return;
+            editLockChangeKeysBox.style.display = editJobTypeSelect.value === "LOCK CHANGE" ? "block" : "none";
+          }
+          if (editJobTypeSelect) {
+            editJobTypeSelect.addEventListener("change", toggleEditLockChangePrompt);
+            toggleEditLockChangePrompt();
           }
 
           const quickEtaSelect = document.getElementById("quick_eta_select");
@@ -7262,6 +7305,7 @@ app.post("/jobs/:id/update", async (req, res) => {
       postcode: compactPostcode(body.postcode),
       job_type: body.job_type,
       job_description: body.job_description,
+      lock_change_keys: body.job_type === "LOCK CHANGE" ? (body.lock_change_keys || "Not asked / not applicable") : null,
       urgency: body.urgency || "Normal",
       source_campaign: body.source_campaign,
       quoted_price: parseMoneyInput(body.quoted_price),
@@ -7284,11 +7328,11 @@ app.post("/jobs/:id/update", async (req, res) => {
       UPDATE jobs SET
         customer_name=$1, customer_phone=$2, customer_alt_phone=$3, customer_email=$4,
         address_line_1=$5, address_line_2=$6, address_line_3=$7, town=$8, county=$9, postcode=$10,
-        job_type=$11, job_description=$12, urgency=$13, source_campaign=$14, quoted_price=$15,
-        starting_price=$16, call_out_agreed=$17, start_price_locks=$18, offsite_payment=$19, bill_payer_name=$20, bill_payer_phone=$21,
-        expected_payment_method=$22, account_job=$23, account_template_id=$24, assigned_technician_id=$25,
-        eta=$26, scheduled_at=$27, dispatcher_notes=$28, status=$29, updated_at=NOW()
-      WHERE id=$30
+        job_type=$11, job_description=$12, lock_change_keys=$13, urgency=$14, source_campaign=$15, quoted_price=$16,
+        starting_price=$17, call_out_agreed=$18, start_price_locks=$19, offsite_payment=$20, bill_payer_name=$21, bill_payer_phone=$22,
+        expected_payment_method=$23, account_job=$24, account_template_id=$25, assigned_technician_id=$26,
+        eta=$27, scheduled_at=$28, dispatcher_notes=$29, status=$30, updated_at=NOW()
+      WHERE id=$31
     `, [
       newValues.customer_name,
       newValues.customer_phone,
@@ -7302,6 +7346,7 @@ app.post("/jobs/:id/update", async (req, res) => {
       newValues.postcode,
       newValues.job_type,
       newValues.job_description,
+      newValues.lock_change_keys,
       newValues.urgency,
       newValues.source_campaign,
       newValues.quoted_price,
