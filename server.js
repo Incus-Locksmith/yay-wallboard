@@ -1075,6 +1075,77 @@ function renderJobAuditTrail(auditRows = []) {
   `;
 }
 
+const jobEvidenceTypes = [
+  "Job photos",
+  "Invoice copy",
+  "Payment proof",
+  "AMEX ID proof",
+  "Signed paperwork",
+  "Other evidence"
+];
+
+function evidenceTypeOptions(selected = "") {
+  return jobEvidenceTypes.map(type => `<option value="${escapeHtml(type)}" ${type === selected ? "selected" : ""}>${escapeHtml(type)}</option>`).join("");
+}
+
+function cleanEvidenceUrl(value) {
+  return String(value || "").trim();
+}
+
+function evidenceLabel(row) {
+  const type = row.evidence_type || "Evidence";
+  const archived = row.archived ? " · Archived" : "";
+  return `${type}${archived}`;
+}
+
+function renderJobEvidenceLinks(rows = []) {
+  if (!rows.length) {
+    return `<p class="muted-note">No job evidence links have been added yet. Add Dropbox links for photos, invoice copies, payment proof, AMEX ID proof or signed paperwork.</p>`;
+  }
+  return `
+    <div class="activity-list">
+      ${rows.map(row => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div>
+            <div class="activity-label">${escapeHtml(evidenceLabel(row))}</div>
+            <div class="activity-value">
+              <a href="${escapeHtml(row.evidence_url || '#')}" target="_blank" rel="noopener noreferrer">Open Dropbox link</a><br>
+              ${row.notes ? `${escapeHtml(row.notes)}<br>` : ""}
+              <span class="muted">Added ${escapeHtml(formatDateTime(row.added_at))} by ${escapeHtml(row.added_by || "Unknown")}</span>
+              ${row.archived_at ? `<br><span class="muted">Archived ${escapeHtml(formatDateTime(row.archived_at))}</span>` : ""}
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function jobEvidenceForm(jobId, compact = false) {
+  return `
+    <div class="job-grid" style="margin-top:10px;">
+      <div class="field"><label>Evidence type</label><select name="evidence_type">${evidenceTypeOptions()}</select></div>
+      <div class="field"><label>Dropbox link</label><input name="evidence_url" placeholder="Paste Dropbox link"></div>
+      <div class="field ${compact ? '' : 'wide'}"><label>Evidence notes</label><input name="evidence_notes" placeholder="Optional notes, e.g. before/after photos or invoice copy"></div>
+    </div>
+  `;
+}
+
+async function addJobEvidenceLink(jobId, body, addedBy, actionType = "job_evidence_added") {
+  const evidenceUrl = cleanEvidenceUrl(body.evidence_url);
+  if (!evidenceUrl) return null;
+  const evidenceType = jobEvidenceTypes.includes(body.evidence_type) ? body.evidence_type : "Other evidence";
+  const notes = String(body.evidence_notes || body.notes || "").trim();
+  const result = await pool.query(`
+    INSERT INTO job_evidence_links (job_id, evidence_type, evidence_url, notes, added_by, added_at, archived)
+    VALUES ($1, $2, $3, $4, $5, NOW(), FALSE)
+    RETURNING *
+  `, [jobId, evidenceType, evidenceUrl, notes, addedBy || "Unknown"]);
+  await addJobAuditEntry(jobId, actionType, "Evidence", "—", `${evidenceType}: ${evidenceUrl}`, addedBy || "Unknown");
+  return result.rows[0];
+}
+
 function parseMoneyInput(value) {
   if (value === null || value === undefined || String(value).trim() === "") return null;
   const number = Number(String(value).replace(/[^0-9.-]/g, ""));
@@ -2265,6 +2336,30 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_payment_chases ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_job_idx ON job_payment_chases (job_id, chase_date DESC, created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_chases_follow_up_idx ON job_payment_chases (next_follow_up_date);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_evidence_links (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      evidence_type TEXT DEFAULT 'Other evidence',
+      evidence_url TEXT NOT NULL,
+      notes TEXT,
+      added_by TEXT,
+      added_at TIMESTAMP DEFAULT NOW(),
+      archived BOOLEAN DEFAULT FALSE,
+      archived_at TIMESTAMP
+    );
+  `);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS evidence_type TEXT DEFAULT 'Other evidence';`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS evidence_url TEXT;`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS added_by TEXT;`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS added_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_job_idx ON job_evidence_links (job_id, added_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_archive_idx ON job_evidence_links (archived, added_at);`);
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_by TEXT;`);
@@ -6957,6 +7052,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
       ORDER BY chase_date DESC, created_at DESC, id DESC
       LIMIT 20
     `, [id])).rows;
+    const evidenceRows = (await pool.query(`
+      SELECT * FROM job_evidence_links
+      WHERE job_id = $1
+      ORDER BY added_at DESC, id DESC
+      LIMIT 40
+    `, [id])).rows;
 
     const activityItems = [
       { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
@@ -7194,6 +7295,21 @@ app.get("/jobs/:id/edit", async (req, res) => {
               </div>
 
               <div class="control-card">
+                <h2>Job documents / evidence</h2>
+                <p class="muted-note">Paste Dropbox links for photos, invoice copies, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
+                <form method="POST" action="/jobs/${job.id}/evidence" class="quick-form">
+                  <label>Evidence type</label>
+                  <select name="evidence_type">${evidenceTypeOptions()}</select>
+                  <label>Dropbox link</label>
+                  <input name="evidence_url" placeholder="Paste Dropbox link" required>
+                  <label>Notes</label>
+                  <textarea name="evidence_notes" rows="2" placeholder="Optional notes"></textarea>
+                  <button type="submit">Add evidence link</button>
+                </form>
+                ${renderJobEvidenceLinks(evidenceRows)}
+              </div>
+
+              <div class="control-card">
                 <h2>Audit trail</h2>
                 ${renderJobAuditTrail(auditRows)}
               </div>
@@ -7293,6 +7409,19 @@ app.get("/jobs/:id/edit", async (req, res) => {
   } catch (error) {
     console.error("Edit job page error:", error);
     res.status(500).send("Edit job page error. Check Render logs.");
+  }
+});
+
+app.post("/jobs/:id/evidence", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const exists = (await pool.query(`SELECT id FROM jobs WHERE id = $1`, [id])).rows[0];
+    if (!exists) return res.status(404).send("Job not found");
+    await addJobEvidenceLink(id, req.body, currentAgentName(req), "job_evidence_added");
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Add job evidence error:", error);
+    res.status(500).send("Could not add job evidence link. Check Render logs.");
   }
 });
 
@@ -7502,6 +7631,11 @@ app.get("/jobs/:id/close", async (req, res) => {
             <label>Close notes</label>
             <textarea name="close_notes" rows="3">${escapeHtml(job.close_notes)}</textarea>
           </div>
+          <div class="panel">
+            <h2>Job documents / evidence</h2>
+            <p class="muted">Optional for now. Paste a Dropbox link for photos, invoice copy, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
+            ${jobEvidenceForm(job.id)}
+          </div>
           <button type="submit">Save close details</button>
           <a href="/jobs/${job.id}/edit" style="margin-left:12px;">Back to job</a>
         </form>
@@ -7622,6 +7756,7 @@ app.post("/jobs/:id/close", async (req, res) => {
       id
     ]);
     await logJobChanges(id, oldJob, closeValues, currentAgentName(req), "job_closed_or_payment_updated");
+    await addJobEvidenceLink(id, body, currentAgentName(req), "close_evidence_added");
     res.redirect(`/jobs/${id}/edit`);
   } catch (error) {
     console.error("Close job error:", error);
@@ -9127,6 +9262,15 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <div class="full"><label>Technician notes</label><textarea name="tech_notes" placeholder="Any notes for the office">${escapeHtml(job.tech_notes || '')}</textarea></div>
               <div class="full"><label>Close notes</label><textarea name="close_notes" placeholder="Anything the office should know">${escapeHtml(job.close_notes || '')}</textarea></div>
             </div>
+            <div class="panel" style="margin-top:14px; background:#f8fafc; color:#111827;">
+              <h3 style="margin-top:0;">Job documents / evidence</h3>
+              <p class="job-sub">Optional for now. Paste a Dropbox link for photos, invoice copy, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
+              <div class="field-grid">
+                <div><label>Evidence type</label><select name="evidence_type">${evidenceTypeOptions()}</select></div>
+                <div><label>Dropbox link</label><input name="evidence_url" placeholder="Paste Dropbox link"></div>
+                <div class="full"><label>Evidence notes</label><input name="evidence_notes" placeholder="Optional notes"></div>
+              </div>
+            </div>
             <br>
             <button class="button red" type="submit">Submit close job</button>
           </form>
@@ -9261,6 +9405,7 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       tech.name
     ]);
     await logJobChanges(Number(req.params.id), oldJob, techCloseValues, `${tech.name} workspace`, "technician_close_submit");
+    await addJobEvidenceLink(Number(req.params.id), body, `${tech.name} workspace`, "technician_close_evidence_added");
 
     await pool.query(`
       UPDATE technicians
