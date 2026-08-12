@@ -644,7 +644,7 @@ const legacyJobStatusLabels = {
   fully_paid_private: "Fully paid (private)"
 };
 
-const activeJobStatuses = ["open", "assigned", "awaiting_payment"];
+const activeJobStatuses = ["open", "assigned", "scheduled"];
 
 const jobTypes = [
   "BAILIFF (COURT ORDERED)",
@@ -5989,7 +5989,7 @@ app.get("/jobs", async (req, res) => {
     const revenue = revenueResult.rows[0] || {};
 
     const statusFilterOptions = [
-      { value: "active", label: `Active orders (${activeCount})` },
+      { value: "active", label: `Active / scheduled jobs (${activeCount})` },
       { value: "all", label: "All orders" },
       { value: "closed_today", label: `Closed today (${closedToday})` },
       { value: "cancelled", label: `Total cancelled (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
@@ -6250,7 +6250,7 @@ app.get("/jobs", async (req, res) => {
               <div class="panel-heading">
                 <div>
                   <h2>Live client orders</h2>
-                  <div class="muted">Showing ${jobsResult.rows.length} order${jobsResult.rows.length === 1 ? "" : "s"}</div>
+                  <div class="muted">Showing ${jobsResult.rows.length} active/scheduled order${jobsResult.rows.length === 1 ? "" : "s"}. Use search or filters to find awaiting payment, closed, disputed or cancelled jobs.</div>
                 </div>
               </div>
               <table class="dispatch-table">
