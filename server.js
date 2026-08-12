@@ -236,7 +236,7 @@ function clearSessionCookie(res) {
 
 function requireLogin(req, res, next) {
   const openPaths = ["/login", "/logout", "/webhook/yay"];
-  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/") || req.path.startsWith("/tech-workspace/")) return next();
+  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/") || req.path === "/tech-workspace" || req.path.startsWith("/tech-workspace/")) return next();
 
   const session = readSession(req);
   if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
@@ -6856,7 +6856,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
     const summary = jobTechnicianSummary(job);
     const customerTel = phoneHref(job.customer_phone);
     const payerTel = phoneHref(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
-    const techWorkspaceUrl = job.technician_token ? `/tech-workspace/${job.technician_token}` : "";
+    const techWorkspaceUrl = job.technician_token ? `/tech-workspace` : "";
     const auditRows = (await pool.query(`
       SELECT * FROM job_audit_log
       WHERE job_id = $1
@@ -8629,6 +8629,13 @@ async function getTechnicianByToken(token) {
   return result.rows[0];
 }
 
+async function getTechnicianByPin(pin) {
+  const cleanedPin = String(pin || '').replace(/\D/g, '');
+  if (!cleanedPin) return null;
+  const result = await pool.query(`SELECT * FROM technicians WHERE technician_pin = $1 AND active = TRUE ORDER BY id ASC LIMIT 1`, [cleanedPin]);
+  return result.rows[0];
+}
+
 function makeTechnicianPin() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -8696,6 +8703,24 @@ function technicianLoginPage(token, tech, errorMessage = "") {
   `);
 }
 
+function universalTechnicianLoginPage(errorMessage = "") {
+  return technicianPortalShell('Technician PIN required', `
+    <div class="wrap" style="max-width:520px;margin:40px auto;">
+      <div class="panel">
+        <h1>Technician secure access</h1>
+        <p class="job-sub">Use the universal technician workspace link and enter your private 4-digit PIN. Your PIN opens only your own dashboard.</p>
+        ${errorMessage ? `<div class="empty" style="border-left:6px solid #dc2626;">${escapeHtml(errorMessage)}</div>` : ''}
+        <form method="POST" action="/tech-workspace/login">
+          <label>Private PIN</label>
+          <input name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4-digit PIN" required autofocus>
+          <br><br>
+          <button class="button red" type="submit">Unlock my dashboard</button>
+        </form>
+      </div>
+    </div>
+  `);
+}
+
 async function getOpenDisputesForTechnician(tech) {
   const result = await pool.query(`
     SELECT
@@ -8728,6 +8753,48 @@ async function getOpenDisputesForTechnician(tech) {
   return result.rows;
 }
 
+
+app.get('/tech-workspace', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const raw = parseCookies(req).tech_workspace_session;
+    if (raw && raw.includes('.')) {
+      const [payload, signature] = raw.split('.');
+      const expected = signValue(payload);
+      try {
+        if (crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+          const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+          if (decoded.token) {
+            const tech = await getTechnicianByToken(decoded.token);
+            if (tech) return res.redirect(`/tech-workspace/${encodeURIComponent(decoded.token)}`);
+          }
+        }
+      } catch (error) {
+        // Invalid or old cookie. Show the PIN screen.
+      }
+    }
+    res.send(universalTechnicianLoginPage());
+  } catch (error) {
+    console.error('Universal technician workspace error:', error);
+    res.status(500).send('Technician workspace error. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/login', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const enteredPin = String(req.body.pin || '').replace(/\D/g, '');
+    const tech = await getTechnicianByPin(enteredPin);
+    if (!tech || !tech.checkin_token) {
+      return res.status(403).send(universalTechnicianLoginPage('Incorrect PIN. Please check the private PIN issued by the office.'));
+    }
+    setTechnicianSessionCookie(res, tech.checkin_token);
+    res.redirect(`/tech-workspace/${encodeURIComponent(tech.checkin_token)}`);
+  } catch (error) {
+    console.error('Universal technician PIN login error:', error);
+    res.status(500).send('Technician PIN login error. Check Render logs.');
+  }
+});
 
 app.post('/tech-workspace/:token/login', async (req, res) => {
   try {
@@ -9681,7 +9748,7 @@ app.get("/technicians", async (req, res) => {
               <button type="submit">Edit</button>
             </form>
             <br><br>
-            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Workspace link</a><div class="audit">PIN: ${escapeHtml(tech.technician_pin || '')}</div>
+            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace" target="_blank">Workspace link</a><div class="audit">PIN: ${escapeHtml(tech.technician_pin || '')}</div>
           </td>
         </tr>
       `;
@@ -9779,12 +9846,12 @@ app.get("/technicians/edit", async (req, res) => {
           <h2>Technician Workspace Link</h2>
           <div class="help">This is the technician's active jobs, close-job and income summary portal. The link now also requires the private PIN below, so another technician cannot open this dashboard from the link alone.</div>
           <br>
-          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace/${tech.checkin_token || ""}`}">
+          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace`}">
           <br><br>
           <label>Private workspace PIN</label>
           <input class="copy-input" readonly value="${escapeHtml(tech.technician_pin || '')}">
           <br><br>
-          <a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician workspace</a>
+          <a href="/tech-workspace" target="_blank">Open technician workspace</a>
         </div>
 
         <div class="panel">
