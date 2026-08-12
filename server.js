@@ -6572,7 +6572,6 @@ app.get("/jobs/new", async (req, res) => {
                 </div>
 
                 <div class="form-grid-3" style="margin-top:16px;">
-                  <div class="field"><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, "Normal")}</select></div>
                   <div class="field"><label>Starting price</label><div class="money-wrap"><div class="money-prefix">£</div><input name="starting_price" inputmode="decimal" placeholder="e.g. 75"></div></div>
                   <div class="field"><label>Call out agreed</label><div class="money-wrap"><div class="money-prefix">£</div><input name="call_out_agreed" inputmode="decimal" placeholder="e.g. 55"></div></div>
                 </div>
@@ -6958,7 +6957,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
             <div class="job-control-title">
               <h1>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""} Control Panel</h1>
               <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
-              <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>${job.urgency ? `<span class="pill stage-draft">${escapeHtml(job.urgency)}</span>` : ""}</div>
+              <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></div>
             </div>
             <div class="job-control-actions">
               <a class="action-button" href="#appointment-card">Edit appointment</a>
@@ -7016,7 +7015,6 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>County</label><input name="county" value="${escapeHtml(job.county)}"></div>
                     <div><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
                     <div><label>Job type</label><select name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
-                    <div><label>Urgency</label><select name="urgency">${optionList(jobUrgencies, job.urgency)}</select></div>
                     <div><label>Source / campaign</label><select name="source_campaign">${optionList(campaignOptions, job.source_campaign || "Unknown")}</select></div>
                     <div><label>Starting price £</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
                     <div><label>Call out agreed £</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
