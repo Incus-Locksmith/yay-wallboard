@@ -6491,16 +6491,16 @@ app.get("/jobs/new", async (req, res) => {
                   </div>
                 </div>
 
-                <div class="wide-field" id="lock_change_keys_box" style="display:none;">
-                  <label>Lock change prompt</label>
-                  <div class="helper-line" style="margin-bottom:8px; font-weight:800; color:#111827;">Ask the customer: Do you have the keys?</div>
-                  <select id="lock_change_keys" name="lock_change_keys">
+                <div class="wide-field" id="lock_change_keys_box" style="display:none; background:#0f8f2f; color:#ffffff; padding:14px; border-radius:14px; border:2px solid #087425; box-shadow:0 10px 24px rgba(15,143,47,0.18);">
+                  <label style="color:#ffffff; font-weight:900; letter-spacing:.04em;">Lock change prompt</label>
+                  <div class="helper-line" style="margin-bottom:10px; font-weight:900; color:#ffffff; font-size:15px;">Ask the customer: Do you have the keys?</div>
+                  <select id="lock_change_keys" name="lock_change_keys" style="background:#ffffff; color:#111827; border:0; font-weight:800;">
                     <option value="">Not asked / not applicable</option>
                     <option value="Yes - customer has keys">Yes - customer has keys</option>
                     <option value="No - gain access and change lock">No - gain access and change lock</option>
                     <option value="Unknown - confirm with customer">Unknown - confirm with customer</option>
                   </select>
-                  <div class="helper-line">This appears when the category is LOCK CHANGE so the technician knows if access is also required.</div>
+                  <div class="helper-line" style="color:#ffffff; opacity:.95; margin-top:8px;">This appears when the category is LOCK CHANGE so the technician knows if access is also required.</div>
                 </div>
 
                 <div class="wide-field">
@@ -7013,7 +7013,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                   <div class="info-block"><strong>Bill payer</strong><span>${escapeHtml(job.offsite_payment ? (job.bill_payer_name || "—") : (job.customer_name || "—"))}${(job.offsite_payment ? job.bill_payer_phone : job.customer_phone) ? ` · <a href="${escapeHtml(payerTel)}">${escapeHtml(job.offsite_payment ? job.bill_payer_phone : job.customer_phone)}</a>` : ""}</span></div>
                   <div class="info-block"><strong>Address</strong><div>${jobAddressBlock(job) || "—"}</div></div>
                   <div class="info-block"><strong>Job</strong><span>${escapeHtml(job.job_type || "—")} · ${escapeHtml(job.source_campaign || "No campaign")}</span><div class="muted-note">${escapeHtml(job.job_description || "No description entered.")}</div></div>
-                  ${job.job_type === "LOCK CHANGE" ? `<div class="info-block"><strong>Lock change prompt</strong><span>Do you have the keys?</span><div class="muted-note">${escapeHtml(job.lock_change_keys || "Not asked / not applicable")}</div></div>` : ""}
+                  ${job.job_type === "LOCK CHANGE" ? `<div class="info-block" style="background:#0f8f2f; color:#ffffff; border-color:#087425;"><strong style="color:#ffffff;">Lock change prompt</strong><span style="color:#ffffff; font-weight:900;">Do you have the keys?</span><div style="color:#ffffff; opacity:.95; font-weight:800; margin-top:6px;">${escapeHtml(job.lock_change_keys || "Not asked / not applicable")}</div></div>` : ""}
                   <div class="info-block"><strong>Scheduled date/time</strong><span>${escapeHtml(job.scheduled_at ? scheduledDisplay(job.scheduled_at) : "—")}</span></div>
                 </div>
               </div>
@@ -7046,7 +7046,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Postcode</label><input name="postcode" value="${escapeHtml(job.postcode)}" required></div>
                     <div><label>Job type</label><select id="edit_job_type" name="job_type">${optionList(jobTypes, job.job_type)}</select></div>
                     <div><label>Source / campaign</label><select name="source_campaign">${optionList(campaignOptions, job.source_campaign || "Unknown")}</select></div>
-                    <div id="edit_lock_change_keys_box" style="display:none;"><label>Lock change prompt — Do you have the keys?</label><select name="lock_change_keys">${optionList(["Not asked / not applicable", "Yes - customer has keys", "No - gain access and change lock", "Unknown - confirm with customer"], job.lock_change_keys || "Not asked / not applicable")}</select></div>
+                    <div id="edit_lock_change_keys_box" style="display:none; background:#0f8f2f; color:#ffffff; padding:12px; border-radius:14px; border:2px solid #087425;"><label style="color:#ffffff; font-weight:900;">Lock change prompt — Do you have the keys?</label><select name="lock_change_keys" style="background:#ffffff; color:#111827; border:0; font-weight:800;">${optionList(["Not asked / not applicable", "Yes - customer has keys", "No - gain access and change lock", "Unknown - confirm with customer"], job.lock_change_keys || "Not asked / not applicable")}</select></div>
                     <div><label>Starting price £</label><input name="starting_price" value="${job.starting_price !== null && job.starting_price !== undefined ? Number(job.starting_price).toFixed(2) : ""}"></div>
                     <div><label>Call out agreed £</label><input name="call_out_agreed" value="${job.call_out_agreed !== null && job.call_out_agreed !== undefined ? Number(job.call_out_agreed).toFixed(2) : ""}"></div>
                     <div><label>Start price of locks £</label><input name="start_price_locks" value="${job.start_price_locks !== null && job.start_price_locks !== undefined ? Number(job.start_price_locks).toFixed(2) : ""}"></div>
