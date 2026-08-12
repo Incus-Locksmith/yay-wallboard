@@ -1088,6 +1088,29 @@ function evidenceTypeOptions(selected = "") {
   return jobEvidenceTypes.map(type => `<option value="${escapeHtml(type)}" ${type === selected ? "selected" : ""}>${escapeHtml(type)}</option>`).join("");
 }
 
+function mainDropboxEvidenceFolderUrl() {
+  return String(process.env.DROPBOX_EVIDENCE_FOLDER_URL || "").trim();
+}
+
+function renderMainEvidenceFolderLink() {
+  const url = mainDropboxEvidenceFolderUrl();
+  if (!url) {
+    return `
+      <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#f8fafc; border:1px solid #e5e7eb;">
+        <strong>Main Dropbox evidence folder not connected yet.</strong><br>
+        <span class="muted-note">Add DROPBOX_EVIDENCE_FOLDER_URL in Render environment variables to show the shared Dropbox folder button here.</span>
+      </div>
+    `;
+  }
+  return `
+    <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#ecfdf5; border:1px solid #bbf7d0;">
+      <strong>Dropbox filing folder</strong><br>
+      <span class="muted-note">Open the shared evidence folder, then file under Month/Year → Tech name → Postcode.</span><br>
+      <a class="button green" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="margin-top:10px; display:inline-flex;">Open Job evidence Dropbox folder</a>
+    </div>
+  `;
+}
+
 function cleanEvidenceUrl(value) {
   return String(value || "").trim();
 }
@@ -1100,7 +1123,7 @@ function evidenceLabel(row) {
 
 function renderJobEvidenceLinks(rows = []) {
   if (!rows.length) {
-    return `<p class="muted-note">No job evidence links have been added yet. Add Dropbox links for photos, invoice copies, payment proof, AMEX ID proof or signed paperwork.</p>`;
+    return `<p class="muted-note">No job-specific evidence links have been added yet. Open the shared Dropbox folder, file the media by Month/Year → Tech name → Postcode, then paste the job folder or file link here.</p>`;
   }
   return `
     <div class="activity-list">
@@ -1126,7 +1149,7 @@ function jobEvidenceForm(jobId, compact = false) {
   return `
     <div class="job-grid" style="margin-top:10px;">
       <div class="field"><label>Evidence type</label><select name="evidence_type">${evidenceTypeOptions()}</select></div>
-      <div class="field"><label>Dropbox link</label><input name="evidence_url" placeholder="Paste Dropbox link"></div>
+      <div class="field"><label>Job-specific Dropbox link</label><input name="evidence_url" placeholder="Paste job folder or file link"></div>
       <div class="field ${compact ? '' : 'wide'}"><label>Evidence notes</label><input name="evidence_notes" placeholder="Optional notes, e.g. before/after photos or invoice copy"></div>
     </div>
   `;
@@ -7296,7 +7319,8 @@ app.get("/jobs/:id/edit", async (req, res) => {
 
               <div class="control-card">
                 <h2>Job documents / evidence</h2>
-                <p class="muted-note">Paste Dropbox links for photos, invoice copies, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
+                <p class="muted-note">Use the shared Dropbox filing folder first, then paste the job-specific Dropbox folder or file link here.</p>
+                ${renderMainEvidenceFolderLink()}
                 <form method="POST" action="/jobs/${job.id}/evidence" class="quick-form">
                   <label>Evidence type</label>
                   <select name="evidence_type">${evidenceTypeOptions()}</select>
@@ -7633,7 +7657,8 @@ app.get("/jobs/:id/close", async (req, res) => {
           </div>
           <div class="panel">
             <h2>Job documents / evidence</h2>
-            <p class="muted">Optional for now. Paste a Dropbox link for photos, invoice copy, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
+            <p class="muted">Use the shared Dropbox filing folder first, then paste the job-specific Dropbox folder or file link here.</p>
+            ${renderMainEvidenceFolderLink()}
             ${jobEvidenceForm(job.id)}
           </div>
           <button type="submit">Save close details</button>
@@ -9264,12 +9289,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
             </div>
             <div class="panel" style="margin-top:14px; background:#f8fafc; color:#111827;">
               <h3 style="margin-top:0;">Job documents / evidence</h3>
-              <p class="job-sub">Optional for now. Paste a Dropbox link for photos, invoice copy, payment proof, AMEX ID proof, signed paperwork or other evidence.</p>
-              <div class="field-grid">
-                <div><label>Evidence type</label><select name="evidence_type">${evidenceTypeOptions()}</select></div>
-                <div><label>Dropbox link</label><input name="evidence_url" placeholder="Paste Dropbox link"></div>
-                <div class="full"><label>Evidence notes</label><input name="evidence_notes" placeholder="Optional notes"></div>
-              </div>
+              <p class="job-sub">The office will file photos, invoices and proof in Dropbox after the job. Please send any job photos/evidence to the office in the usual way.</p>
             </div>
             <br>
             <button class="button red" type="submit">Submit close job</button>
