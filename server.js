@@ -1169,6 +1169,221 @@ async function addJobEvidenceLink(jobId, body, addedBy, actionType = "job_eviden
   return result.rows[0];
 }
 
+
+const defaultSmsTemplates = [
+  {
+    key: "booking_confirmation",
+    name: "Booking confirmation",
+    message: "Hi {customer_name}, your locksmith job for {postcode} has been booked. ETA/appointment: {eta_or_scheduled}. 24H Locksmiths: {office_tel}"
+  },
+  {
+    key: "technician_assigned",
+    name: "Technician assigned",
+    message: "Hi {customer_name}, your locksmith has been assigned: {technician_name}. ETA/appointment: {eta_or_scheduled}. 24H Locksmiths: {office_tel}"
+  },
+  {
+    key: "eta_update",
+    name: "ETA update",
+    message: "Hi {customer_name}, update for your locksmith job at {postcode}: ETA/appointment is now {eta_or_scheduled}. 24H Locksmiths: {office_tel}"
+  },
+  {
+    key: "scheduled_appointment_reminder",
+    name: "Scheduled appointment reminder",
+    message: "Hi {customer_name}, reminder of your locksmith appointment for {postcode}: {scheduled_display}. 24H Locksmiths: {office_tel}"
+  },
+  {
+    key: "payment_reminder",
+    name: "Payment reminder",
+    message: "Hi {customer_name}, this is a reminder that payment is still outstanding for your locksmith job at {postcode}. Please contact 24H Locksmiths on {office_tel}."
+  },
+  {
+    key: "invoice_reminder",
+    name: "Invoice reminder",
+    message: "Hi {customer_name}, your invoice for the locksmith job at {postcode} is awaiting payment. Please contact 24H Locksmiths on {office_tel} if you need help."
+  },
+  {
+    key: "trustpilot_review_request",
+    name: "Request Trustpilot review",
+    message: "Hi {customer_name}, thank you for using 24H Locksmiths. If you were happy with the service, please leave us a Trustpilot review: {trustpilot_review_url}"
+  },
+  {
+    key: "service_feedback_request",
+    name: "Feedback on service provided",
+    message: "Hi {customer_name}, thank you for using 24H Locksmiths. We would appreciate your feedback on the service we provided. Please reply to this text with any comments."
+  },
+  {
+    key: "ten_percent_discount",
+    name: "Offer 10% discount on next job",
+    message: "Hi {customer_name}, thank you for using 24H Locksmiths. As a thank you, we would like to offer 10% off your next job. Quote your postcode when booking."
+  },
+  {
+    key: "custom",
+    name: "Custom message",
+    message: ""
+  }
+];
+
+function smsTemplateByKey(key) {
+  return defaultSmsTemplates.find(template => template.key === key) || defaultSmsTemplates[0];
+}
+
+function smsTrustpilotReviewUrl() {
+  return String(process.env.TRUSTPILOT_REVIEW_URL || "https://www.trustpilot.com/evaluate/24hrslocksmith.co.uk").trim();
+}
+
+function smsOfficeTel() {
+  return compactPhone(process.env.SMS_OFFICE_TEL || companies.locksmiths.tel || "02038703732");
+}
+
+function cleanSmsNumber(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+function smsTemplateContext(job = {}) {
+  const etaOrScheduled = job.eta === "Scheduled" && job.scheduled_at
+    ? scheduledDisplay(job.scheduled_at)
+    : (job.eta || "TBC");
+  return {
+    customer_name: job.customer_name || "",
+    postcode: job.postcode || "",
+    job_number: job.job_number || jobNumber(job.id),
+    eta: job.eta || "TBC",
+    scheduled_display: job.scheduled_at ? scheduledDisplay(job.scheduled_at) : etaOrScheduled,
+    eta_or_scheduled: etaOrScheduled,
+    technician_name: job.technician_name || "your locksmith",
+    office_tel: smsOfficeTel(),
+    trustpilot_review_url: smsTrustpilotReviewUrl()
+  };
+}
+
+function fillSmsTemplate(message, job) {
+  const context = smsTemplateContext(job);
+  return String(message || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => context[key] || "");
+}
+
+function smsTemplateOptions(job, selected = "") {
+  return defaultSmsTemplates.map(template => {
+    const message = fillSmsTemplate(template.message, job);
+    return `<option value="${escapeHtml(template.key)}" data-message="${escapeHtml(message)}" ${template.key === selected ? "selected" : ""}>${escapeHtml(template.name)}</option>`;
+  }).join("");
+}
+
+function yayApiHost() {
+  return String(process.env.YAY_API_HOSTNAME || "https://api.yay.com").replace(/\/+$/, "");
+}
+
+function yayAuthConfigured() {
+  return Boolean(process.env.YAY_AUTH_RESELLER && process.env.YAY_AUTH_USER && process.env.YAY_AUTH_PASSWORD);
+}
+
+function yayAuthHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "X-Auth-Reseller": String(process.env.YAY_AUTH_RESELLER || "").trim(),
+    "X-Auth-User": String(process.env.YAY_AUTH_USER || "").trim(),
+    "X-Auth-Password": String(process.env.YAY_AUTH_PASSWORD || "").trim()
+  };
+}
+
+function looksLikeUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+}
+
+function smsProviderConfigured() {
+  return Boolean(yayAuthConfigured() && looksLikeUuid(process.env.YAY_SMS_CALLER_ID_UUID));
+}
+
+function renderSmsConfigNotice() {
+  if (smsProviderConfigured()) return `<p class="muted-note">SMS will be sent through Yay and logged against this job.</p>`;
+  return `
+    <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45;">
+      <strong>Yay SMS is not fully connected yet.</strong><br>
+      Add YAY_API_HOSTNAME, YAY_AUTH_RESELLER, YAY_AUTH_USER, YAY_AUTH_PASSWORD and the real YAY_SMS_CALLER_ID_UUID in Render.
+      <br><a href="/admin/yay-caller-ids">Look up Yay caller IDs</a> once the auth details are saved.
+    </div>
+  `;
+}
+
+function renderSmsHistory(rows = []) {
+  if (!rows.length) return `<p class="muted-note">No SMS messages logged for this job yet.</p>`;
+  return `
+    <div class="activity-list">
+      ${rows.map(row => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div>
+            <div class="activity-label">${escapeHtml(row.template_name || row.sms_type || "SMS")} · ${escapeHtml(row.status || "logged")}</div>
+            <div class="activity-value">
+              To: ${escapeHtml(row.sent_to || "—")}<br>
+              ${escapeHtml(row.message_body || "")}<br>
+              <span class="muted">${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.sent_by || "Unknown")}</span>
+              ${row.provider_response ? `<br><span class="muted">Provider: ${escapeHtml(String(row.provider_response).slice(0, 240))}</span>` : ""}
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function normaliseYaySmsRecipient(value) {
+  let phone = cleanSmsNumber(value).replace(/[^0-9+]/g, "");
+  if (phone.startsWith("00")) phone = "+" + phone.slice(2);
+  if (phone.startsWith("0")) phone = "+44" + phone.slice(1);
+  return phone;
+}
+
+async function yayApiRequest(method, path, body = null) {
+  if (!yayAuthConfigured()) {
+    throw new Error("Yay auth environment variables missing");
+  }
+
+  const response = await fetch(`${yayApiHost()}${path}`, {
+    method,
+    headers: yayAuthHeaders(),
+    body: body === null ? undefined : JSON.stringify(body)
+  });
+
+  const providerText = await response.text();
+  let parsed = null;
+  try { parsed = providerText ? JSON.parse(providerText) : null; } catch (_) {}
+
+  if (!response.ok) {
+    throw new Error(`Yay API failed ${response.status}: ${providerText}`);
+  }
+  return { text: providerText, json: parsed, status: response.status };
+}
+
+async function sendYaySms(to, message, campaignName = "Portal SMS") {
+  if (!smsProviderConfigured()) {
+    return { status: "not_sent", providerResponse: "Yay SMS environment variables missing or caller ID UUID not set" };
+  }
+
+  const recipient = normaliseYaySmsRecipient(to);
+  const payload = {
+    campaign_name: campaignName,
+    message_content: message,
+    caller_id_uuid: String(process.env.YAY_SMS_CALLER_ID_UUID || "").trim(),
+    send_on: new Date().toISOString(),
+    is_draft: true,
+    recipients: [{ phone_number: recipient }]
+  };
+
+  const created = await yayApiRequest("POST", "/voip/text-message/campaign", payload);
+  const campaignUuid = created.json?.result?.uuid || created.json?.uuid;
+
+  if (!campaignUuid) {
+    return { status: "draft_created", providerResponse: created.text || "Yay campaign draft created but UUID was not found in response" };
+  }
+
+  const confirmed = await yayApiRequest("PUT", `/voip/text-message/campaign/${campaignUuid}/confirm`, null);
+  return {
+    status: "sent",
+    providerResponse: JSON.stringify({ created: created.json || created.text, confirmed: confirmed.json || confirmed.text }).slice(0, 1200)
+  };
+}
+
 function parseMoneyInput(value) {
   if (value === null || value === undefined || String(value).trim() === "") return null;
   const number = Number(String(value).replace(/[^0-9.-]/g, ""));
@@ -1910,6 +2125,7 @@ function nav(req) {
 
         <div class="sidebar-label section-label">Admin</div>
         <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
+        <a class="side-link${active("/admin/yay-caller-ids")}" href="/admin/yay-caller-ids"><span class="side-dot dot-blue"></span><span>Yay SMS setup</span></a>
       </nav>
 
       <div class="sidebar-user">
@@ -2383,6 +2599,34 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_job_idx ON job_evidence_links (job_id, added_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_archive_idx ON job_evidence_links (archived, added_at);`);
+
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_sms_log (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      sent_to TEXT,
+      sms_type TEXT,
+      template_name TEXT,
+      message_body TEXT,
+      status TEXT DEFAULT 'logged',
+      provider TEXT DEFAULT 'yay',
+      provider_response TEXT,
+      sent_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS sent_to TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS sms_type TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS template_name TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS message_body TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'logged';`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'yay';`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS provider_response TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
+  await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_sms_log_job_idx ON job_sms_log (job_id, created_at DESC);`);
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_by TEXT;`);
@@ -3192,6 +3436,104 @@ app.get("/call-wallboard/missed-calls", async (req, res) => {
   } catch (error) {
     console.error("Missed calls error:", error);
     res.status(500).send("Missed calls error. Check Render logs.");
+  }
+});
+
+
+function flattenYayCallerIds(value, found = []) {
+  if (!value || typeof value !== "object") return found;
+  if (Array.isArray(value)) {
+    value.forEach(item => flattenYayCallerIds(item, found));
+    return found;
+  }
+
+  const uuid = value.uuid || value.caller_id_uuid || value.id || "";
+  const possibleNumber = value.number || value.phone_number || value.cli || value.caller_id || value.destination_number || value.name || "";
+  if (uuid || possibleNumber) {
+    found.push({
+      uuid: String(uuid || ""),
+      number: String(possibleNumber || ""),
+      label: String(value.nickname || value.name || value.description || value.friendly_name || "")
+    });
+  }
+
+  Object.values(value).forEach(child => flattenYayCallerIds(child, found));
+  return found;
+}
+
+app.get("/admin/yay-caller-ids", async (req, res) => {
+  try {
+    let apiResult = null;
+    let rows = [];
+    let errorMessage = "";
+
+    if (yayAuthConfigured()) {
+      try {
+        apiResult = await yayApiRequest("GET", "/voip/caller-id", null);
+        rows = flattenYayCallerIds(apiResult.json || {});
+      } catch (error) {
+        errorMessage = error.message;
+      }
+    } else {
+      errorMessage = "Yay auth variables are missing in Render.";
+    }
+
+    const configuredCallerId = String(process.env.YAY_SMS_CALLER_ID_UUID || "").trim();
+    const rowHtml = rows.length ? rows.map(row => `
+      <tr>
+        <td>${escapeHtml(row.label || "—")}</td>
+        <td>${escapeHtml(row.number || "—")}</td>
+        <td><code>${escapeHtml(row.uuid || "—")}</code></td>
+        <td>${looksLikeUuid(row.uuid) ? `<span class="pill available">UUID found</span>` : `<span class="pill awaiting">Check response</span>`}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="4">No caller IDs found yet. Check the raw response below or the Render/Yay settings.</td></tr>`;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Yay SMS Setup</title>
+        <style>${sharedStyles()}</style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Yay SMS Setup</h1>
+        <div class="subtitle">Use this page to find the caller ID UUID for the SMS sender number.</div>
+
+        <div class="panel">
+          <h2>Current Render SMS settings</h2>
+          <div class="grid-3">
+            <div class="metric-card"><div class="metric-label">Yay API host</div><div class="metric-value" style="font-size:16px;">${escapeHtml(yayApiHost())}</div></div>
+            <div class="metric-card"><div class="metric-label">Yay auth</div><div class="metric-value" style="font-size:16px;">${yayAuthConfigured() ? "Configured" : "Missing"}</div></div>
+            <div class="metric-card"><div class="metric-label">SMS caller ID UUID</div><div class="metric-value" style="font-size:16px;">${escapeHtml(configuredCallerId || "Not set")}</div></div>
+          </div>
+          ${configuredCallerId && !looksLikeUuid(configuredCallerId) ? `
+            <div style="margin-top:12px; padding:12px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412;">
+              <strong>Action needed:</strong> YAY_SMS_CALLER_ID_UUID currently does not look like a UUID. Once you find the correct UUID below, replace the phone number in Render with that UUID.
+            </div>
+          ` : ""}
+          ${errorMessage ? `<div style="margin-top:12px; padding:12px; border-radius:14px; background:#fee2e2; border:1px solid #fecaca; color:#991b1b;"><strong>Yay API error:</strong> ${escapeHtml(errorMessage)}</div>` : ""}
+        </div>
+
+        <div class="panel">
+          <h2>Caller IDs returned by Yay</h2>
+          <table>
+            <thead><tr><th>Label</th><th>Number / caller ID</th><th>UUID</th><th>Status</th></tr></thead>
+            <tbody>${rowHtml}</tbody>
+          </table>
+          <p class="muted-note">Find the row for 02080501579, copy the UUID, then paste it into Render as YAY_SMS_CALLER_ID_UUID.</p>
+        </div>
+
+        <div class="panel">
+          <h2>Raw Yay response</h2>
+          <pre style="white-space:pre-wrap; font-size:12px; background:#111827; color:#f9fafb; padding:14px; border-radius:14px; overflow:auto; max-height:420px;">${escapeHtml(apiResult ? JSON.stringify(apiResult.json || apiResult.text, null, 2) : "No response yet")}</pre>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Yay caller ID lookup error:", error);
+    res.status(500).send("Yay caller ID lookup error. Check Render logs.");
   }
 });
 
@@ -7082,6 +7424,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
       LIMIT 40
     `, [id])).rows;
 
+    const smsRows = (await pool.query(`
+      SELECT * FROM job_sms_log
+      WHERE job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 30
+    `, [id])).rows;
+
     const activityItems = [
       { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
       { label: "Current status", value: jobStatusLabel(job.status) },
@@ -7300,6 +7649,22 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 <button class="copy-mini" type="button" onclick="copySummary()">Copy summary</button>
               </div>
 
+              <div class="control-card" id="sms-card">
+                <h2>Send SMS</h2>
+                ${renderSmsConfigNotice()}
+                <form method="POST" action="/jobs/${job.id}/send-sms" class="quick-form" onsubmit="return confirm('Send this SMS to the customer?');">
+                  <label>Template</label>
+                  <select id="sms_template" name="sms_type">${smsTemplateOptions(job)}</select>
+                  <label>Send to</label>
+                  <input name="sms_to" value="${escapeHtml(job.customer_phone || '')}" placeholder="Customer mobile number" required>
+                  <label>Message</label>
+                  <textarea id="sms_message" name="sms_message" rows="5" maxlength="480" placeholder="Choose a template or write a custom message" required>${escapeHtml(fillSmsTemplate(defaultSmsTemplates[0].message, job))}</textarea>
+                  <button type="submit">Send SMS</button>
+                  <p class="muted-note">Marketing-style messages, such as review requests and discounts, should only be sent where the client is allowed to contact the customer.</p>
+                </form>
+                ${renderSmsHistory(smsRows)}
+              </div>
+
               <div class="control-card">
                 <h2>Payment chase</h2>
                 <p class="muted-note">Use this when a job is partially or fully unpaid. Log the chase, outcome and next follow-up date.</p>
@@ -7347,6 +7712,19 @@ app.get("/jobs/:id/edit", async (req, res) => {
             box.select();
             document.execCommand("copy");
             alert("Technician summary copied.");
+          }
+
+          const smsTemplateSelect = document.getElementById("sms_template");
+          const smsMessageBox = document.getElementById("sms_message");
+          function updateSmsMessageFromTemplate() {
+            if (!smsTemplateSelect || !smsMessageBox) return;
+            const option = smsTemplateSelect.options[smsTemplateSelect.selectedIndex];
+            const message = option ? option.getAttribute("data-message") : "";
+            if (smsTemplateSelect.value !== "custom") smsMessageBox.value = message || "";
+            if (smsTemplateSelect.value === "custom" && !smsMessageBox.value.trim()) smsMessageBox.value = "";
+          }
+          if (smsTemplateSelect) {
+            smsTemplateSelect.addEventListener("change", updateSmsMessageFromTemplate);
           }
 
 
@@ -7446,6 +7824,50 @@ app.post("/jobs/:id/evidence", async (req, res) => {
   } catch (error) {
     console.error("Add job evidence error:", error);
     res.status(500).send("Could not add job evidence link. Check Render logs.");
+  }
+});
+
+
+app.post("/jobs/:id/send-sms", async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const jobResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+    const job = jobResult.rows[0];
+    const smsType = String(req.body.sms_type || "custom").trim();
+    const template = smsTemplateByKey(smsType);
+    const to = cleanSmsNumber(req.body.sms_to || job.customer_phone);
+    const message = String(req.body.sms_message || fillSmsTemplate(template.message, job)).trim();
+    if (!to) return res.status(400).send("SMS recipient number is missing.");
+    if (!message) return res.status(400).send("SMS message is missing.");
+
+    let status = "sent";
+    let providerResponse = "";
+    try {
+      const sendResult = await sendYaySms(to, message, `${job.job_number || jobNumber(job.id)} - ${template.name}`);
+      status = sendResult.status;
+      providerResponse = sendResult.providerResponse;
+    } catch (sendError) {
+      status = "failed";
+      providerResponse = sendError.message;
+      console.error("Yay SMS send error:", sendError);
+    }
+
+    await pool.query(`
+      INSERT INTO job_sms_log (job_id, sent_to, sms_type, template_name, message_body, status, provider, provider_response, sent_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, 'yay', $7, $8, NOW())
+    `, [id, to, smsType, template.name, message, status, providerResponse, currentAgentName(req) || "Unknown"]);
+
+    await addJobAuditEntry(id, "sms_sent", "SMS", "—", `${template.name} to ${to}: ${status}`, currentAgentName(req) || "Unknown");
+    res.redirect(`/jobs/${id}/edit#sms-card`);
+  } catch (error) {
+    console.error("Send SMS route error:", error);
+    res.status(500).send("Could not send/log SMS. Check Render logs.");
   }
 });
 
