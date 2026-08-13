@@ -1280,10 +1280,56 @@ function yayAuthHeaders() {
   return {
     "Content-Type": "application/json",
     "Accept": "application/json",
+    "User-Agent": "YourDispatchPartnerPortal/1.0 (+https://yay-wallboard.onrender.com)",
     "X-Auth-Reseller": String(process.env.YAY_AUTH_RESELLER || "").trim(),
     "X-Auth-User": String(process.env.YAY_AUTH_USER || "").trim(),
     "X-Auth-Password": String(process.env.YAY_AUTH_PASSWORD || "").trim()
   };
+}
+
+function maskedYayAuthSummary() {
+  const reseller = String(process.env.YAY_AUTH_RESELLER || "").trim();
+  const user = String(process.env.YAY_AUTH_USER || "").trim();
+  const password = String(process.env.YAY_AUTH_PASSWORD || "");
+  return {
+    host: yayApiHost(),
+    reseller_present: Boolean(reseller),
+    reseller_start: reseller ? reseller.slice(0, 6) : "",
+    reseller_length: reseller.length,
+    user,
+    password_present: Boolean(password),
+    password_length: password.length,
+    user_agent_added: true
+  };
+}
+
+async function yayApiDebugRequest(method, path, body = null) {
+  const url = `${yayApiHost()}${path}`;
+  const started = Date.now();
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: yayAuthHeaders(),
+      body: body === null ? undefined : JSON.stringify(body)
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) {}
+    return {
+      path,
+      method,
+      url,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      ms: Date.now() - started,
+      contentType: response.headers.get("content-type") || "",
+      text: text ? text.slice(0, 4000) : "",
+      json
+    };
+  } catch (error) {
+    return { path, method, url, ok: false, status: "FETCH_ERROR", statusText: error.message, ms: Date.now() - started, text: error.stack || error.message };
+  }
 }
 
 function looksLikeUuid(value) {
@@ -3466,13 +3512,23 @@ app.get("/admin/yay-caller-ids", async (req, res) => {
     let apiResult = null;
     let rows = [];
     let errorMessage = "";
+    let debugResults = [];
 
     if (yayAuthConfigured()) {
-      try {
-        apiResult = await yayApiRequest("GET", "/voip/caller-id", null);
-        rows = flattenYayCallerIds(apiResult.json || {});
-      } catch (error) {
-        errorMessage = error.message;
+      debugResults = [
+        await yayApiDebugRequest("GET", "/authenticated", null),
+        await yayApiDebugRequest("GET", "/voip/caller-id", null),
+        await yayApiDebugRequest("GET", "/voip/caller-id/cli", null)
+      ];
+
+      const firstGoodCallerId = debugResults.find(result => result.ok && (result.path === "/voip/caller-id" || result.path === "/voip/caller-id/cli"));
+      if (firstGoodCallerId) {
+        apiResult = { json: firstGoodCallerId.json, text: firstGoodCallerId.text, status: firstGoodCallerId.status };
+        rows = flattenYayCallerIds(firstGoodCallerId.json || {});
+      } else {
+        const authCheck = debugResults.find(result => result.path === "/authenticated");
+        const callerCheck = debugResults.find(result => result.path === "/voip/caller-id") || debugResults[0];
+        errorMessage = `Yay API failed. Auth test ${authCheck ? authCheck.status : "not run"}; caller ID test ${callerCheck ? callerCheck.status : "not run"}. See diagnostics below.`;
       }
     } else {
       errorMessage = "Yay auth variables are missing in Render.";
@@ -3525,8 +3581,14 @@ app.get("/admin/yay-caller-ids", async (req, res) => {
         </div>
 
         <div class="panel">
+          <h2>Yay diagnostics</h2>
+          <p class="muted-note">This safely shows whether Render has the values and which Yay endpoint is rejecting the request. Passwords are not displayed.</p>
+          <pre style="white-space:pre-wrap; font-size:12px; background:#111827; color:#f9fafb; padding:14px; border-radius:14px; overflow:auto; max-height:520px;">${escapeHtml(JSON.stringify({ auth_summary: maskedYayAuthSummary(), tests: debugResults }, null, 2))}</pre>
+        </div>
+
+        <div class="panel">
           <h2>Raw Yay response</h2>
-          <pre style="white-space:pre-wrap; font-size:12px; background:#111827; color:#f9fafb; padding:14px; border-radius:14px; overflow:auto; max-height:420px;">${escapeHtml(apiResult ? JSON.stringify(apiResult.json || apiResult.text, null, 2) : "No response yet")}</pre>
+          <pre style="white-space:pre-wrap; font-size:12px; background:#111827; color:#f9fafb; padding:14px; border-radius:14px; overflow:auto; max-height:420px;">${escapeHtml(apiResult ? JSON.stringify(apiResult.json || apiResult.text, null, 2) : "No successful caller ID response yet")}</pre>
         </div>
       </body>
       </html>
