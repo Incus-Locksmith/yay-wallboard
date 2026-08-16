@@ -2592,6 +2592,27 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_source_campaign_idx ON jobs (source_campaign);`);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS deleted_jobs_log (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER,
+      job_number TEXT,
+      postcode TEXT,
+      customer_name TEXT,
+      deleted_by TEXT,
+      deleted_at TIMESTAMP DEFAULT NOW(),
+      job_snapshot JSONB
+    );
+  `);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS job_number TEXT;`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS postcode TEXT;`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS customer_name TEXT;`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS deleted_by TEXT;`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE deleted_jobs_log ADD COLUMN IF NOT EXISTS job_snapshot JSONB;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS deleted_jobs_log_deleted_at_idx ON deleted_jobs_log (deleted_at DESC);`);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS job_audit_log (
       id SERIAL PRIMARY KEY,
       job_id INTEGER NOT NULL,
@@ -6475,7 +6496,14 @@ app.get("/jobs", async (req, res) => {
           <td>${escapeHtml(job.dispatcher_name || "Unknown")}</td>
           <td><strong>${escapeHtml(job.customer_name || "—")}</strong><div class="small-muted">${customerPhone}</div></td>
           <td>${formatDateTime(job.created_at)}</td>
-          <td><a class="view-button" href="/jobs/${job.id}/edit">View</a></td>
+          <td>
+            <div class="job-row-actions">
+              <a class="view-button" href="/jobs/${job.id}/edit">View</a>
+              <form method="POST" action="/jobs/${job.id}/delete" onsubmit="return confirm('Are you sure you want to delete this job? This cannot be undone.');">
+                <button class="delete-job-button" type="submit">Delete</button>
+              </form>
+            </div>
+          </td>
         </tr>
       `;
     }).join("");
@@ -6577,6 +6605,10 @@ app.get("/jobs", async (req, res) => {
           .small-muted { color: #667085; font-size: 12px; line-height: 1.35; margin-top: 3px; }
           .phone-link { color: #2563eb; font-weight: 800; text-decoration: none; }
           .view-button { display: inline-block; background: var(--charcoal); color: white; border-radius: 10px; padding: 7px 12px; text-decoration: none; font-weight: 900; font-size: 12px; }
+          .job-row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+          .job-row-actions form { margin: 0; }
+          .delete-job-button { border: 0; background: var(--brand-red); color: white; border-radius: 10px; padding: 7px 12px; font-weight: 900; font-size: 12px; cursor: pointer; }
+          .delete-job-button:hover { filter: brightness(.95); }
           .control-card { margin: 18px; padding: 16px; background: #f9fafb; border: 1px solid #eef0f3; border-radius: 16px; }
           .control-card-label { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; }
           .control-card-value { color: #111827; font-size: 28px; font-weight: 900; margin-top: 6px; }
@@ -6714,6 +6746,53 @@ app.get("/jobs", async (req, res) => {
   } catch (error) {
     console.error("Jobs page error:", error);
     res.status(500).send(`Dispatch Board error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
+  }
+});
+
+app.post("/jobs/:id/delete", async (req, res) => {
+  const jobId = Number(req.params.id);
+  if (!Number.isFinite(jobId)) return res.redirect("/jobs");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const jobResult = await client.query(`SELECT * FROM jobs WHERE id = $1`, [jobId]);
+    const job = jobResult.rows[0];
+    if (!job) {
+      await client.query("ROLLBACK");
+      return res.redirect("/jobs");
+    }
+
+    await client.query(`
+      INSERT INTO deleted_jobs_log (job_id, job_number, postcode, customer_name, deleted_by, deleted_at, job_snapshot)
+      VALUES ($1, $2, $3, $4, $5, NOW(), $6::jsonb)
+    `, [
+      job.id,
+      job.job_number || jobNumber(job.id),
+      job.postcode || "",
+      job.customer_name || "",
+      currentAgentName(req) || "Unknown",
+      JSON.stringify(job)
+    ]);
+
+    await client.query(`DELETE FROM job_sms_log WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM job_evidence_links WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM job_payment_chases WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM job_audit_log WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM disputes WHERE job_id = $1`, [jobId]);
+    await client.query(`UPDATE quotations SET converted_job_id = NULL WHERE converted_job_id = $1`, [jobId]);
+    await client.query(`UPDATE quotations SET source_job_id = NULL WHERE source_job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM jobs WHERE id = $1`, [jobId]);
+
+    await client.query("COMMIT");
+    res.redirect("/jobs?deleted=1");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Delete job error:", error);
+    res.status(500).send(`Delete job error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
+  } finally {
+    client.release();
   }
 });
 
