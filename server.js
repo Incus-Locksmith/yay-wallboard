@@ -1401,34 +1401,45 @@ async function yayApiRequest(method, path, body = null) {
   return { text: providerText, json: parsed, status: response.status };
 }
 
+function yayFutureSendOn(minutesAhead = 15) {
+  // Yay rejects send_on if it is too close to their current server time.
+  // Use a safe future time, rounded to whole seconds with no milliseconds.
+  const date = new Date(Date.now() + minutesAhead * 60 * 1000);
+  date.setMilliseconds(0);
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 async function sendYaySms(to, message, campaignName = "Portal SMS") {
   if (!smsProviderConfigured()) {
     return { status: "not_sent", providerResponse: "Yay SMS environment variables missing or caller ID UUID not set" };
   }
 
   const recipient = normaliseYaySmsRecipient(to);
+  const sendOn = yayFutureSendOn(15);
+
+  // Yay's campaign confirm endpoint has returned 404 for a newly-created draft campaign in live testing.
+  // To avoid creating a draft that cannot be confirmed, create the campaign as non-draft so Yay queues it directly.
+  // send_on still has to be in the future, so we use a safe fifteen-minute buffer.
   const payload = {
     campaign_name: campaignName,
     message_content: message,
     caller_id_uuid: String(process.env.YAY_SMS_CALLER_ID_UUID || "").trim(),
-    // Yay requires send_on to be in the future, even for immediate sends.
-    // We create the campaign two minutes ahead, then confirm it straight away.
-    send_on: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
-    is_draft: true,
+    send_on: sendOn,
+    is_draft: false,
     recipients: [{ phone_number: recipient }]
   };
 
   const created = await yayApiRequest("POST", "/voip/text-message/campaign", payload);
-  const campaignUuid = created.json?.result?.uuid || created.json?.uuid;
+  const campaignUuid = created.json?.result?.uuid || created.json?.uuid || "";
 
-  if (!campaignUuid) {
-    return { status: "draft_created", providerResponse: created.text || "Yay campaign draft created but UUID was not found in response" };
-  }
-
-  const confirmed = await yayApiRequest("PUT", `/voip/text-message/campaign/${campaignUuid}/confirm`, null);
   return {
-    status: "sent",
-    providerResponse: JSON.stringify({ created: created.json || created.text, confirmed: confirmed.json || confirmed.text }).slice(0, 1200)
+    status: "queued",
+    providerResponse: JSON.stringify({
+      send_on: sendOn,
+      campaign_uuid: campaignUuid,
+      note: "Created with is_draft=false so Yay queues the campaign directly.",
+      created: created.json || created.text
+    }).slice(0, 1600)
   };
 }
 
