@@ -1401,7 +1401,7 @@ async function yayApiRequest(method, path, body = null) {
   return { text: providerText, json: parsed, status: response.status };
 }
 
-function yayFutureSendOn(minutesAhead = 15) {
+function yayFutureSendOn(minutesAhead = 2) {
   // Yay rejects send_on if it is too close to their current server time.
   // Use a safe future time, rounded to whole seconds with no milliseconds.
   const date = new Date(Date.now() + minutesAhead * 60 * 1000);
@@ -1415,7 +1415,7 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
   }
 
   const recipient = normaliseYaySmsRecipient(to);
-  const sendOn = yayFutureSendOn(15);
+  const sendOn = yayFutureSendOn(2);
 
   // Yay's campaign confirm endpoint has returned 404 for a newly-created draft campaign in live testing.
   // To avoid creating a draft that cannot be confirmed, create the campaign as non-draft so Yay queues it directly.
