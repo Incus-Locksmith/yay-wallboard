@@ -1411,7 +1411,9 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
     campaign_name: campaignName,
     message_content: message,
     caller_id_uuid: String(process.env.YAY_SMS_CALLER_ID_UUID || "").trim(),
-    send_on: new Date().toISOString(),
+    // Yay requires send_on to be in the future, even for immediate sends.
+    // We create the campaign two minutes ahead, then confirm it straight away.
+    send_on: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
     is_draft: true,
     recipients: [{ phone_number: recipient }]
   };
