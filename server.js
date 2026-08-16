@@ -6497,12 +6497,7 @@ app.get("/jobs", async (req, res) => {
           <td><strong>${escapeHtml(job.customer_name || "—")}</strong><div class="small-muted">${customerPhone}</div></td>
           <td>${formatDateTime(job.created_at)}</td>
           <td>
-            <div class="job-row-actions">
-              <a class="view-button" href="/jobs/${job.id}/edit">View</a>
-              <form method="POST" action="/jobs/${job.id}/delete" onsubmit="return confirm('Are you sure you want to delete this job? This cannot be undone.');">
-                <button class="delete-job-button" type="submit">Delete</button>
-              </form>
-            </div>
+            <a class="view-button" href="/jobs/${job.id}/edit">View</a>
           </td>
         </tr>
       `;
@@ -7657,6 +7652,10 @@ app.get("/jobs/:id/edit", async (req, res) => {
           .edit-form-grid input, .edit-form-grid select, .edit-form-grid textarea { width: 100%; }
           .copy-mini { background:#26323a; color:white; border:none; border-radius:12px; font-weight:900; padding:11px 14px; cursor:pointer; }
           .muted-note { color:#6b7280; font-size:13px; line-height:1.4; }
+          .danger-zone-card { border: 1px solid #fecaca; background: #fff7f7; }
+          .danger-zone-card details summary { cursor: pointer; color: #991b1b; font-weight: 900; font-size: 13px; }
+          .danger-zone-card p { color: #7f1d1d; font-size: 12px; line-height: 1.5; }
+          .danger-zone-card .delete-job-button { margin-top: 8px; }
           .pill-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
           @media (max-width: 1180px) {
             .job-control-grid { grid-template-columns: 1fr; }
@@ -7855,6 +7854,16 @@ app.get("/jobs/:id/edit", async (req, res) => {
               <div class="control-card">
                 <h2>Audit trail</h2>
                 ${renderJobAuditTrail(auditRows)}
+              </div>
+
+              <div class="control-card danger-zone-card">
+                <details>
+                  <summary>Danger zone</summary>
+                  <p>Only delete a job if it was created in error. This removes it from the live portal, but keeps an internal deleted-job snapshot.</p>
+                  <form method="POST" action="/jobs/${job.id}/delete" onsubmit="return confirm('Are you sure you want to delete this job? This cannot be undone.');">
+                    <button class="delete-job-button" type="submit">Delete this job</button>
+                  </form>
+                </details>
               </div>
             </aside>
           </div>
