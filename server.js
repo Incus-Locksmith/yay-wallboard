@@ -1520,6 +1520,55 @@ function buildStripePaymentSms(job, link) {
   return `Hi ${job.customer_name || "there"}, please use this secure payment link for your locksmith job ${ref}: ${link.payment_url}. 24H Locksmiths: ${tel}. Please do not reply to this SMS.`;
 }
 
+function renderTechnicianStripePaymentArea(job, token, rows = []) {
+  const configError = stripeConfigurationError();
+  const defaultAmount = jobOutstandingAmount(job);
+  const defaultReason = `Locksmith services${job.postcode ? ` (${job.postcode})` : ""}`;
+  const recentRows = (rows || []).slice(0, 3);
+
+  const historyHtml = recentRows.length ? `
+    <div style="margin-top:12px;">
+      ${recentRows.map(row => `
+        <div style="border-top:1px solid #e2e8f0; padding:10px 0;">
+          <div style="font-weight:900;">${money(row.amount || 0)} · ${escapeHtml(row.reason || "Stripe payment link")}</div>
+          <div class="job-sub" style="margin-top:3px;">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+            <a class="button dark" style="padding:9px 12px;" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open link</a>
+            <button class="button amber" style="padding:9px 12px;" type="button" data-link="${escapeHtml(row.payment_url || "")}" onclick="navigator.clipboard.writeText(this.dataset.link).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy link',1400);}).catch(()=>window.prompt('Copy this Stripe link:',this.dataset.link));">Copy link</button>
+            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link/${row.id}/send-sms" style="margin:0;" onsubmit="return confirm('Send this Stripe payment link to the customer by SMS?');">
+              <button class="button green" style="padding:9px 12px;" type="submit">Send payment SMS</button>
+            </form>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  ` : `<div class="job-sub" style="margin-top:10px;">No Stripe links created for this job yet.</div>`;
+
+  return `
+    <div style="margin-top:16px;border-top:1px solid #e2e8f0;padding-top:14px;">
+      <div style="font-weight:900;font-size:15px;">Stripe payment link</div>
+      ${configError
+        ? `<div class="job-sub" style="color:#b91c1c;margin-top:6px;">Stripe unavailable: ${escapeHtml(configError)}</div>`
+        : `
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link" style="margin-top:10px;" onsubmit="return confirm('Create a LIVE Stripe payment link for this amount?');">
+            <div class="field-grid">
+              <div>
+                <label>Amount</label>
+                <input name="amount" inputmode="decimal" placeholder="£" value="${defaultAmount !== null ? Number(defaultAmount).toFixed(2) : ""}" required>
+              </div>
+              <div>
+                <label>Description</label>
+                <input name="reason" maxlength="180" value="${escapeHtml(defaultReason)}" required>
+              </div>
+            </div>
+            <button class="button green" type="submit" style="margin-top:10px;">Create Stripe link</button>
+          </form>
+        `}
+      ${historyHtml}
+    </div>
+  `;
+}
+
 function renderStripePaymentLinks(rows = []) {
   if (!rows.length) return `<p class="muted-note">No Stripe payment links created for this job yet.</p>`;
   return `
@@ -8013,7 +8062,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
               </div>
 
               <div class="control-card" id="stripe-card">
-                <h2>Stripe payment links <span class="muted" style="font-size:11px; font-weight:700;">v80</span></h2>
+                <h2>Stripe payment links <span class="muted" style="font-size:11px; font-weight:700;">v81</span></h2>
                 ${stripeReady() ? `<div class="stripe-warning ${stripeModeLabel() === "live" ? "stripe-live" : "stripe-ok"}">Stripe is configured in ${escapeHtml(stripeModeLabel()).toUpperCase()} mode. ${stripeModeLabel() === "live" ? "Live links can take real customer payments. Use a £1 amount for the first live test." : "Test links are safe for testing."}</div>` : `<div class="stripe-warning">Stripe is not ready: ${escapeHtml(stripeConfigurationError())}</div>`}
                 <form method="POST" action="/jobs/${job.id}/stripe-link" class="quick-form" onsubmit="return confirm('Create a Stripe payment link for this amount?');">
                   <label>Amount to request</label>
@@ -10039,6 +10088,21 @@ app.get('/tech-workspace/:token', async (req, res) => {
         j.created_at DESC
     `, values)).rows;
 
+    const technicianStripeLinksByJob = new Map();
+    if (jobs.length) {
+      const stripeRows = (await pool.query(`
+        SELECT *
+        FROM job_payment_links
+        WHERE job_id = ANY($1::int[])
+        ORDER BY created_at DESC, id DESC
+      `, [jobs.map(job => Number(job.id))])).rows;
+      for (const row of stripeRows) {
+        const key = Number(row.job_id);
+        if (!technicianStripeLinksByJob.has(key)) technicianStripeLinksByJob.set(key, []);
+        technicianStripeLinksByJob.get(key).push(row);
+      }
+    }
+
     const openDisputes = await getOpenDisputesForTechnician(tech);
     const disputeNotice = openDisputes.length ? `
       <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
@@ -10058,7 +10122,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
     ].join('');
 
     const jobCards = jobs.map(job => `
-      <div class="job-card">
+      <div class="job-card" id="job-${job.id}">
         <div class="job-head">
           <div>
             <h2 class="job-title">${escapeHtml(job.postcode || job.job_number || 'Job')}</h2>
@@ -10079,6 +10143,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
           </form>
           <a class="button red" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
         </div>
+        ${renderTechnicianStripePaymentArea(job, token, technicianStripeLinksByJob.get(Number(job.id)) || [])}
       </div>
     `).join('');
 
@@ -10114,6 +10179,181 @@ app.get('/tech-workspace/:token', async (req, res) => {
   } catch (error) {
     console.error('Technician workspace error:', error);
     res.status(500).send('Technician workspace error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/stripe-link', async (req, res) => {
+  const token = req.params.token;
+  const id = Number(req.params.id);
+  const client = await pool.connect();
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+
+    const jobResult = await client.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE j.id = $1
+        AND (
+          j.assigned_technician_id = $2
+          OR j.assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [id, tech.id, tech.name]);
+
+    if (!jobResult.rows.length) return res.status(403).send('This job is not assigned to your technician account.');
+    const job = jobResult.rows[0];
+
+    const amount = parseMoneyInput(req.body.amount);
+    const reason = String(req.body.reason || `Locksmith services${job.postcode ? ` (${job.postcode})` : ""}`).trim().slice(0, 180);
+
+    if (!amount || amount <= 0) return res.status(400).send('Stripe amount must be greater than zero.');
+    if (amount > 999999.99) return res.status(400).send('Stripe amount is too large. Please check the amount entered.');
+
+    const configError = stripeConfigurationError();
+    if (configError) return res.status(400).send(`Stripe is not ready: ${escapeHtml(configError)}`);
+
+    const unitAmount = Math.round(amount * 100);
+    const ref = job.job_number || jobNumber(job.id);
+    const createdBy = `${tech.name} workspace`;
+
+    const form = new URLSearchParams();
+    form.append('line_items[0][quantity]', '1');
+    form.append('line_items[0][price_data][currency]', 'gbp');
+    form.append('line_items[0][price_data][unit_amount]', String(unitAmount));
+    form.append('line_items[0][price_data][product_data][name]', `24H Locksmiths payment ${ref}`);
+    form.append('line_items[0][price_data][product_data][description]', reason.slice(0, 240));
+    form.append('metadata[job_id]', String(job.id));
+    form.append('metadata[job_number]', ref);
+    form.append('metadata[postcode]', job.postcode || '');
+    form.append('metadata[created_by]', createdBy);
+    form.append('payment_method_types[0]', 'card');
+
+    const stripeResult = await stripeApiFormRequest('/v1/payment_links', form);
+    const paymentLink = stripeResult.json || {};
+    if (!paymentLink.url) throw new Error('Stripe did not return a payment link URL.');
+
+    await client.query(`
+      INSERT INTO job_payment_links (
+        job_id, provider, amount, currency, reason, payment_url,
+        provider_session_id, status, stripe_mode, provider_response,
+        created_by, created_at
+      )
+      VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
+    `, [
+      id,
+      amount,
+      reason,
+      paymentLink.url,
+      paymentLink.id || '',
+      stripeModeLabel(),
+      JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
+      createdBy
+    ]);
+
+    await addJobAuditEntry(
+      id,
+      'stripe_link_created',
+      'Stripe payment link',
+      '—',
+      `${money(amount)} ${reason}`,
+      createdBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${id}`);
+  } catch (error) {
+    console.error('Technician Stripe payment link error:', error);
+    res.status(500).send(`Stripe payment link error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/send-sms', async (req, res) => {
+  const token = req.params.token;
+  const id = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+
+    const jobResult = await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE j.id = $1
+        AND (
+          j.assigned_technician_id = $2
+          OR j.assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [id, tech.id, tech.name]);
+
+    if (!jobResult.rows.length) return res.status(403).send('This job is not assigned to your technician account.');
+    const job = jobResult.rows[0];
+
+    const linkResult = await pool.query(
+      `SELECT * FROM job_payment_links WHERE id = $1 AND job_id = $2`,
+      [linkId, id]
+    );
+    if (!linkResult.rows.length) return res.status(404).send('Payment link not found');
+    const link = linkResult.rows[0];
+
+    const to = cleanSmsNumber(job.customer_phone);
+    if (!to) return res.status(400).send('Customer phone number is missing.');
+
+    const message = buildStripePaymentSms(job, link);
+    let status = 'sent';
+    let providerResponse = '';
+
+    try {
+      const sendResult = await sendYaySms(to, message, `${job.job_number || jobNumber(job.id)} - Stripe payment link`);
+      status = sendResult.status;
+      providerResponse = sendResult.providerResponse;
+    } catch (sendError) {
+      status = 'failed';
+      providerResponse = sendError.message;
+      console.error('Technician Stripe payment SMS error:', sendError);
+    }
+
+    const sentBy = `${tech.name} workspace`;
+
+    await pool.query(`
+      INSERT INTO job_sms_log (
+        job_id, sent_to, sms_type, template_name, message_body,
+        status, provider, provider_response, sent_by, created_at
+      )
+      VALUES ($1, $2, 'stripe_payment_link', 'Stripe payment link', $3, $4, 'yay', $5, $6, NOW())
+    `, [id, to, message, status, providerResponse, sentBy]);
+
+    await pool.query(`
+      UPDATE job_payment_links
+      SET sent_at = NOW(),
+          sent_by = $1,
+          status = CASE WHEN $2 = 'failed' THEN 'sms_failed' ELSE 'sms_sent' END
+      WHERE id = $3 AND job_id = $4
+    `, [sentBy, status, linkId, id]);
+
+    await addJobAuditEntry(
+      id,
+      'stripe_link_sms_sent',
+      'Stripe payment SMS',
+      '—',
+      `${money(link.amount)} link to ${to}: ${status}`,
+      sentBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${id}`);
+  } catch (error) {
+    console.error('Technician Stripe payment SMS route error:', error);
+    res.status(500).send('Could not send Stripe payment SMS. Check Render logs.');
   }
 });
 
