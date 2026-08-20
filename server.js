@@ -1490,6 +1490,82 @@ function jobOutstandingAmount(job) {
   return outstanding > 0 ? outstanding : null;
 }
 
+function stripeVatBreakdown(grossAmount) {
+  const grossPence = Math.round((Number(grossAmount) || 0) * 100);
+  const netPence = Math.round(grossPence / 1.2);
+  const vatPence = grossPence - netPence;
+  return {
+    net: netPence / 100,
+    vat: vatPence / 100,
+    gross: grossPence / 100
+  };
+}
+
+function stripeInvoiceAddress(job) {
+  return [job.address_line_1, job.address_line_2, job.address_line_3, job.town, job.county]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function nextStripeInvoiceNumber(client, job) {
+  const ref = String(job.job_number || jobNumber(job.id)).trim();
+  const existing = (await client.query(`
+    SELECT invoice_number
+    FROM invoices
+    WHERE invoice_number = $1 OR invoice_number LIKE $2
+    ORDER BY id ASC
+  `, [ref, `${ref}-%`])).rows;
+  if (!existing.length) return ref;
+  const used = new Set(existing.map(row => String(row.invoice_number || "")));
+  let suffix = 2;
+  while (used.has(`${ref}-${suffix}`)) suffix += 1;
+  return `${ref}-${suffix}`;
+}
+
+async function createStripeInvoiceForJob(client, { job, grossAmount, reason, createdBy, locksmithName, paymentLinkId }) {
+  const breakdown = stripeVatBreakdown(grossAmount);
+  const invoiceNumber = await nextStripeInvoiceNumber(client, job);
+  const invoiceDate = new Date().toISOString().slice(0, 10);
+  const customerAddress = stripeInvoiceAddress(job);
+  const postcode = compactPostcode(job.postcode || "");
+  const lineItems = [{ description: reason || `Locksmith services${postcode ? ` (${postcode})` : ""}`, qty: 1, unitPrice: breakdown.net }];
+
+  const result = await client.query(`
+    INSERT INTO invoices (
+      invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
+      stage_updated_by, stage_updated_at, customer_name, customer_address,
+      customer_postcode, site_same_as_invoice, site_address, site_postcode,
+      customer_email, invoice_date, locksmith_name, paid_status, line_items,
+      subtotal, vat_amount, total, notes, source_job_id, stripe_payment_link_id, updated_at
+    ) VALUES (
+      $1, 'online', 'Card', $2, 'Draft only',
+      $2, NOW(), $3, $4,
+      $5, TRUE, $4, $5,
+      $6, $7, $8, 'Unpaid', $9,
+      $10, $11, $12, $13, $14, $15, NOW()
+    )
+    RETURNING id, invoice_number
+  `, [
+    invoiceNumber,
+    createdBy,
+    job.customer_name || "Customer",
+    customerAddress,
+    postcode,
+    job.customer_email || "",
+    invoiceDate,
+    locksmithName || job.technician_name || "",
+    JSON.stringify(lineItems),
+    breakdown.net.toFixed(2),
+    breakdown.vat.toFixed(2),
+    breakdown.gross.toFixed(2),
+    "6 months warranty on parts fitted",
+    Number(job.id),
+    Number(paymentLinkId)
+  ]);
+
+  return { ...result.rows[0], ...breakdown };
+}
+
 async function stripeApiFormRequest(path, formData) {
   const configError = stripeConfigurationError();
   if (configError) throw new Error(configError);
@@ -1517,7 +1593,7 @@ async function stripeApiFormRequest(path, formData) {
 function buildStripePaymentSms(job, link) {
   const tel = process.env.SMS_OFFICE_TEL || companies.locksmiths.tel || "020 3870 3732";
   const ref = job.job_number || jobNumber(job.id);
-  return `Hi ${job.customer_name || "there"}, please use this secure payment link for your locksmith job ${ref}: ${link.payment_url}. 24H Locksmiths: ${tel}. Please do not reply to this SMS.`;
+  return `Hi ${job.customer_name || "there"}, your invoice has been created for locksmith job ${ref}. Please pay securely here: ${link.payment_url}. 24H Locksmiths: ${tel}. Please do not reply to this SMS.`;
 }
 
 function renderTechnicianStripePaymentArea(job, token, rows = []) {
@@ -1530,10 +1606,12 @@ function renderTechnicianStripePaymentArea(job, token, rows = []) {
     <div style="margin-top:12px;">
       ${recentRows.map(row => `
         <div style="border-top:1px solid #e2e8f0; padding:10px 0;">
-          <div style="font-weight:900;">${money(row.amount || 0)} · ${escapeHtml(row.reason || "Stripe payment link")}</div>
+          <div style="font-weight:900;">${money(row.amount || 0)} GROSS · ${escapeHtml(row.reason || "Stripe payment link")}</div>
+          <div class="job-sub" style="margin-top:3px;">NET ${money(stripeVatBreakdown(row.amount || 0).net)} · VAT @ 20% ${money(stripeVatBreakdown(row.amount || 0).vat)} · GROSS ${money(stripeVatBreakdown(row.amount || 0).gross)}</div>
           <div class="job-sub" style="margin-top:3px;">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")}</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-            <a class="button dark" style="padding:9px 12px;" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open link</a>
+            <a class="button dark" style="padding:9px 12px;" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open payment link</a>
+            ${row.invoice_id ? `<a class="button dark" style="padding:9px 12px;" href="/invoices/${row.invoice_id}/pdf" target="_blank" rel="noopener noreferrer">View invoice</a><a class="button amber" style="padding:9px 12px;" href="/invoices/${row.invoice_id}/pdf?download=1">Download invoice</a>` : ""}
             <button class="button amber" style="padding:9px 12px;" type="button" data-link="${escapeHtml(row.payment_url || "")}" onclick="navigator.clipboard.writeText(this.dataset.link).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy link',1400);}).catch(()=>window.prompt('Copy this Stripe link:',this.dataset.link));">Copy link</button>
             <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link/${row.id}/send-sms" style="margin:0;" onsubmit="return confirm('Send this Stripe payment link to the customer by SMS?');">
               <button class="button green" style="padding:9px 12px;" type="submit">Send payment SMS</button>
@@ -1546,22 +1624,24 @@ function renderTechnicianStripePaymentArea(job, token, rows = []) {
 
   return `
     <div style="margin-top:16px;border-top:1px solid #e2e8f0;padding-top:14px;">
-      <div style="font-weight:900;font-size:15px;">Stripe payment link</div>
+      <div style="font-weight:900;font-size:15px;">Invoice + Stripe payment</div>
       ${configError
         ? `<div class="job-sub" style="color:#b91c1c;margin-top:6px;">Stripe unavailable: ${escapeHtml(configError)}</div>`
         : `
-          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link" style="margin-top:10px;" onsubmit="return confirm('Create a LIVE Stripe payment link for this amount?');">
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link" style="margin-top:10px;" onsubmit="return confirm('Create a LIVE Stripe payment link AND invoice for this GROSS amount?');">
             <div class="field-grid">
               <div>
-                <label>Amount</label>
-                <input name="amount" inputmode="decimal" placeholder="£" value="${defaultAmount !== null ? Number(defaultAmount).toFixed(2) : ""}" required>
+                <label>GROSS amount customer will pay</label>
+                <input name="amount" inputmode="decimal" placeholder="£" value="${defaultAmount !== null ? Number(defaultAmount).toFixed(2) : ""}" oninput="updateStripeGrossBreakdownForInput(this)" required>
               </div>
               <div>
                 <label>Description</label>
                 <input name="reason" maxlength="180" value="${escapeHtml(defaultReason)}" required>
               </div>
             </div>
-            <button class="button green" type="submit" style="margin-top:10px;">Create Stripe link</button>
+            <div class="vat-preview" style="margin-top:10px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-weight:800;">${defaultAmount !== null ? `NET ${money(stripeVatBreakdown(defaultAmount).net)} · VAT @ 20% ${money(stripeVatBreakdown(defaultAmount).vat)} · GROSS ${money(stripeVatBreakdown(defaultAmount).gross)}` : "Enter the gross amount to see NET and VAT."}</div>
+            <div class="job-sub" style="margin-top:8px;">Invoice: 24H Online Services Ltd · Card · UK VAT 20%</div>
+            <button class="button green" type="submit" style="margin-top:10px;">Create Invoice & Stripe Link</button>
           </form>
         `}
       ${historyHtml}
@@ -1577,10 +1657,12 @@ function renderStripePaymentLinks(rows = []) {
         <div class="activity-item">
           <span class="activity-dot"></span>
           <div>
-            <div class="activity-label">${escapeHtml(row.status || "created")} · ${money(row.amount || 0)} · ${escapeHtml((row.currency || "GBP").toUpperCase())}</div>
+            <div class="activity-label">${escapeHtml(row.status || "created")} · GROSS ${money(row.amount || 0)} · ${escapeHtml((row.currency || "GBP").toUpperCase())}</div>
             <div class="activity-value">
               ${escapeHtml(row.reason || "Stripe payment link")}<br>
+              <span class="muted">NET ${money(stripeVatBreakdown(row.amount || 0).net)} · VAT @ 20% ${money(stripeVatBreakdown(row.amount || 0).vat)} · GROSS ${money(stripeVatBreakdown(row.amount || 0).gross)}</span><br>
               <a href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open Stripe link</a>
+              ${row.invoice_id ? ` · <a href="/invoices/${row.invoice_id}/pdf" target="_blank" rel="noopener noreferrer">View invoice</a> · <a href="/invoices/${row.invoice_id}/pdf?download=1">Download invoice</a>` : ""}
               <button class="copy-mini" type="button" style="margin-left:8px; padding:7px 10px;" data-link="${escapeHtml(row.payment_url || "")}" onclick="copyText(this.dataset.link)">Copy</button>
               <form method="POST" action="/jobs/${row.job_id}/stripe-link/${row.id}/send-sms" style="display:inline; margin-left:8px;" onsubmit="return confirm('Send this Stripe payment link by SMS?');">
                 <button type="submit" class="copy-mini" style="padding:7px 10px; background:#188a18;">Send SMS</button>
@@ -2594,6 +2676,10 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_job_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id INTEGER;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_source_job_idx ON invoices (source_job_id, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_stripe_link_idx ON invoices (stripe_payment_link_id);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -2859,7 +2945,8 @@ async function initDb() {
       created_by TEXT,
       created_at TIMESTAMP DEFAULT NOW(),
       sent_by TEXT,
-      sent_at TIMESTAMP
+      sent_at TIMESTAMP,
+      invoice_id INTEGER
     );
   `);
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
@@ -2876,7 +2963,9 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS invoice_id INTEGER;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_job_idx ON job_payment_links (job_id, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_invoice_idx ON job_payment_links (invoice_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_session_idx ON job_payment_links (provider_session_id);`);
 
 
@@ -4735,7 +4824,8 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const sitePostcode = siteSameAsInvoice ? invoice.customer_postcode : invoice.site_postcode;
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="invoice-${invoice.invoice_number}.pdf"`);
+    const invoiceDisposition = req.query.download === "1" ? "attachment" : "inline";
+    res.setHeader("Content-Disposition", `${invoiceDisposition}; filename="invoice-${invoice.invoice_number}.pdf"`);
 
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     doc.pipe(res);
@@ -4818,13 +4908,13 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     const totalsY = y + 18;
 
     doc.font("Helvetica").fontSize(10);
-    doc.text("Subtotal", 380, totalsY);
+    doc.text("NET", 380, totalsY);
     doc.text(money(invoice.subtotal), 480, totalsY);
-    doc.text("VAT", 380, totalsY + 18);
+    doc.text("VAT @ 20%", 380, totalsY + 18);
     doc.text(money(invoice.vat_amount), 480, totalsY + 18);
 
     doc.font("Helvetica-Bold");
-    doc.text("TOTAL", 380, totalsY + 38);
+    doc.text("TOTAL (GROSS)", 380, totalsY + 38);
     doc.text(money(invoice.total), 480, totalsY + 38);
 
     const paymentBoxY = totalsY + 78;
@@ -8062,15 +8152,17 @@ app.get("/jobs/:id/edit", async (req, res) => {
               </div>
 
               <div class="control-card" id="stripe-card">
-                <h2>Stripe payment links <span class="muted" style="font-size:11px; font-weight:700;">v81</span></h2>
+                <h2>Invoice + Stripe payment <span class="muted" style="font-size:11px; font-weight:700;">v82</span></h2>
                 ${stripeReady() ? `<div class="stripe-warning ${stripeModeLabel() === "live" ? "stripe-live" : "stripe-ok"}">Stripe is configured in ${escapeHtml(stripeModeLabel()).toUpperCase()} mode. ${stripeModeLabel() === "live" ? "Live links can take real customer payments. Use a £1 amount for the first live test." : "Test links are safe for testing."}</div>` : `<div class="stripe-warning">Stripe is not ready: ${escapeHtml(stripeConfigurationError())}</div>`}
-                <form method="POST" action="/jobs/${job.id}/stripe-link" class="quick-form" onsubmit="return confirm('Create a Stripe payment link for this amount?');">
-                  <label>Amount to request</label>
-                  <input name="amount" value="${jobOutstandingAmount(job) !== null ? Number(jobOutstandingAmount(job)).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 150.00" required>
+                <form method="POST" action="/jobs/${job.id}/stripe-link" class="quick-form" onsubmit="return confirm('Create an invoice AND Stripe payment link for this GROSS amount?');">
+                  <label>GROSS amount customer will pay</label>
+                  <input id="stripe-gross-amount" name="amount" value="${jobOutstandingAmount(job) !== null ? Number(jobOutstandingAmount(job)).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 150.00" oninput="updateStripeGrossBreakdown(this.value)" required>
                   <label>Payment reason / note</label>
                   <input name="reason" value="Locksmith services${job.postcode ? ` (${escapeHtml(job.postcode)})` : ""}" maxlength="180" required>
-                  <button type="submit" ${stripeReady() ? "" : "disabled"}>Create Stripe payment link</button>
-                  <p class="muted-note">Creates a reusable Stripe Payment Link and stores it against the job. Webhook auto-reconciliation is not enabled in this phase.</p>
+                  <div id="stripe-vat-preview" class="stripe-warning stripe-ok" style="margin-top:8px;">${jobOutstandingAmount(job) !== null ? `NET ${money(stripeVatBreakdown(jobOutstandingAmount(job)).net)} · VAT @ 20% ${money(stripeVatBreakdown(jobOutstandingAmount(job)).vat)} · GROSS ${money(stripeVatBreakdown(jobOutstandingAmount(job)).gross)}` : "Enter the gross amount to see NET and VAT."}</div>
+                  <p class="muted-note"><strong>Invoice:</strong> 24H Online Services Ltd · Card · UK VAT 20%</p>
+                  <button type="submit" ${stripeReady() ? "" : "disabled"}>Create Invoice & Stripe Link</button>
+                  <p class="muted-note">Creates the PDF invoice and reusable Stripe Payment Link together, both stored against this job. Webhook auto-reconciliation is not enabled yet.</p>
                 </form>
                 ${renderStripePaymentLinks(stripeRows)}
               </div>
@@ -8142,6 +8234,16 @@ app.get("/jobs/:id/edit", async (req, res) => {
           </div>
         </div>
         <script>
+          function updateStripeGrossBreakdown(value) {
+            const box = document.getElementById("stripe-vat-preview");
+            if (!box) return;
+            const gross = Number(String(value || "").replace(/[^0-9.-]/g, ""));
+            if (!Number.isFinite(gross) || gross <= 0) { box.textContent = "Enter the gross amount to see NET and VAT."; return; }
+            const grossPence = Math.round(gross * 100);
+            const netPence = Math.round(grossPence / 1.2);
+            const vatPence = grossPence - netPence;
+            box.textContent = "NET £" + (netPence / 100).toFixed(2) + " · VAT @ 20% £" + (vatPence / 100).toFixed(2) + " · GROSS £" + (grossPence / 100).toFixed(2);
+          }
           function copyText(text) {
             if (!text) return;
             navigator.clipboard.writeText(text).then(() => alert("Copied to clipboard."));
@@ -8301,22 +8403,61 @@ app.post("/jobs/:id/stripe-link", async (req, res) => {
     form.append("metadata[job_number]", ref);
     form.append("metadata[postcode]", job.postcode || "");
     form.append("metadata[created_by]", currentAgentName(req) || "Unknown");
+    const stripeBreakdown = stripeVatBreakdown(amount);
+    form.append("metadata[gross_amount]", stripeBreakdown.gross.toFixed(2));
+    form.append("metadata[net_amount]", stripeBreakdown.net.toFixed(2));
+    form.append("metadata[vat_amount]", stripeBreakdown.vat.toFixed(2));
+    form.append("metadata[vat_rate]", "20%");
     form.append("payment_method_types[0]", "card");
 
     const stripeResult = await stripeApiFormRequest("/v1/payment_links", form);
     const paymentLink = stripeResult.json || {};
     if (!paymentLink.url) throw new Error("Stripe did not return a payment link URL.");
 
-    await client.query(`
-      INSERT INTO job_payment_links (job_id, provider, amount, currency, reason, payment_url, provider_session_id, status, stripe_mode, provider_response, created_by, created_at)
-      VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
-    `, [
-      id, amount, reason, paymentLink.url, paymentLink.id || "", stripeModeLabel(),
-      JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
-      currentAgentName(req) || "Unknown"
-    ]);
+    const createdBy = currentAgentName(req) || "Unknown";
+    let paymentLinkRowId = null;
+    let invoiceRecord = null;
+    await client.query("BEGIN");
+    try {
+      const linkInsert = await client.query(`
+        INSERT INTO job_payment_links (job_id, provider, amount, currency, reason, payment_url, provider_session_id, status, stripe_mode, provider_response, created_by, created_at)
+        VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
+        RETURNING id
+      `, [
+        id, amount, reason, paymentLink.url, paymentLink.id || "", stripeModeLabel(),
+        JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
+        createdBy
+      ]);
+      paymentLinkRowId = linkInsert.rows[0].id;
+      invoiceRecord = await createStripeInvoiceForJob(client, {
+        job,
+        grossAmount: amount,
+        reason,
+        createdBy,
+        locksmithName: job.technician_name || "",
+        paymentLinkId: paymentLinkRowId
+      });
+      await client.query(`UPDATE job_payment_links SET invoice_id = $1 WHERE id = $2`, [invoiceRecord.id, paymentLinkRowId]);
+      await client.query("COMMIT");
+    } catch (dbError) {
+      await client.query("ROLLBACK");
+      try {
+        if (paymentLink.id) {
+          const deactivate = new URLSearchParams();
+          deactivate.append("active", "false");
+          await stripeApiFormRequest(`/v1/payment_links/${paymentLink.id}`, deactivate);
+        }
+      } catch (deactivateError) {
+        console.error("Could not deactivate orphan Stripe link after invoice/database failure:", deactivateError);
+      }
+      throw dbError;
+    }
 
-    await addJobAuditEntry(id, "stripe_link_created", "Stripe payment link", "—", `${money(amount)} ${reason}`, currentAgentName(req) || "Unknown");
+    try {
+      await addJobAuditEntry(id, "stripe_invoice_link_created", "Invoice + Stripe payment link", "—", `${invoiceRecord.invoice_number} · GROSS ${money(amount)} · NET ${money(invoiceRecord.net)} · VAT ${money(invoiceRecord.vat)} · ${reason}`, createdBy);
+    } catch (auditError) {
+      console.error("Stripe invoice/link audit error:", auditError);
+    }
     res.redirect(`/jobs/${id}/edit#stripe-card`);
   } catch (error) {
     console.error("Stripe payment link error:", error);
@@ -9776,7 +9917,21 @@ function technicianPortalShell(title, bodyHtml) {
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <style>${technicianWorkspaceStyles()}</style>
     </head>
-    <body>${bodyHtml}</body>
+    <body>${bodyHtml}
+      <script>
+        function updateStripeGrossBreakdownForInput(input) {
+          if (!input || !input.form) return;
+          const box = input.form.querySelector('.vat-preview');
+          if (!box) return;
+          const gross = Number(String(input.value || '').replace(/[^0-9.-]/g, ''));
+          if (!Number.isFinite(gross) || gross <= 0) { box.textContent = 'Enter the gross amount to see NET and VAT.'; return; }
+          const grossPence = Math.round(gross * 100);
+          const netPence = Math.round(grossPence / 1.2);
+          const vatPence = grossPence - netPence;
+          box.textContent = 'NET £' + (netPence / 100).toFixed(2) + ' · VAT @ 20% £' + (vatPence / 100).toFixed(2) + ' · GROSS £' + (grossPence / 100).toFixed(2);
+        }
+      </script>
+    </body>
     </html>
   `;
 }
@@ -10231,38 +10386,76 @@ app.post('/tech-workspace/:token/job/:id/stripe-link', async (req, res) => {
     form.append('metadata[job_number]', ref);
     form.append('metadata[postcode]', job.postcode || '');
     form.append('metadata[created_by]', createdBy);
+    const stripeBreakdown = stripeVatBreakdown(amount);
+    form.append('metadata[gross_amount]', stripeBreakdown.gross.toFixed(2));
+    form.append('metadata[net_amount]', stripeBreakdown.net.toFixed(2));
+    form.append('metadata[vat_amount]', stripeBreakdown.vat.toFixed(2));
+    form.append('metadata[vat_rate]', '20%');
     form.append('payment_method_types[0]', 'card');
 
     const stripeResult = await stripeApiFormRequest('/v1/payment_links', form);
     const paymentLink = stripeResult.json || {};
     if (!paymentLink.url) throw new Error('Stripe did not return a payment link URL.');
 
-    await client.query(`
-      INSERT INTO job_payment_links (
-        job_id, provider, amount, currency, reason, payment_url,
-        provider_session_id, status, stripe_mode, provider_response,
-        created_by, created_at
-      )
-      VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
-    `, [
-      id,
-      amount,
-      reason,
-      paymentLink.url,
-      paymentLink.id || '',
-      stripeModeLabel(),
-      JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
-      createdBy
-    ]);
+    let paymentLinkRowId = null;
+    let invoiceRecord = null;
+    await client.query('BEGIN');
+    try {
+      const linkInsert = await client.query(`
+        INSERT INTO job_payment_links (
+          job_id, provider, amount, currency, reason, payment_url,
+          provider_session_id, status, stripe_mode, provider_response,
+          created_by, created_at
+        )
+        VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
+        RETURNING id
+      `, [
+        id,
+        amount,
+        reason,
+        paymentLink.url,
+        paymentLink.id || '',
+        stripeModeLabel(),
+        JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
+        createdBy
+      ]);
+      paymentLinkRowId = linkInsert.rows[0].id;
+      invoiceRecord = await createStripeInvoiceForJob(client, {
+        job,
+        grossAmount: amount,
+        reason,
+        createdBy,
+        locksmithName: tech.name,
+        paymentLinkId: paymentLinkRowId
+      });
+      await client.query(`UPDATE job_payment_links SET invoice_id = $1 WHERE id = $2`, [invoiceRecord.id, paymentLinkRowId]);
+      await client.query('COMMIT');
+    } catch (dbError) {
+      await client.query('ROLLBACK');
+      try {
+        if (paymentLink.id) {
+          const deactivate = new URLSearchParams();
+          deactivate.append('active', 'false');
+          await stripeApiFormRequest(`/v1/payment_links/${paymentLink.id}`, deactivate);
+        }
+      } catch (deactivateError) {
+        console.error('Could not deactivate orphan technician Stripe link after invoice/database failure:', deactivateError);
+      }
+      throw dbError;
+    }
 
-    await addJobAuditEntry(
-      id,
-      'stripe_link_created',
-      'Stripe payment link',
-      '—',
-      `${money(amount)} ${reason}`,
-      createdBy
-    );
+    try {
+      await addJobAuditEntry(
+        id,
+        'stripe_invoice_link_created',
+        'Invoice + Stripe payment link',
+        '—',
+        `${invoiceRecord.invoice_number} · GROSS ${money(amount)} · NET ${money(invoiceRecord.net)} · VAT ${money(invoiceRecord.vat)} · ${reason}`,
+        createdBy
+      );
+    } catch (auditError) {
+      console.error('Technician Stripe invoice/link audit error:', auditError);
+    }
 
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${id}`);
   } catch (error) {
