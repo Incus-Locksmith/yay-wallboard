@@ -2724,6 +2724,7 @@ function nav(req) {
             <a href="/invoice-templates">Account templates</a>
           </div>
         </div>
+        <a class="side-link${active("/management-dashboard")}" href="/management-dashboard"><span class="side-dot dot-blue"></span><span>Management Dashboard</span></a>
         <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
         <a class="side-link${active("/payment-chasing")}" href="/payment-chasing"><span class="side-dot dot-amber"></span><span>Payment chasing</span></a>
         <a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>
@@ -6242,6 +6243,357 @@ app.post("/jobs/:id/payment-chase/close", async (req, res) => {
   }
 });
 
+
+
+function managementDashboardMetric(title, value, hint = "", href = "", tone = "") {
+  const inner = `
+    <div class="mgmt-kpi ${tone}">
+      <div class="mgmt-kpi-label">${escapeHtml(title)}</div>
+      <div class="mgmt-kpi-value">${value}</div>
+      ${hint ? `<div class="mgmt-kpi-hint">${escapeHtml(hint)}</div>` : ""}
+    </div>
+  `;
+  return href ? `<a class="mgmt-kpi-link" href="${href}">${inner}</a>` : inner;
+}
+
+function managementDashboardBar(label, value, maxValue, displayValue) {
+  const numeric = Number(value || 0);
+  const max = Math.max(Number(maxValue || 0), 0.01);
+  const width = Math.max(2, Math.min(100, (numeric / max) * 100));
+  return `
+    <div class="mgmt-bar-row">
+      <div class="mgmt-bar-label">${escapeHtml(label || "Unknown")}</div>
+      <div class="mgmt-bar-track"><div class="mgmt-bar-fill" style="width:${width.toFixed(1)}%"></div></div>
+      <div class="mgmt-bar-value">${displayValue}</div>
+    </div>
+  `;
+}
+
+app.get("/management-dashboard", async (req, res) => {
+  try {
+    const reportRange = buildReportRange(req.query.range ? req.query : { ...req.query, range: "today" });
+    const start = reportRange.start;
+    const end = reportRange.end;
+
+    const [
+      summary,
+      technicianRows,
+      campaignRows,
+      paidJobsResult,
+      stripeCollectedResult,
+      outstandingResult,
+      liveJobsResult,
+      techSnapshotResult,
+      stripeReviewResult,
+      dispatcherResult
+    ] = await Promise.all([
+      managementPeriodSummary(start, end),
+      managementTechnicianRows(start, end),
+      managementCampaignRows(start, end),
+      pool.query(`
+        SELECT
+          COUNT(*)::int AS paid_jobs,
+          COALESCE(SUM(COALESCE(final_value,0)),0)::numeric AS paid_value
+        FROM jobs
+        WHERE COALESCE(customer_paid,FALSE) = TRUE
+          AND COALESCE(closed_at, updated_at, created_at) >= $1
+          AND COALESCE(closed_at, updated_at, created_at) < $2
+      `, [start, end]),
+      pool.query(`
+        SELECT
+          COUNT(*)::int AS payment_count,
+          COALESCE(SUM(COALESCE(amount_paid,0)),0)::numeric AS stripe_value
+        FROM stripe_payment_receipts
+        WHERE paid_at >= $1 AND paid_at < $2
+      `, [start, end]),
+      pool.query(`
+        SELECT
+          COUNT(*)::int AS count,
+          COALESCE(SUM(GREATEST(
+            COALESCE(j.final_value,0)
+            - COALESCE(j.payment_amount_1,0)
+            - COALESCE(j.payment_amount_2,0)
+            - COALESCE(sr.stripe_paid,0),
+            0
+          )),0)::numeric AS value
+        FROM jobs j
+        LEFT JOIN (
+          SELECT job_id, SUM(COALESCE(amount_paid,0))::numeric AS stripe_paid
+          FROM stripe_payment_receipts
+          GROUP BY job_id
+        ) sr ON sr.job_id = j.id
+        WHERE COALESCE(j.customer_paid,FALSE) = FALSE
+          AND COALESCE(j.final_value,0) > 0
+          AND COALESCE(j.status,'') NOT IN ('cancelled_before_arrival','cancelled_onsite','fully_paid')
+          AND (j.closed_at IS NOT NULL OR j.status IN ('awaiting_payment','awaiting_balance','sent_to_pm','disputed'))
+      `),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'open')::int AS unassigned,
+          COUNT(*) FILTER (WHERE status = 'assigned')::int AS assigned,
+          COUNT(*) FILTER (WHERE status IN ('open','assigned','scheduled'))::int AS active_jobs
+        FROM jobs
+      `),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE active = TRUE)::int AS active_techs,
+          COUNT(*) FILTER (WHERE active = TRUE AND LOWER(COALESCE(status,'')) LIKE '%job%')::int AS on_job,
+          COUNT(*) FILTER (WHERE active = TRUE AND LOWER(COALESCE(status,'')) LIKE '%available%')::int AS available
+        FROM technicians
+      `),
+      pool.query(`
+        SELECT COUNT(*)::int AS count
+        FROM job_payment_links
+        WHERE status IN ('payment_review','paid_multiple_review')
+      `),
+      pool.query(`
+        SELECT
+          COALESCE(NULLIF(dispatcher_name,''),'Unknown') AS dispatcher_name,
+          COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2)::int AS jobs_booked,
+          COUNT(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2)::int AS jobs_closed,
+          COALESCE(SUM(COALESCE(final_value,0)) FILTER (WHERE closed_at >= $1 AND closed_at < $2),0)::numeric AS gross_value
+        FROM jobs
+        WHERE created_at >= $1 OR closed_at >= $1
+        GROUP BY COALESCE(NULLIF(dispatcher_name,''),'Unknown')
+        HAVING COUNT(*) FILTER (WHERE created_at >= $1 AND created_at < $2) > 0
+            OR COUNT(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2) > 0
+        ORDER BY jobs_booked DESC, gross_value DESC
+        LIMIT 20
+      `, [start, end])
+    ]);
+
+    const paidJobs = paidJobsResult.rows[0] || {};
+    const stripeCollected = stripeCollectedResult.rows[0] || {};
+    const outstanding = outstandingResult.rows[0] || {};
+    const liveJobs = liveJobsResult.rows[0] || {};
+    const techSnapshot = techSnapshotResult.rows[0] || {};
+    const stripeReview = stripeReviewResult.rows[0] || {};
+    const dispatcherRows = dispatcherResult.rows || [];
+
+    const gross = Number(summary.gross_value || 0);
+    const net = Number(summary.net_value || 0);
+    const vat = Number(summary.vat_value || 0);
+    const materials = Number(summary.materials_cost || 0);
+    const closed = Number(summary.jobs_closed || 0);
+    const booked = Number(summary.jobs_created || 0);
+    const cancelled = Number(summary.jobs_cancelled || 0);
+    const disputes = Number(summary.disputes_created || 0);
+    const avgJob = Number(summary.average_job_value || 0);
+    const paidValue = Number(paidJobs.paid_value || 0);
+    const stripeValue = Number(stripeCollected.stripe_value || 0);
+    const outstandingValue = Number(outstanding.value || 0);
+    const collectionRate = gross > 0 ? Math.min(100, (paidValue / gross) * 100) : 0;
+    const closureRate = booked > 0 ? Math.min(100, (closed / booked) * 100) : 0;
+
+    const topTechMax = Math.max(0, ...technicianRows.slice(0, 8).map(row => Number(row.gross_value || 0)));
+    const topCampaignMax = Math.max(0, ...campaignRows.slice(0, 8).map(row => Number(row.gross_value || 0)));
+
+    const techBars = technicianRows.slice(0, 8).map(row =>
+      managementDashboardBar(row.technician_name || "Unassigned", row.gross_value, topTechMax, `${Number(row.jobs_closed || 0)} jobs · ${money(row.gross_value || 0)}`)
+    ).join("");
+
+    const campaignBars = campaignRows.slice(0, 8).map(row =>
+      managementDashboardBar(row.campaign || "Unknown", row.gross_value, topCampaignMax, `${Number(row.jobs_created || 0)} booked · ${money(row.gross_value || 0)}`)
+    ).join("");
+
+    const technicianBody = technicianRows.slice(0, 12).map((row, index) => {
+      const grossValue = Number(row.gross_value || 0);
+      const materialValue = Number(row.materials_cost || 0);
+      return `
+        <tr>
+          <td><span class="mgmt-rank">${index + 1}</span> <strong>${escapeHtml(row.technician_name || "Unassigned")}</strong></td>
+          <td>${Number(row.jobs_closed || 0)}</td>
+          <td>${money(grossValue)}</td>
+          <td>${money(row.average_job_value || 0)}</td>
+          <td>${money(materialValue)}</td>
+          <td><strong>${money(grossValue - materialValue)}</strong></td>
+          <td>${Number(row.cancelled_jobs || 0)}</td>
+          <td>${Number(row.disputed_status_jobs || 0)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const dispatcherBody = dispatcherRows.map((row, index) => `
+      <tr>
+        <td><span class="mgmt-rank">${index + 1}</span> <strong>${escapeHtml(row.dispatcher_name || "Unknown")}</strong></td>
+        <td>${Number(row.jobs_booked || 0)}</td>
+        <td>${Number(row.jobs_closed || 0)}</td>
+        <td>${money(row.gross_value || 0)}</td>
+      </tr>
+    `).join("");
+
+    const campaignBody = campaignRows.slice(0, 12).map(row => `
+      <tr>
+        <td><strong>${escapeHtml(row.campaign || "Unknown")}</strong></td>
+        <td>${Number(row.jobs_created || 0)}</td>
+        <td>${Number(row.jobs_closed || 0)}</td>
+        <td>${money(row.gross_value || 0)}</td>
+        <td>${money(row.average_job_value || 0)}</td>
+        <td>${Number(row.cancelled_jobs || 0)}</td>
+        <td>${Number(row.awaiting_money_jobs || 0)}</td>
+      </tr>
+    `).join("");
+
+    const paymentTotal = Number(summary.card_jobs || 0) + Number(summary.cash_jobs || 0) + Number(summary.bank_jobs || 0);
+    const paymentRows = [
+      ["Card", Number(summary.card_jobs || 0)],
+      ["Cash", Number(summary.cash_jobs || 0)],
+      ["Bank transfer", Number(summary.bank_jobs || 0)]
+    ].map(([label, count]) => {
+      const pct = paymentTotal > 0 ? (count / paymentTotal) * 100 : 0;
+      return `<div class="mgmt-payment-row"><span>${escapeHtml(label)}</span><div class="mgmt-payment-track"><div class="mgmt-payment-fill" style="width:${pct.toFixed(1)}%"></div></div><strong>${count}</strong></div>`;
+    }).join("");
+
+    const alertItems = [];
+    if (Number(liveJobs.unassigned || 0) > 0) alertItems.push(`<a href="/jobs?status=open"><strong>${Number(liveJobs.unassigned || 0)}</strong> job${Number(liveJobs.unassigned || 0) === 1 ? "" : "s"} waiting to be assigned</a>`);
+    if (Number(outstanding.count || 0) > 0) alertItems.push(`<a href="/payment-chasing"><strong>${Number(outstanding.count || 0)}</strong> unpaid job${Number(outstanding.count || 0) === 1 ? "" : "s"} · ${money(outstandingValue)} outstanding</a>`);
+    if (Number(summary.open_disputes || 0) > 0) alertItems.push(`<a href="/disputes"><strong>${Number(summary.open_disputes || 0)}</strong> open dispute${Number(summary.open_disputes || 0) === 1 ? "" : "s"}</a>`);
+    if (Number(stripeReview.count || 0) > 0) alertItems.push(`<a href="/reports"><strong>${Number(stripeReview.count || 0)}</strong> Stripe payment${Number(stripeReview.count || 0) === 1 ? "" : "s"} need review</a>`);
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Management Dashboard</title>
+        <style>
+          ${sharedStyles()}
+          .management-dashboard { max-width: 1540px; }
+          .mgmt-hero { background:linear-gradient(135deg,#111827 0%,#1f2937 55%,#334155 100%);color:#fff;border-radius:22px;padding:24px 26px;margin-bottom:18px;box-shadow:0 14px 34px rgba(15,23,42,.14); }
+          .mgmt-hero-top { display:flex;justify-content:space-between;gap:20px;align-items:flex-start;flex-wrap:wrap; }
+          .mgmt-hero h1 { color:#fff;margin:0 0 5px; }
+          .mgmt-hero .subtitle { color:#cbd5e1;margin:0; }
+          .mgmt-periods { display:flex;gap:8px;flex-wrap:wrap; }
+          .mgmt-periods a { color:#fff;text-decoration:none;border:1px solid rgba(255,255,255,.26);padding:9px 13px;border-radius:10px;font-weight:900;font-size:12px;background:rgba(255,255,255,.07); }
+          .mgmt-periods a.active { background:#fff;color:#111827;border-color:#fff; }
+          .mgmt-kpi-grid { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0; }
+          .mgmt-kpi-link { text-decoration:none;color:inherit; }
+          .mgmt-kpi { background:#fff;border:1px solid #dbe3ee;border-radius:16px;padding:16px;min-height:115px;box-shadow:0 7px 20px rgba(15,23,42,.05); }
+          .mgmt-kpi:hover { transform:translateY(-1px);box-shadow:0 10px 24px rgba(15,23,42,.08); }
+          .mgmt-kpi.good { border-top:4px solid #16a34a; }
+          .mgmt-kpi.warn { border-top:4px solid #f59e0b; }
+          .mgmt-kpi.info { border-top:4px solid #2563eb; }
+          .mgmt-kpi.danger { border-top:4px solid #dc2626; }
+          .mgmt-kpi-label { text-transform:uppercase;letter-spacing:.06em;font-size:11px;color:#64748b;font-weight:900; }
+          .mgmt-kpi-value { font-size:29px;line-height:1.1;font-weight:950;color:#0f172a;margin:8px 0 6px; }
+          .mgmt-kpi-hint { font-size:12px;color:#64748b;line-height:1.35; }
+          .mgmt-section-grid { display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px; }
+          .mgmt-panel { background:#fff;border:1px solid #dbe3ee;border-radius:18px;padding:18px;box-shadow:0 7px 20px rgba(15,23,42,.04); }
+          .mgmt-panel h2 { margin:0 0 4px; }
+          .mgmt-panel-head { display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px; }
+          .mgmt-panel-head a { font-size:12px;font-weight:900; }
+          .mgmt-bar-row { display:grid;grid-template-columns:minmax(110px,180px) 1fr minmax(120px,175px);gap:10px;align-items:center;margin:11px 0; }
+          .mgmt-bar-label { font-weight:900;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+          .mgmt-bar-track,.mgmt-payment-track { height:10px;border-radius:999px;background:#e5e7eb;overflow:hidden; }
+          .mgmt-bar-fill { height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#16a34a); }
+          .mgmt-bar-value { text-align:right;font-size:11px;color:#475569;font-weight:800; }
+          .mgmt-rank { display:inline-flex;width:23px;height:23px;border-radius:999px;background:#e2e8f0;align-items:center;justify-content:center;font-size:11px;font-weight:900;margin-right:4px; }
+          .mgmt-payment-row { display:grid;grid-template-columns:110px 1fr 40px;gap:10px;align-items:center;margin:13px 0;font-size:12px;font-weight:800; }
+          .mgmt-payment-fill { height:100%;border-radius:999px;background:#334155; }
+          .mgmt-alerts { display:flex;gap:9px;flex-wrap:wrap;margin-top:17px; }
+          .mgmt-alerts a { text-decoration:none;color:#7c2d12;background:#fff7ed;border:1px solid #fed7aa;border-radius:999px;padding:9px 12px;font-size:12px;font-weight:800; }
+          .mgmt-quiet { color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:10px 12px;font-weight:800;font-size:12px;display:inline-block;margin-top:16px; }
+          .mgmt-snapshot { display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px; }
+          .mgmt-snapshot > div { background:#f8fafc;border:1px solid #e2e8f0;border-radius:13px;padding:13px; }
+          .mgmt-snapshot strong { display:block;font-size:23px;color:#0f172a; }
+          .mgmt-snapshot span { color:#64748b;font-size:11px;font-weight:800; }
+          .mgmt-table-wrap { overflow-x:auto; }
+          .mgmt-footer-links { display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 30px; }
+          @media(max-width:1150px){.mgmt-kpi-grid{grid-template-columns:repeat(2,1fr)}.mgmt-section-grid{grid-template-columns:1fr}}
+          @media(max-width:650px){.mgmt-kpi-grid{grid-template-columns:1fr}.mgmt-snapshot{grid-template-columns:1fr}.mgmt-bar-row{grid-template-columns:110px 1fr}.mgmt-bar-value{grid-column:2;text-align:left}.mgmt-hero{padding:18px}}
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <main class="app-main management-dashboard">
+          <div class="mgmt-hero">
+            <div class="mgmt-hero-top">
+              <div>
+                <h1>Management Dashboard</h1>
+                <div class="subtitle">The owner view: how the business is performing, what is moving, and what needs attention.</div>
+              </div>
+              <div class="mgmt-periods">
+                <a class="${reportRange.range === "today" ? "active" : ""}" href="/management-dashboard?range=today">Today</a>
+                <a class="${reportRange.range === "this_week" ? "active" : ""}" href="/management-dashboard?range=this_week">This week</a>
+                <a class="${reportRange.range === "this_month" ? "active" : ""}" href="/management-dashboard?range=this_month">This month</a>
+              </div>
+            </div>
+            ${alertItems.length ? `<div class="mgmt-alerts">${alertItems.join("")}</div>` : `<div class="mgmt-quiet">✓ Nothing urgent is being flagged right now.</div>`}
+          </div>
+
+          <div class="mgmt-kpi-grid">
+            ${managementDashboardMetric("Jobs booked", booked, `${reportRange.label} · ${closureRate.toFixed(0)}% closed`, `/reports/management?range=${reportRange.range}`, "info")}
+            ${managementDashboardMetric("Jobs completed", closed, `${cancelled} cancelled · ${disputes} new dispute${disputes === 1 ? "" : "s"}`, `/reports/management?range=${reportRange.range}`, closed ? "good" : "")}
+            ${managementDashboardMetric("Gross revenue", money(gross), `NET ${money(net)} · VAT ${money(vat)}`, `/reports/management?range=${reportRange.range}`, "good")}
+            ${managementDashboardMetric("Average job value", money(avgJob), `${closed} completed job${closed === 1 ? "" : "s"}`, `/reports/management?range=${reportRange.range}`, "info")}
+            ${managementDashboardMetric("Paid job value", money(paidValue), `${Number(paidJobs.paid_jobs || 0)} paid job${Number(paidJobs.paid_jobs || 0) === 1 ? "" : "s"} · ${collectionRate.toFixed(0)}% of closed gross`, `/reports/management?range=${reportRange.range}`, "good")}
+            ${managementDashboardMetric("Stripe collected", money(stripeValue), `${Number(stripeCollected.payment_count || 0)} confirmed Stripe payment${Number(stripeCollected.payment_count || 0) === 1 ? "" : "s"}`, "/reports", "good")}
+            ${managementDashboardMetric("Outstanding now", money(outstandingValue), `${Number(outstanding.count || 0)} job${Number(outstanding.count || 0) === 1 ? "" : "s"} need money`, "/payment-chasing", Number(outstanding.count || 0) ? "warn" : "good")}
+            ${managementDashboardMetric("After materials", money(gross - materials), `Materials ${money(materials)}`, `/reports/management?range=${reportRange.range}`, "info")}
+          </div>
+
+          <div class="mgmt-section-grid">
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>Live operations</h2><div class="subtitle">What is happening right now.</div></div><a href="/jobs">Open Dispatch Board</a></div>
+              <div class="mgmt-snapshot">
+                <div><strong>${Number(liveJobs.active_jobs || 0)}</strong><span>Active jobs</span></div>
+                <div><strong>${Number(liveJobs.unassigned || 0)}</strong><span>Waiting assignment</span></div>
+                <div><strong>${Number(liveJobs.assigned || 0)}</strong><span>Assigned</span></div>
+                <div><strong>${Number(techSnapshot.on_job || 0)}</strong><span>Technicians on jobs</span></div>
+                <div><strong>${Number(techSnapshot.available || 0)}</strong><span>Technicians available</span></div>
+                <div><strong>${Number(techSnapshot.active_techs || 0)}</strong><span>Active technicians</span></div>
+              </div>
+            </section>
+
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>How customers paid</h2><div class="subtitle">Payment method mix for completed jobs in ${escapeHtml(reportRange.label.toLowerCase())}.</div></div><a href="/reports/management?range=${reportRange.range}">Full report</a></div>
+              ${paymentRows}
+              <div class="subtitle" style="margin-top:14px;">Stripe confirms actual online receipts separately: <strong>${money(stripeValue)}</strong>.</div>
+            </section>
+          </div>
+
+          <div class="mgmt-section-grid">
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>Top technicians</h2><div class="subtitle">Gross value and completed jobs for ${escapeHtml(reportRange.label.toLowerCase())}.</div></div><a href="/reports/management?range=${reportRange.range}">Drill into reporting</a></div>
+              ${techBars || `<div class="subtitle">No completed technician jobs in this period yet.</div>`}
+            </section>
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>Where the work came from</h2><div class="subtitle">Campaign/source performance for ${escapeHtml(reportRange.label.toLowerCase())}.</div></div><a href="/campaigns">Campaigns</a></div>
+              ${campaignBars || `<div class="subtitle">No campaign activity in this period yet.</div>`}
+            </section>
+          </div>
+
+          <section class="mgmt-panel" style="margin-bottom:16px;">
+            <div class="mgmt-panel-head"><div><h2>Technician leaderboard</h2><div class="subtitle">Management-level comparison, using the same job data as Reports.</div></div><a href="/reports/management?range=${reportRange.range}">Full technician report</a></div>
+            <div class="mgmt-table-wrap"><table><thead><tr><th>Technician</th><th>Completed</th><th>Gross</th><th>Avg job</th><th>Materials</th><th>After materials</th><th>Cancelled</th><th>Disputed</th></tr></thead><tbody>${technicianBody || `<tr><td colspan="8" class="muted">No technician performance data yet.</td></tr>`}</tbody></table></div>
+          </section>
+
+          <div class="mgmt-section-grid">
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>Dispatcher activity</h2><div class="subtitle">Jobs booked and value of jobs closed, attributed to the booking dispatcher.</div></div><a href="/reports">Reports</a></div>
+              <div class="mgmt-table-wrap"><table><thead><tr><th>Dispatcher</th><th>Booked</th><th>Closed</th><th>Gross</th></tr></thead><tbody>${dispatcherBody || `<tr><td colspan="4" class="muted">No dispatcher activity in this period.</td></tr>`}</tbody></table></div>
+            </section>
+            <section class="mgmt-panel">
+              <div class="mgmt-panel-head"><div><h2>Source performance</h2><div class="subtitle">A quick commercial view of lead/source quality.</div></div><a href="/reports/management?range=${reportRange.range}">Full source report</a></div>
+              <div class="mgmt-table-wrap"><table><thead><tr><th>Source</th><th>Booked</th><th>Closed</th><th>Gross</th><th>Avg</th><th>Cancelled</th><th>Awaiting £</th></tr></thead><tbody>${campaignBody || `<tr><td colspan="7" class="muted">No source data in this period.</td></tr>`}</tbody></table></div>
+            </section>
+          </div>
+
+          <div class="mgmt-footer-links">
+            <a class="action-button" href="/reports/management?range=${reportRange.range}">Open full Management Report</a>
+            <a class="action-button dark" href="/reports">Reporting & exports</a>
+            <a class="action-button amber" href="/payment-chasing">Payment chasing</a>
+            <a class="action-button red" href="/disputes">Disputes</a>
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Management dashboard error:", error);
+    res.status(500).send(`Management dashboard error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
+  }
+});
+
 app.get("/reports/management", async (req, res) => {
   try {
     const nowParts = londonDateParts();
@@ -6616,6 +6968,7 @@ app.get("/reports", async (req, res) => {
         <div class="subtitle">Clean management overview. Click any metric to see the underlying jobs, dates and technician names.</div>
 
         <div class="page-actions">
+          <a class="action-button" href="/management-dashboard">Management Dashboard</a>
           <a class="action-button" href="/reports/management?range=this_month">Management Report</a>
           <a class="action-button amber" href="/reports/jobs.csv?range=this_week">Download jobs CSV</a>
           <a class="action-button dark" href="/reports/invoices.csv">Invoices CSV</a>
