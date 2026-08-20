@@ -1452,7 +1452,7 @@ function stripeConfigured() {
 }
 
 function stripeModeLabel() {
-  const envMode = String(process.env.STRIPE_MODE || "").trim();
+  const envMode = String(process.env.STRIPE_MODE || "").trim().toLowerCase();
   if (envMode) return envMode;
   const key = stripeSecretKey();
   if (key.startsWith("sk_live_")) return "live";
@@ -1460,16 +1460,39 @@ function stripeModeLabel() {
   return "unknown";
 }
 
-function portalBaseUrl(req) {
-  const envBase = String(process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").trim().replace(/\/$/, "");
-  if (envBase) return envBase;
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host || "yay-wallboard.onrender.com";
-  return `${proto}://${host}`.replace(/\/$/, "");
+function stripeConfigurationError() {
+  const key = stripeSecretKey();
+  const mode = stripeModeLabel();
+  if (!key) return "Stripe secret key is missing from Render environment variables.";
+  if (!["live", "test"].includes(mode)) return "STRIPE_MODE must be live or test.";
+  if (mode === "live" && !key.startsWith("sk_live_")) return "STRIPE_MODE is live but STRIPE_SECRET_KEY is not a live key.";
+  if (mode === "test" && !key.startsWith("sk_test_")) return "STRIPE_MODE is test but STRIPE_SECRET_KEY is not a test key.";
+  return "";
+}
+
+function stripeReady() {
+  return !stripeConfigurationError();
+}
+
+function jobOutstandingAmount(job) {
+  const finalValue = parseMoneyInput(job && job.final_value);
+  if (finalValue === null || finalValue <= 0) return null;
+  if (job && job.customer_paid) return null;
+
+  const raw1 = job && job.payment_amount_1;
+  const raw2 = job && job.payment_amount_2;
+  const hasRecordedSplitPayment = [raw1, raw2].some(value => value !== null && value !== undefined && String(value).trim() !== "");
+  if (!hasRecordedSplitPayment) return finalValue;
+
+  const paid1 = parseMoneyInput(raw1) || 0;
+  const paid2 = parseMoneyInput(raw2) || 0;
+  const outstanding = Math.round((finalValue - paid1 - paid2) * 100) / 100;
+  return outstanding > 0 ? outstanding : null;
 }
 
 async function stripeApiFormRequest(path, formData) {
-  if (!stripeConfigured()) throw new Error("Stripe secret key is missing from Render environment variables.");
+  const configError = stripeConfigurationError();
+  if (configError) throw new Error(configError);
 
   const response = await fetch(`https://api.stripe.com${path}`, {
     method: "POST",
@@ -7991,13 +8014,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
 
               <div class="control-card" id="stripe-card">
                 <h2>Stripe payment links</h2>
-                ${stripeConfigured() ? `<div class="stripe-warning ${stripeModeLabel() === "live" ? "stripe-live" : "stripe-ok"}">Stripe is configured in ${escapeHtml(stripeModeLabel()).toUpperCase()} mode. ${stripeModeLabel() === "live" ? "Live links can take real customer payments." : "Test links are safe for testing."}</div>` : `<div class="stripe-warning">Stripe is not configured. Add STRIPE_SECRET_KEY in Render to create payment links.</div>`}
+                ${stripeReady() ? `<div class="stripe-warning ${stripeModeLabel() === "live" ? "stripe-live" : "stripe-ok"}">Stripe is configured in ${escapeHtml(stripeModeLabel()).toUpperCase()} mode. ${stripeModeLabel() === "live" ? "Live links can take real customer payments. Use a £1 amount for the first live test." : "Test links are safe for testing."}</div>` : `<div class="stripe-warning">Stripe is not ready: ${escapeHtml(stripeConfigurationError())}</div>`}
                 <form method="POST" action="/jobs/${job.id}/stripe-link" class="quick-form" onsubmit="return confirm('Create a Stripe payment link for this amount?');">
                   <label>Amount to request</label>
-                  <input name="amount" value="${job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 150.00" required>
+                  <input name="amount" value="${jobOutstandingAmount(job) !== null ? Number(jobOutstandingAmount(job)).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 150.00" required>
                   <label>Payment reason / note</label>
                   <input name="reason" value="Locksmith job ${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` - ${escapeHtml(job.postcode)}` : ""}" maxlength="180" required>
-                  <button type="submit" ${stripeConfigured() ? "" : "disabled"}>Create Stripe payment link</button>
+                  <button type="submit" ${stripeReady() ? "" : "disabled"}>Create Stripe payment link</button>
                   <p class="muted-note">First version creates a Stripe Checkout payment link and stores it against the job. Webhook auto-reconciliation can be added later.</p>
                 </form>
                 ${renderStripePaymentLinks(stripeRows)}
@@ -8209,20 +8232,17 @@ app.post("/jobs/:id/stripe-link", async (req, res) => {
     if (!jobResult.rows.length) return res.status(404).send("Job not found");
     const job = jobResult.rows[0];
     const amount = parseMoneyInput(req.body.amount);
-    const reason = String(req.body.reason || `Locksmith job ${job.job_number || jobNumber(job.id)}`).trim();
+    const reason = String(req.body.reason || `Locksmith job ${job.job_number || jobNumber(job.id)}`).trim().slice(0, 180);
     if (!amount || amount <= 0) return res.status(400).send("Stripe amount must be greater than zero.");
-    if (!stripeConfigured()) return res.status(400).send("Stripe is not configured. Add STRIPE_SECRET_KEY in Render.");
+    if (amount > 999999.99) return res.status(400).send("Stripe amount is too large. Please check the amount entered.");
+    const configError = stripeConfigurationError();
+    if (configError) return res.status(400).send(`Stripe is not ready: ${escapeHtml(configError)}`);
 
-    const baseUrl = portalBaseUrl(req);
     const unitAmount = Math.round(amount * 100);
     const ref = job.job_number || jobNumber(job.id);
-    const description = `${reason} · ${job.postcode || ""}`.slice(0, 240);
+    const description = `${reason}${job.postcode ? ` · ${job.postcode}` : ""}`.slice(0, 240);
 
     const form = new URLSearchParams();
-    form.append("mode", "payment");
-    form.append("success_url", `${baseUrl}/jobs/${id}/edit?stripe=success#stripe-card`);
-    form.append("cancel_url", `${baseUrl}/jobs/${id}/edit?stripe=cancelled#stripe-card`);
-    form.append("payment_method_types[0]", "card");
     form.append("line_items[0][quantity]", "1");
     form.append("line_items[0][price_data][currency]", "gbp");
     form.append("line_items[0][price_data][unit_amount]", String(unitAmount));
@@ -8231,25 +8251,19 @@ app.post("/jobs/:id/stripe-link", async (req, res) => {
     form.append("metadata[job_id]", String(job.id));
     form.append("metadata[job_number]", ref);
     form.append("metadata[postcode]", job.postcode || "");
-    form.append("metadata[customer_phone]", job.customer_phone || "");
-    form.append("customer_creation", "if_required");
-    if (job.customer_email) form.append("customer_email", job.customer_email);
+    form.append("metadata[created_by]", currentAgentName(req) || "Unknown");
+    form.append("payment_method_types[0]", "card");
 
-    const stripeResult = await stripeApiFormRequest("/v1/checkout/sessions", form);
-    const session = stripeResult.json || {};
-    if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+    const stripeResult = await stripeApiFormRequest("/v1/payment_links", form);
+    const paymentLink = stripeResult.json || {};
+    if (!paymentLink.url) throw new Error("Stripe did not return a payment link URL.");
 
     await client.query(`
       INSERT INTO job_payment_links (job_id, provider, amount, currency, reason, payment_url, provider_session_id, status, stripe_mode, provider_response, created_by, created_at)
       VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
     `, [
-      id,
-      amount,
-      reason,
-      session.url,
-      session.id || "",
-      stripeModeLabel(),
-      JSON.stringify({ id: session.id, url: session.url, payment_status: session.payment_status, amount_total: session.amount_total }).slice(0, 1600),
+      id, amount, reason, paymentLink.url, paymentLink.id || "", stripeModeLabel(),
+      JSON.stringify({ id: paymentLink.id, url: paymentLink.url, active: paymentLink.active }).slice(0, 1600),
       currentAgentName(req) || "Unknown"
     ]);
 
