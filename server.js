@@ -8,7 +8,11 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl === "/stripe/webhook") req.rawBody = Buffer.from(buf);
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname)));
 
@@ -1590,10 +1594,317 @@ async function stripeApiFormRequest(path, formData) {
   return { text, json, status: response.status };
 }
 
+
+function stripeWebhookSecret() {
+  return String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
+}
+
+function stripeWebhookConfigured() {
+  return Boolean(stripeWebhookSecret());
+}
+
+function verifyStripeWebhookSignature(rawBody, signatureHeader) {
+  const secret = stripeWebhookSecret();
+  if (!secret) throw new Error("STRIPE_WEBHOOK_SECRET is not configured.");
+  if (!rawBody || !Buffer.isBuffer(rawBody)) throw new Error("Stripe webhook raw body is unavailable.");
+  if (!signatureHeader) throw new Error("Stripe-Signature header is missing.");
+
+  const parts = String(signatureHeader).split(",").map(part => part.trim());
+  const timestampPart = parts.find(part => part.startsWith("t="));
+  const signatures = parts.filter(part => part.startsWith("v1=")).map(part => part.slice(3));
+  if (!timestampPart || !signatures.length) throw new Error("Stripe webhook signature header is invalid.");
+
+  const timestamp = Number(timestampPart.slice(2));
+  if (!Number.isFinite(timestamp)) throw new Error("Stripe webhook timestamp is invalid.");
+  const tolerance = Math.max(0, Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SEC || 300));
+  const age = Math.abs(Math.floor(Date.now() / 1000) - timestamp);
+  if (tolerance && age > tolerance) throw new Error(`Stripe webhook timestamp is outside the ${tolerance}s tolerance.`);
+
+  const signedPayload = Buffer.concat([Buffer.from(String(timestamp)), Buffer.from("."), rawBody]);
+  const expected = crypto.createHmac("sha256", secret).update(signedPayload).digest("hex");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const valid = signatures.some(signature => {
+    const candidate = Buffer.from(String(signature), "utf8");
+    return candidate.length === expectedBuffer.length && crypto.timingSafeEqual(candidate, expectedBuffer);
+  });
+  if (!valid) throw new Error("Stripe webhook signature verification failed.");
+  return true;
+}
+
+async function stripeApiGetRequest(pathname, params = {}) {
+  const configError = stripeConfigurationError();
+  if (configError) throw new Error(configError);
+  const query = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && String(value) !== "") query.append(key, String(value));
+  });
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await fetch(`https://api.stripe.com${pathname}${suffix}`, {
+    method: "GET",
+    headers: { "Authorization": `Bearer ${stripeSecretKey()}` }
+  });
+  const text = await response.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (_) {}
+  if (!response.ok) {
+    const message = json && json.error && json.error.message ? json.error.message : (text || `Stripe API failed with status ${response.status}`);
+    throw new Error(message);
+  }
+  return { text, json, status: response.status };
+}
+
+function stripeObjectId(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value.id) return String(value.id);
+  return "";
+}
+
+async function reconcileStripePaidSession(session, eventId = "", source = "Stripe webhook") {
+  if (!session || String(session.payment_status || "").toLowerCase() !== "paid") {
+    return { matched: false, paid: false, reason: "Checkout Session is not marked paid." };
+  }
+
+  const paymentLinkProviderId = stripeObjectId(session.payment_link);
+  const checkoutSessionId = String(session.id || "").trim();
+  const paymentIntentId = stripeObjectId(session.payment_intent);
+  if (!paymentLinkProviderId) return { matched: false, paid: true, reason: "Checkout Session has no Payment Link id." };
+  if (!checkoutSessionId) return { matched: false, paid: true, reason: "Checkout Session id is missing." };
+
+  const client = await pool.connect();
+  let jobId = null;
+  let linkId = null;
+  let invoiceId = null;
+  let duplicatePayment = false;
+  let reviewRequired = false;
+  let auditMessage = "";
+  let linkProviderIdForDeactivate = paymentLinkProviderId;
+
+  try {
+    await client.query("BEGIN");
+    const linkResult = await client.query(`
+      SELECT *
+      FROM job_payment_links
+      WHERE provider = 'stripe' AND provider_session_id = $1
+      ORDER BY id DESC
+      LIMIT 1
+      FOR UPDATE
+    `, [paymentLinkProviderId]);
+
+    if (!linkResult.rows.length) {
+      await client.query("ROLLBACK");
+      return { matched: false, paid: true, reason: `No portal Stripe link matches ${paymentLinkProviderId}.` };
+    }
+
+    const link = linkResult.rows[0];
+    linkId = Number(link.id);
+    jobId = Number(link.job_id);
+    invoiceId = link.invoice_id ? Number(link.invoice_id) : null;
+
+    const amountPaid = Number.isFinite(Number(session.amount_total)) ? Number(session.amount_total) / 100 : null;
+    const currency = String(session.currency || "").toLowerCase();
+    const expectedAmount = Number(link.amount || 0);
+    const expectedCurrency = String(link.currency || "gbp").toLowerCase();
+    const amountMatches = amountPaid !== null && Math.abs(amountPaid - expectedAmount) < 0.005;
+    const currencyMatches = !currency || currency === expectedCurrency;
+
+    const receiptInsert = await client.query(`
+      INSERT INTO stripe_payment_receipts (
+        checkout_session_id, payment_link_row_id, job_id, invoice_id,
+        stripe_payment_link_id, payment_intent_id, amount_paid, currency,
+        event_id, paid_at, raw_summary, created_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TO_TIMESTAMP($10),$11,NOW())
+      ON CONFLICT (checkout_session_id) DO NOTHING
+      RETURNING id
+    `, [
+      checkoutSessionId,
+      linkId,
+      jobId,
+      invoiceId,
+      paymentLinkProviderId,
+      paymentIntentId,
+      amountPaid,
+      currency || expectedCurrency,
+      eventId || null,
+      Number(session.created || Math.floor(Date.now()/1000)),
+      JSON.stringify({ id: checkoutSessionId, payment_status: session.payment_status, amount_total: session.amount_total, currency: session.currency }).slice(0, 1800)
+    ]);
+
+    if (!receiptInsert.rows.length) {
+      await client.query("COMMIT");
+      return { matched: true, paid: true, duplicateEvent: true, jobId, linkId, invoiceId };
+    }
+
+    const priorReceiptCount = Number((await client.query(`
+      SELECT COUNT(*)::int AS count
+      FROM stripe_payment_receipts
+      WHERE payment_link_row_id = $1
+    `, [linkId])).rows[0].count || 0);
+    duplicatePayment = priorReceiptCount > 1;
+    reviewRequired = !amountMatches || !currencyMatches || duplicatePayment;
+
+    const status = reviewRequired ? (duplicatePayment ? "paid_multiple_review" : "payment_review") : "paid";
+    await client.query(`
+      UPDATE job_payment_links
+      SET status = $1,
+          paid_at = COALESCE(paid_at, TO_TIMESTAMP($2)),
+          amount_paid = COALESCE(amount_paid, $3),
+          stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $4),
+          stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $5),
+          last_webhook_event_id = COALESCE(NULLIF($6,''), last_webhook_event_id),
+          reconciled_at = NOW(),
+          provider_response = $7
+      WHERE id = $8
+    `, [
+      status,
+      Number(session.created || Math.floor(Date.now()/1000)),
+      amountPaid,
+      checkoutSessionId,
+      paymentIntentId,
+      eventId || "",
+      JSON.stringify({ checkout_session_id: checkoutSessionId, payment_link: paymentLinkProviderId, payment_intent: paymentIntentId, payment_status: session.payment_status, amount_total: session.amount_total, currency: session.currency, reconciled_by: source }).slice(0, 1800),
+      linkId
+    ]);
+
+    if (!reviewRequired && invoiceId) {
+      await client.query(`
+        UPDATE invoices
+        SET paid_status = 'Paid with thanks',
+            stripe_paid_at = COALESCE(stripe_paid_at, TO_TIMESTAMP($1)),
+            stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $2),
+            updated_at = NOW()
+        WHERE id = $3
+      `, [Number(session.created || Math.floor(Date.now()/1000)), checkoutSessionId, invoiceId]);
+    }
+
+    if (!reviewRequired) {
+      const jobResult = await client.query(`
+        SELECT id, final_value, payment_amount_1, payment_amount_2, customer_paid, payment_method
+        FROM jobs WHERE id = $1 FOR UPDATE
+      `, [jobId]);
+      if (jobResult.rows.length) {
+        const job = jobResult.rows[0];
+        const finalValue = Number(job.final_value || 0);
+        const manualPaid = Number(job.payment_amount_1 || 0) + Number(job.payment_amount_2 || 0);
+        const stripePaidResult = await client.query(`
+          SELECT COALESCE(SUM(r.amount_paid),0)::numeric AS total
+          FROM stripe_payment_receipts r
+          JOIN job_payment_links l ON l.id = r.payment_link_row_id
+          WHERE r.job_id = $1
+            AND l.status IN ('paid','paid_multiple_review')
+        `, [jobId]);
+        const stripePaid = Number(stripePaidResult.rows[0].total || 0);
+        const fullyPaid = finalValue > 0 && (manualPaid + stripePaid) >= (finalValue - 0.005);
+        await client.query(`
+          UPDATE jobs
+          SET customer_paid = CASE WHEN $1 THEN TRUE ELSE customer_paid END,
+              payment_method = CASE
+                WHEN COALESCE(NULLIF(payment_method,''),'') = '' THEN 'Stripe card'
+                WHEN LOWER(COALESCE(payment_method,'')) NOT LIKE '%stripe%' AND $2 > 0 THEN payment_method || ' + Stripe card'
+                ELSE payment_method
+              END,
+              updated_at = NOW()
+          WHERE id = $3
+        `, [fullyPaid, amountPaid || 0, jobId]);
+      }
+    }
+
+    await client.query("COMMIT");
+
+    if (reviewRequired) {
+      auditMessage = duplicatePayment
+        ? `WARNING: more than one successful Stripe payment was received for the same payment link. Latest session ${checkoutSessionId}. Review Stripe before refunding or closing the job.`
+        : `Stripe payment needs review. Expected ${money(expectedAmount)} ${expectedCurrency.toUpperCase()}, received ${amountPaid === null ? 'unknown amount' : money(amountPaid)} ${(currency || expectedCurrency).toUpperCase()} in ${checkoutSessionId}.`;
+      await addJobAuditEntry(jobId, "stripe_payment_review", "Stripe payment review", "—", auditMessage, source);
+    } else {
+      auditMessage = `PAID ${money(amountPaid || expectedAmount)} by Stripe · session ${checkoutSessionId}${invoiceId ? ` · invoice ${invoiceId}` : ""}`;
+      await addJobAuditEntry(jobId, "stripe_payment_received", "Stripe payment received", "Unpaid", "Paid with thanks", source);
+    }
+
+    if (!duplicatePayment) {
+      try {
+        const deactivate = new URLSearchParams();
+        deactivate.append("active", "false");
+        await stripeApiFormRequest(`/v1/payment_links/${linkProviderIdForDeactivate}`, deactivate);
+      } catch (deactivateError) {
+        console.error("Could not deactivate paid Stripe Payment Link:", deactivateError);
+      }
+    }
+
+    return { matched: true, paid: true, reviewRequired, duplicatePayment, jobId, linkId, invoiceId, amountPaid };
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function syncStripePaymentLink(linkId, source = "Manual Stripe check") {
+  const linkResult = await pool.query(`SELECT * FROM job_payment_links WHERE id = $1 AND provider = 'stripe'`, [linkId]);
+  if (!linkResult.rows.length) throw new Error("Stripe payment link not found.");
+  const link = linkResult.rows[0];
+  if (!link.provider_session_id) throw new Error("Stripe Payment Link id is missing from this record.");
+
+  const result = await stripeApiGetRequest("/v1/checkout/sessions", {
+    payment_link: link.provider_session_id,
+    limit: 10
+  });
+  const sessions = Array.isArray(result.json && result.json.data) ? result.json.data : [];
+  const paidSessions = sessions.filter(session => String(session.payment_status || "").toLowerCase() === "paid");
+  if (!paidSessions.length) return { matched: true, paid: false, linkId: Number(linkId), jobId: Number(link.job_id) };
+
+  let lastResult = null;
+  for (const session of paidSessions.slice().reverse()) {
+    lastResult = await reconcileStripePaidSession(session, `manual_${session.id}`, source);
+  }
+  return lastResult || { matched: true, paid: false, linkId: Number(linkId), jobId: Number(link.job_id) };
+}
+
+async function processStripeWebhookEvent(event) {
+  const eventId = String(event && event.id || "").trim();
+  const eventType = String(event && event.type || "").trim();
+  if (!eventId) throw new Error("Stripe event id is missing.");
+
+  await pool.query(`
+    INSERT INTO stripe_webhook_events (event_id, event_type, status, payload, received_at)
+    VALUES ($1,$2,'received',$3,NOW())
+    ON CONFLICT (event_id) DO NOTHING
+  `, [eventId, eventType, JSON.stringify(event).slice(0, 12000)]);
+
+  const existing = (await pool.query(`SELECT status FROM stripe_webhook_events WHERE event_id = $1`, [eventId])).rows[0];
+  if (existing && ["processed","ignored"].includes(existing.status)) return { duplicate: true };
+
+  try {
+    if (eventType === "checkout.session.completed" || eventType === "checkout.session.async_payment_succeeded") {
+      const session = event && event.data && event.data.object ? event.data.object : null;
+      if (session && String(session.payment_status || "").toLowerCase() === "paid") {
+        const result = await reconcileStripePaidSession(session, eventId, "Stripe webhook");
+        await pool.query(`UPDATE stripe_webhook_events SET status='processed', processed_at=NOW(), error=NULL WHERE event_id=$1`, [eventId]);
+        return result;
+      }
+    }
+
+    await pool.query(`UPDATE stripe_webhook_events SET status='ignored', processed_at=NOW(), error=NULL WHERE event_id=$1`, [eventId]);
+    return { ignored: true };
+  } catch (error) {
+    await pool.query(`UPDATE stripe_webhook_events SET status='failed', error=$2 WHERE event_id=$1`, [eventId, String(error.message || error).slice(0,1800)]);
+    throw error;
+  }
+}
+
 function buildStripePaymentSms(job, link) {
   const tel = process.env.SMS_OFFICE_TEL || companies.locksmiths.tel || "020 3870 3732";
   const ref = job.job_number || jobNumber(job.id);
   return `Hi ${job.customer_name || "there"}, your invoice has been created for locksmith job ${ref}. Please pay securely here: ${link.payment_url}. 24H Locksmiths: ${tel}. Please do not reply to this SMS.`;
+}
+
+function stripeLinkIsPaid(row) {
+  return ["paid", "paid_multiple_review", "payment_review"].includes(String(row && row.status || "").toLowerCase());
+}
+
+function stripeLinkNeedsReview(row) {
+  return ["paid_multiple_review", "payment_review"].includes(String(row && row.status || "").toLowerCase());
 }
 
 function renderTechnicianStripePaymentArea(job, token, rows = []) {
@@ -1604,21 +1915,24 @@ function renderTechnicianStripePaymentArea(job, token, rows = []) {
 
   const historyHtml = recentRows.length ? `
     <div style="margin-top:12px;">
-      ${recentRows.map(row => `
+      ${recentRows.map(row => {
+        const paid = String(row.status || "").toLowerCase() === "paid";
+        const review = stripeLinkNeedsReview(row);
+        return `
         <div style="border-top:1px solid #e2e8f0; padding:10px 0;">
           <div style="font-weight:900;">${money(row.amount || 0)} GROSS · ${escapeHtml(row.reason || "Stripe payment link")}</div>
           <div class="job-sub" style="margin-top:3px;">NET ${money(stripeVatBreakdown(row.amount || 0).net)} · VAT @ 20% ${money(stripeVatBreakdown(row.amount || 0).vat)} · GROSS ${money(stripeVatBreakdown(row.amount || 0).gross)}</div>
+          ${paid ? `<div style="margin-top:5px;color:#15803d;font-weight:900;">✓ PAID${row.paid_at ? ` · ${escapeHtml(formatDateTime(row.paid_at))}` : ""}</div>` : review ? `<div style="margin-top:5px;color:#b45309;font-weight:900;">⚠ PAYMENT RECEIVED — REVIEW REQUIRED</div>` : `<div class="job-sub" style="margin-top:5px;">Awaiting Stripe payment</div>`}
           <div class="job-sub" style="margin-top:3px;">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")}</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-            <a class="button dark" style="padding:9px 12px;" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open payment link</a>
+            ${!paid && !review ? `<a class="button dark" style="padding:9px 12px;" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open payment link</a>` : ""}
             ${row.invoice_id ? `<a class="button dark" style="padding:9px 12px;" href="/invoices/${row.invoice_id}/pdf" target="_blank" rel="noopener noreferrer">View invoice</a><a class="button amber" style="padding:9px 12px;" href="/invoices/${row.invoice_id}/pdf?download=1">Download invoice</a>` : ""}
-            <button class="button amber" style="padding:9px 12px;" type="button" data-link="${escapeHtml(row.payment_url || "")}" onclick="navigator.clipboard.writeText(this.dataset.link).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy link',1400);}).catch(()=>window.prompt('Copy this Stripe link:',this.dataset.link));">Copy link</button>
-            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link/${row.id}/send-sms" style="margin:0;" onsubmit="return confirm('Send this Stripe payment link to the customer by SMS?');">
-              <button class="button green" style="padding:9px 12px;" type="submit">Send payment SMS</button>
-            </form>
+            ${!paid && !review ? `<button class="button amber" style="padding:9px 12px;" type="button" data-link="${escapeHtml(row.payment_url || "")}" onclick="navigator.clipboard.writeText(this.dataset.link).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy link',1400);}).catch(()=>window.prompt('Copy this Stripe link:',this.dataset.link));">Copy link</button>
+            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link/${row.id}/send-sms" style="margin:0;" onsubmit="return confirm('Send this Stripe payment link to the customer by SMS?');"><button class="button green" style="padding:9px 12px;" type="submit">Send payment SMS</button></form>` : ""}
+            ${!paid ? `<form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link/${row.id}/check-payment" style="margin:0;"><button class="button dark" style="padding:9px 12px;" type="submit">Check Stripe payment</button></form>` : ""}
           </div>
-        </div>
-      `).join("")}
+        </div>`;
+      }).join("")}
     </div>
   ` : `<div class="job-sub" style="margin-top:10px;">No Stripe links created for this job yet.</div>`;
 
@@ -1630,20 +1944,14 @@ function renderTechnicianStripePaymentArea(job, token, rows = []) {
         : `
           <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-link" style="margin-top:10px;" onsubmit="return confirm('Create a LIVE Stripe payment link AND invoice for this GROSS amount?');">
             <div class="field-grid">
-              <div>
-                <label>GROSS amount customer will pay</label>
-                <input name="amount" inputmode="decimal" placeholder="£" value="${defaultAmount !== null ? Number(defaultAmount).toFixed(2) : ""}" oninput="updateStripeGrossBreakdownForInput(this)" required>
-              </div>
-              <div>
-                <label>Description</label>
-                <input name="reason" maxlength="180" value="${escapeHtml(defaultReason)}" required>
-              </div>
+              <div><label>GROSS amount customer will pay</label><input name="amount" inputmode="decimal" placeholder="£" value="${defaultAmount !== null ? Number(defaultAmount).toFixed(2) : ""}" oninput="updateStripeGrossBreakdownForInput(this)" required></div>
+              <div><label>Description</label><input name="reason" maxlength="180" value="${escapeHtml(defaultReason)}" required></div>
             </div>
             <div class="vat-preview" style="margin-top:10px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-weight:800;">${defaultAmount !== null ? `NET ${money(stripeVatBreakdown(defaultAmount).net)} · VAT @ 20% ${money(stripeVatBreakdown(defaultAmount).vat)} · GROSS ${money(stripeVatBreakdown(defaultAmount).gross)}` : "Enter the gross amount to see NET and VAT."}</div>
             <div class="job-sub" style="margin-top:8px;">Invoice: 24H Online Services Ltd · Card · UK VAT 20%</div>
+            <div class="job-sub" style="margin-top:4px;">${stripeWebhookConfigured() ? "Automatic Stripe payment confirmation is ON." : "Automatic confirmation needs STRIPE_WEBHOOK_SECRET. The Check Stripe payment button works as a backup."}</div>
             <button class="button green" type="submit" style="margin-top:10px;">Create Invoice & Stripe Link</button>
-          </form>
-        `}
+          </form>`}
       ${historyHtml}
     </div>
   `;
@@ -1653,26 +1961,29 @@ function renderStripePaymentLinks(rows = []) {
   if (!rows.length) return `<p class="muted-note">No Stripe payment links created for this job yet.</p>`;
   return `
     <div class="activity-list">
-      ${rows.map(row => `
+      ${rows.map(row => {
+        const paid = String(row.status || "").toLowerCase() === "paid";
+        const review = stripeLinkNeedsReview(row);
+        return `
         <div class="activity-item">
           <span class="activity-dot"></span>
           <div>
-            <div class="activity-label">${escapeHtml(row.status || "created")} · GROSS ${money(row.amount || 0)} · ${escapeHtml((row.currency || "GBP").toUpperCase())}</div>
+            <div class="activity-label">${paid ? "PAID" : review ? "PAYMENT REVIEW" : escapeHtml(row.status || "created")} · GROSS ${money(row.amount || 0)} · ${escapeHtml((row.currency || "GBP").toUpperCase())}</div>
             <div class="activity-value">
               ${escapeHtml(row.reason || "Stripe payment link")}<br>
               <span class="muted">NET ${money(stripeVatBreakdown(row.amount || 0).net)} · VAT @ 20% ${money(stripeVatBreakdown(row.amount || 0).vat)} · GROSS ${money(stripeVatBreakdown(row.amount || 0).gross)}</span><br>
-              <a href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open Stripe link</a>
-              ${row.invoice_id ? ` · <a href="/invoices/${row.invoice_id}/pdf" target="_blank" rel="noopener noreferrer">View invoice</a> · <a href="/invoices/${row.invoice_id}/pdf?download=1">Download invoice</a>` : ""}
-              <button class="copy-mini" type="button" style="margin-left:8px; padding:7px 10px;" data-link="${escapeHtml(row.payment_url || "")}" onclick="copyText(this.dataset.link)">Copy</button>
-              <form method="POST" action="/jobs/${row.job_id}/stripe-link/${row.id}/send-sms" style="display:inline; margin-left:8px;" onsubmit="return confirm('Send this Stripe payment link by SMS?');">
-                <button type="submit" class="copy-mini" style="padding:7px 10px; background:#188a18;">Send SMS</button>
-              </form>
+              ${paid ? `<strong style="color:#15803d;">✓ Paid by Stripe${row.paid_at ? ` · ${escapeHtml(formatDateTime(row.paid_at))}` : ""}</strong>` : review ? `<strong style="color:#b45309;">⚠ Payment received — review in Stripe</strong>` : `<span class="muted">Awaiting payment</span>`}<br>
+              ${!paid && !review ? `<a href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open Stripe link</a>` : ""}
+              ${row.invoice_id ? `${!paid && !review ? " · " : ""}<a href="/invoices/${row.invoice_id}/pdf" target="_blank" rel="noopener noreferrer">View invoice</a> · <a href="/invoices/${row.invoice_id}/pdf?download=1">Download invoice</a>` : ""}
+              ${!paid && !review ? `<button class="copy-mini" type="button" style="margin-left:8px; padding:7px 10px;" data-link="${escapeHtml(row.payment_url || "")}" onclick="copyText(this.dataset.link)">Copy</button>
+              <form method="POST" action="/jobs/${row.job_id}/stripe-link/${row.id}/send-sms" style="display:inline; margin-left:8px;" onsubmit="return confirm('Send this Stripe payment link by SMS?');"><button type="submit" class="copy-mini" style="padding:7px 10px; background:#188a18;">Send SMS</button></form>` : ""}
+              ${!paid ? `<form method="POST" action="/jobs/${row.job_id}/stripe-link/${row.id}/check-payment" style="display:inline; margin-left:8px;"><button type="submit" class="copy-mini" style="padding:7px 10px; background:#334155;">Check payment</button></form>` : ""}
               <br><span class="muted">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")} · ${escapeHtml(row.stripe_mode || "unknown")} mode</span>
               ${row.sent_at ? `<br><span class="muted">SMS sent ${escapeHtml(formatDateTime(row.sent_at))} by ${escapeHtml(row.sent_by || "Unknown")}</span>` : ""}
             </div>
           </div>
-        </div>
-      `).join("")}
+        </div>`;
+      }).join("")}
     </div>
   `;
 }
@@ -2678,6 +2989,8 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_job_id INTEGER;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_paid_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_checkout_session_id TEXT;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS invoices_source_job_idx ON invoices (source_job_id, created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS invoices_stripe_link_idx ON invoices (stripe_payment_link_id);`);
 
@@ -2964,9 +3277,51 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS invoice_id INTEGER;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS stripe_checkout_session_id TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS stripe_payment_intent_id TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS last_webhook_event_id TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMP;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_job_idx ON job_payment_links (job_id, created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_invoice_idx ON job_payment_links (invoice_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_session_idx ON job_payment_links (provider_session_id);`);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_checkout_idx ON job_payment_links (stripe_checkout_session_id);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stripe_payment_receipts (
+      id SERIAL PRIMARY KEY,
+      checkout_session_id TEXT UNIQUE NOT NULL,
+      payment_link_row_id INTEGER NOT NULL,
+      job_id INTEGER NOT NULL,
+      invoice_id INTEGER,
+      stripe_payment_link_id TEXT,
+      payment_intent_id TEXT,
+      amount_paid NUMERIC(10,2),
+      currency TEXT,
+      event_id TEXT,
+      paid_at TIMESTAMP,
+      raw_summary TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS stripe_payment_receipts_job_idx ON stripe_payment_receipts (job_id, paid_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS stripe_payment_receipts_link_idx ON stripe_payment_receipts (payment_link_row_id, paid_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+      event_id TEXT PRIMARY KEY,
+      event_type TEXT,
+      status TEXT DEFAULT 'received',
+      payload TEXT,
+      error TEXT,
+      received_at TIMESTAMP DEFAULT NOW(),
+      processed_at TIMESTAMP
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS stripe_webhook_events_status_idx ON stripe_webhook_events (status, received_at DESC);`);
+
 
 
   await pool.query(`
@@ -8161,8 +8516,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
                   <input name="reason" value="Locksmith services${job.postcode ? ` (${escapeHtml(job.postcode)})` : ""}" maxlength="180" required>
                   <div id="stripe-vat-preview" class="stripe-warning stripe-ok" style="margin-top:8px;">${jobOutstandingAmount(job) !== null ? `NET ${money(stripeVatBreakdown(jobOutstandingAmount(job)).net)} · VAT @ 20% ${money(stripeVatBreakdown(jobOutstandingAmount(job)).vat)} · GROSS ${money(stripeVatBreakdown(jobOutstandingAmount(job)).gross)}` : "Enter the gross amount to see NET and VAT."}</div>
                   <p class="muted-note"><strong>Invoice:</strong> 24H Online Services Ltd · Card · UK VAT 20%</p>
+                  <p class="muted-note">${stripeWebhookConfigured() ? "Automatic Stripe payment confirmation is ON." : "Automatic confirmation needs STRIPE_WEBHOOK_SECRET. Check payment works as a backup."}</p>
                   <button type="submit" ${stripeReady() ? "" : "disabled"}>Create Invoice & Stripe Link</button>
-                  <p class="muted-note">Creates the PDF invoice and reusable Stripe Payment Link together, both stored against this job. Webhook auto-reconciliation is not enabled yet.</p>
+                  <p class="muted-note">Creates the PDF invoice and Stripe Payment Link together. Paid links are automatically reconciled when STRIPE_WEBHOOK_SECRET is configured; Check payment is available as a backup.</p>
                 </form>
                 ${renderStripePaymentLinks(stripeRows)}
               </div>
@@ -12743,6 +13099,64 @@ app.post("/disputes/save", async (req, res) => {
   } catch (error) {
     console.error("Save dispute error:", error);
     res.status(500).send("Save dispute error. Check Render logs.");
+  }
+});
+
+
+app.post("/stripe/webhook", async (req, res) => {
+  try {
+    verifyStripeWebhookSignature(req.rawBody, req.headers["stripe-signature"]);
+    const event = req.body;
+    const result = await processStripeWebhookEvent(event);
+    res.status(200).json({ received: true, result });
+  } catch (error) {
+    console.error("Stripe webhook error:", error);
+    res.status(400).send(`Stripe webhook error: ${String(error.message || error)}`);
+  }
+});
+
+app.post("/jobs/:id/stripe-link/:linkId/check-payment", async (req, res) => {
+  const jobId = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+  try {
+    const link = (await pool.query(`SELECT id, job_id FROM job_payment_links WHERE id=$1 AND job_id=$2`, [linkId, jobId])).rows[0];
+    if (!link) return res.status(404).send("Payment link not found.");
+    const checkedBy = currentAgentName(req) || "Unknown";
+    const result = await syncStripePaymentLink(linkId, `${checkedBy} manual Stripe check`);
+    if (!result.paid) await addJobAuditEntry(jobId, "stripe_payment_checked", "Stripe payment check", "—", "No paid Stripe Checkout Session found yet.", checkedBy);
+    res.redirect(`/jobs/${jobId}/edit#stripe-card`);
+  } catch (error) {
+    console.error("Manual Stripe payment check error:", error);
+    res.status(500).send(`Could not check Stripe payment: ${escapeHtml(error.message || String(error))}`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+
+    const job = (await pool.query(`
+      SELECT id FROM jobs
+      WHERE id=$1 AND (assigned_technician_id=$2 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name)=LOWER($3)))
+    `, [jobId, tech.id, tech.name])).rows[0];
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const link = (await pool.query(`SELECT id FROM job_payment_links WHERE id=$1 AND job_id=$2`, [linkId, jobId])).rows[0];
+    if (!link) return res.status(404).send('Payment link not found.');
+
+    const source = `${tech.name} workspace manual Stripe check`;
+    const result = await syncStripePaymentLink(linkId, source);
+    if (!result.paid) await addJobAuditEntry(jobId, 'stripe_payment_checked', 'Stripe payment check', '—', 'No paid Stripe Checkout Session found yet.', `${tech.name} workspace`);
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${jobId}`);
+  } catch (error) {
+    console.error('Technician manual Stripe payment check error:', error);
+    res.status(500).send(`Could not check Stripe payment: ${escapeHtml(error.message || String(error))}`);
   }
 });
 
