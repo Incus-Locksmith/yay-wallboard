@@ -2584,6 +2584,16 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS imported_from TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_order_id TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_portal_url TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_imported BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS imported_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS import_batch TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS original_status TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS original_technician_name TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS original_raw_json JSONB;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS jobs_old_order_id_unique ON jobs (old_order_id) WHERE old_order_id IS NOT NULL;`);
 
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);`);
@@ -6234,6 +6244,46 @@ function jobAddressBlock(job) {
   ].filter(Boolean).map(escapeHtml).join("<br>");
 }
 
+function getOriginalRawJob(job) {
+  if (!job || !job.original_raw_json) return {};
+  if (typeof job.original_raw_json === "object") return job.original_raw_json || {};
+  try {
+    return JSON.parse(job.original_raw_json);
+  } catch (error) {
+    return {};
+  }
+}
+
+function originalRawValue(job, key) {
+  const raw = getOriginalRawJob(job);
+  return raw && raw[key] !== undefined && raw[key] !== null ? String(raw[key]) : "";
+}
+
+function importedHistoryCard(job) {
+  if (!job || !job.is_imported) return "";
+
+  const oldOrderId = job.old_order_id || String(job.job_number || "").replace(/^OLD-/i, "");
+  const rawCreated = originalRawValue(job, "created_at_old_portal");
+  const rawCompleted = originalRawValue(job, "completed_at_old_portal");
+  const createdDisplay = job.created_at ? formatDateTime(job.created_at) : (rawCreated || "—");
+  const closedDisplay = job.closed_at ? formatDateTime(job.closed_at) : (rawCompleted || "—");
+
+  return `
+    <div class="control-card imported-history-card">
+      <h2>Imported old portal history</h2>
+      <div class="job-info-grid">
+        <div class="info-block"><strong>Old order ID</strong><span>${escapeHtml(job.job_number || (oldOrderId ? `OLD-${oldOrderId}` : "—"))}</span></div>
+        <div class="info-block"><strong>Imported from</strong><span>${escapeHtml(job.imported_from || "Keys Portal")}</span></div>
+        <div class="info-block"><strong>Original appointment / order made</strong><span>${escapeHtml(createdDisplay)}</span>${rawCreated ? `<div class="muted-note">Old portal text: ${escapeHtml(rawCreated)}</div>` : ""}</div>
+        <div class="info-block"><strong>Original completed / closed</strong><span>${escapeHtml(closedDisplay)}</span>${rawCompleted ? `<div class="muted-note">Old portal text: ${escapeHtml(rawCompleted)}</div>` : ""}</div>
+        <div class="info-block"><strong>Original status</strong><span>${escapeHtml(job.original_status || job.status || "—")}</span></div>
+        <div class="info-block"><strong>Original technician</strong><span>${escapeHtml(job.original_technician_name || job.tech_notes || "—")}</span></div>
+        <div class="info-block wide"><strong>Warranty / complaint check</strong><span>Use the original completed / closed date above when checking warranty timeframes.</span></div>
+      </div>
+    </div>
+  `;
+}
+
 
 function jobAddressPlain(job) {
   return [
@@ -7580,12 +7630,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
       LIMIT 30
     `, [id])).rows;
 
+    const isImportedJob = Boolean(job.is_imported);
     const activityItems = [
-      { label: "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
+      { label: isImportedJob ? "Old portal order made" : "Order created", value: `${formatDateTime(job.created_at)} by ${job.dispatcher_name || "Unknown"}` },
       { label: "Current status", value: jobStatusLabel(job.status) },
-      { label: "Technician", value: job.technician_name || "Unassigned" },
+      { label: "Technician", value: job.technician_name || job.original_technician_name || "Unassigned" },
       { label: "Last updated", value: formatDateTime(job.updated_at) },
-      { label: "Closed", value: job.closed_at ? `${formatDateTime(job.closed_at)} by ${job.closed_by || "Unknown"}` : "Not closed yet" }
+      { label: isImportedJob ? "Old portal completed / closed" : "Closed", value: job.closed_at ? `${formatDateTime(job.closed_at)} by ${job.closed_by || "Unknown"}` : "Not closed yet" }
     ];
 
     res.send(`
@@ -7656,6 +7707,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
           .danger-zone-card details summary { cursor: pointer; color: #991b1b; font-weight: 900; font-size: 13px; }
           .danger-zone-card p { color: #7f1d1d; font-size: 12px; line-height: 1.5; }
           .danger-zone-card .delete-job-button { margin-top: 8px; }
+          .imported-history-card { border-color:#bfdbfe; background:#f8fbff; }
+          .imported-history-card h2 { color:#1d4ed8; }
+          .info-block.wide { grid-column: 1 / -1; }
           .pill-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
           @media (max-width: 1180px) {
             .job-control-grid { grid-template-columns: 1fr; }
@@ -7671,8 +7725,8 @@ app.get("/jobs/:id/edit", async (req, res) => {
           <div class="job-control-header">
             <div class="job-control-title">
               <h1>${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` · ${escapeHtml(job.postcode)}` : ""} Control Panel</h1>
-              <div class="subtitle">Created ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · Last updated ${formatDateTime(job.updated_at)}</div>
-              <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></div>
+              <div class="subtitle">${isImportedJob ? "Old portal order made" : "Created"} ${formatDateTime(job.created_at)} by ${escapeHtml(job.dispatcher_name || "Unknown")} · ${isImportedJob ? "Old portal closed" : "Last updated"} ${isImportedJob && job.closed_at ? formatDateTime(job.closed_at) : formatDateTime(job.updated_at)}</div>
+              <div class="pill-row"><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>${isImportedJob ? `<span class="pill" style="background:#dbeafe;color:#1d4ed8;">Imported history</span>` : ""}</div>
             </div>
             <div class="job-control-actions">
               <a class="action-button" href="#appointment-card">Edit appointment</a>
@@ -7689,6 +7743,8 @@ app.get("/jobs/:id/edit", async (req, res) => {
             <div class="summary-kpi"><div class="kpi-label">Technician</div><div class="kpi-value">${escapeHtml(job.technician_name || "Unassigned")}</div></div>
             <div class="summary-kpi"><div class="kpi-label">ETA / scheduled</div><div class="kpi-value">${escapeHtml(job.eta === "Scheduled" && job.scheduled_at ? scheduledDisplay(job.scheduled_at) : (job.eta || "—"))}</div></div>
           </div>
+
+          ${importedHistoryCard(job)}
 
           <div class="job-control-grid">
             <main>
