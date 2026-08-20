@@ -13582,7 +13582,7 @@ app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', asy
 
 
 // -----------------------------------------------------------------------------
-// Mobile Orders v89 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
+// Mobile Orders v90 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
 // Uses the same authenticated portal session and the same Postgres jobs table.
 // -----------------------------------------------------------------------------
 
@@ -13605,6 +13605,7 @@ function mobileOrdersStyles() {
     .mobile-big-action small { display:block; margin-top:5px; font-weight:600; font-size:12px; opacity:.76; }
     .mobile-big-action.create { background:#16a34a; color:#fff; border-color:#16a34a; }
     .mobile-big-action.close { background:#fff; color:#172433; }
+    .mobile-big-action.summary { background:#eff6ff; color:#1e3a8a; border-color:#bfdbfe; }
     .mobile-big-action.opportunity { background:#f59e0b; color:#172433; border-color:#f59e0b; }
     .mobile-panel { background:#fff; border:1px solid #dbe3ec; border-radius:20px; padding:18px; margin-top:14px; box-shadow:0 9px 24px rgba(15,23,42,.05); }
     .mobile-panel h2 { margin:0 0 14px; font-size:18px; }
@@ -13691,7 +13692,7 @@ function mobileOrdersPage(req, title, content, extraScript = "") {
   <body class="mobile-orders-page"><main class="mobile-shell">
     <div class="mobile-top"><div class="mobile-brand-wrap"><img class="mobile-brand-icon" src="/mobile-orders/icon-192.png" alt="Keys247"><div><div class="mobile-brand">Keys247 Orders</div><div class="mobile-brand-sub">Fast create and close workflow</div></div></div><div class="mobile-user">${escapeHtml(currentAgentName(req) || "Portal user")}<br><a href="/logout" style="color:#64748b">Logout</a></div></div>
     ${content}
-    <div class="mobile-footer">Mobile Orders v89 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
+    <div class="mobile-footer">Mobile Orders v90 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
   </main><script>${pageScript}</script></body></html>`;
 }
 
@@ -13729,7 +13730,7 @@ app.get('/mobile-orders/sw.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript');
   res.setHeader('Cache-Control', 'no-cache');
   res.send(`
-    const CACHE_NAME = 'keys247-mobile-orders-v89';
+    const CACHE_NAME = 'keys247-mobile-orders-v90';
     const ASSETS = ['/mobile-orders', '/mobile-orders/create', '/mobile-orders/close', '/mobile-orders/manifest.webmanifest', '/mobile-orders/icon-192.png', '/mobile-orders/icon-512.png'];
     self.addEventListener('install', event => {
       event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -13766,11 +13767,93 @@ app.get("/mobile-orders", async (req, res) => {
         <a class="mobile-big-action create" href="/mobile-orders/create">＋ Create Order<small>${Number(counts.created_today||0)} created today</small></a>
         <a class="mobile-big-action close" href="/mobile-orders/close">✓ Close Order<small>${Number(counts.open_jobs||0)} open · ${Number(counts.closed_today||0)} closed today</small></a>
         <a class="mobile-big-action opportunity" href="/mobile-orders/no-booking">☎ Log No Booking<small>${Number(counts.opportunities_today||0)} logged today</small></a>
+        <a class="mobile-big-action summary" href="/mobile-orders/today">☰ View Today’s Jobs<small>Open only when you want the day summary</small></a>
       </div>
     `));
   } catch (error) {
     console.error("Mobile orders home error:", error);
     res.status(500).send("Could not load Mobile Orders.");
+  }
+});
+
+
+app.get("/mobile-orders/today", async (req, res) => {
+  try {
+    const jobs = (await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE COALESCE(j.is_imported,FALSE)=FALSE
+        AND (
+          j.created_at::date = CURRENT_DATE
+          OR j.closed_at::date = CURRENT_DATE
+          OR j.scheduled_at::date = CURRENT_DATE
+        )
+      ORDER BY
+        CASE WHEN j.closed_at IS NULL AND COALESCE(j.status,'open') NOT IN ('cancelled','fully_paid') THEN 0 ELSE 1 END,
+        COALESCE(j.scheduled_at, j.created_at) ASC,
+        j.id ASC
+    `)).rows;
+
+    const counts = jobs.reduce((acc, job) => {
+      const status = String(job.status || "open").toLowerCase();
+      const closed = Boolean(job.closed_at) || ["fully_paid","closed","cancelled","cancelled_before_arrival","cancelled_onsite"].includes(status);
+      if (closed) acc.closed += 1;
+      else acc.open += 1;
+      if (!job.assigned_technician_id && !closed) acc.unassigned += 1;
+      acc.gross += Number(job.final_value || job.quoted_price || 0);
+      return acc;
+    }, { open:0, closed:0, unassigned:0, gross:0 });
+
+    const cards = jobs.map(job => {
+      const status = escapeHtml(jobStatusLabel(job.status));
+      const when = job.scheduled_at
+        ? `Scheduled ${escapeHtml(formatDateTime(job.scheduled_at))}`
+        : `Created ${escapeHtml(formatDateTime(job.created_at))}`;
+      const value = Number(job.final_value || job.quoted_price || 0);
+      return `
+        <div class="mobile-job">
+          <div class="mobile-job-head">
+            <div>
+              <div class="mobile-job-title">${escapeHtml(job.job_number || jobNumber(job.id))} · ${escapeHtml(job.postcode || "")}</div>
+              <div class="mobile-job-meta">
+                ${escapeHtml(job.customer_name || "")}${job.customer_phone ? ` · ${escapeHtml(job.customer_phone)}` : ""}<br>
+                ${escapeHtml(job.job_type || "")} · ${escapeHtml(job.technician_name || "Unassigned")}<br>
+                ${when}${job.source_campaign ? ` · ${escapeHtml(job.source_campaign)}` : ""}
+                ${value ? `<br>Value: ${money(value)}` : ""}
+              </div>
+            </div>
+            <span class="mobile-pill">${status}</span>
+          </div>
+          ${job.closed_at
+            ? `<a class="mobile-secondary" href="/jobs/${job.id}/edit">Open full order</a>`
+            : `<a class="mobile-button" href="/mobile-orders/job/${job.id}/close">Open / Close Order</a>`}
+        </div>
+      `;
+    }).join("");
+
+    res.send(mobileOrdersPage(req, "Today’s Jobs", `
+      <section class="mobile-hero">
+        <h1>Today’s Jobs</h1>
+        <p>A quick day summary when you need it. This stays off the home screen until you open it.</p>
+      </section>
+
+      <div class="mobile-panel">
+        <div class="mobile-grid-2">
+          <div class="mobile-note mobile-success"><strong>${jobs.length}</strong><br>Total today</div>
+          <div class="mobile-note"><strong>${counts.open}</strong><br>Still open</div>
+          <div class="mobile-note"><strong>${counts.closed}</strong><br>Closed / finished</div>
+          <div class="mobile-note ${counts.unassigned ? "mobile-danger" : "mobile-success"}"><strong>${counts.unassigned}</strong><br>Unassigned</div>
+        </div>
+        <div class="mobile-money-preview">Recorded / quoted value today: ${money(counts.gross)}</div>
+      </div>
+
+      ${cards || '<div class="mobile-panel mobile-empty">No jobs recorded for today yet.</div>'}
+      <a class="mobile-secondary" href="/mobile-orders">← Mobile Orders Home</a>
+    `));
+  } catch (error) {
+    console.error("Mobile today summary error:", error);
+    res.status(500).send("Could not load today’s job summary.");
   }
 });
 
