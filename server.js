@@ -1419,7 +1419,7 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
 
   // Yay's campaign confirm endpoint has returned 404 for a newly-created draft campaign in live testing.
   // To avoid creating a draft that cannot be confirmed, create the campaign as non-draft so Yay queues it directly.
-  // send_on still has to be in the future, so we use a safe fifteen-minute buffer.
+  // send_on still has to be in the future, so we use a two-minute buffer.
   const payload = {
     campaign_name: campaignName,
     message_content: message,
@@ -1442,6 +1442,87 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
     }).slice(0, 1600)
   };
 }
+
+function stripeSecretKey() {
+  return String(process.env.STRIPE_SECRET_KEY || "").trim();
+}
+
+function stripeConfigured() {
+  return Boolean(stripeSecretKey());
+}
+
+function stripeModeLabel() {
+  const envMode = String(process.env.STRIPE_MODE || "").trim();
+  if (envMode) return envMode;
+  const key = stripeSecretKey();
+  if (key.startsWith("sk_live_")) return "live";
+  if (key.startsWith("sk_test_")) return "test";
+  return "unknown";
+}
+
+function portalBaseUrl(req) {
+  const envBase = String(process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").trim().replace(/\/$/, "");
+  if (envBase) return envBase;
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "yay-wallboard.onrender.com";
+  return `${proto}://${host}`.replace(/\/$/, "");
+}
+
+async function stripeApiFormRequest(path, formData) {
+  if (!stripeConfigured()) throw new Error("Stripe secret key is missing from Render environment variables.");
+
+  const response = await fetch(`https://api.stripe.com${path}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${stripeSecretKey()}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: formData
+  });
+
+  const text = await response.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (_) {}
+
+  if (!response.ok) {
+    const message = json && json.error && json.error.message ? json.error.message : (text || `Stripe API failed with status ${response.status}`);
+    throw new Error(message);
+  }
+  return { text, json, status: response.status };
+}
+
+function buildStripePaymentSms(job, link) {
+  const tel = process.env.SMS_OFFICE_TEL || companies.locksmiths.tel || "020 3870 3732";
+  const ref = job.job_number || jobNumber(job.id);
+  return `Hi ${job.customer_name || "there"}, please use this secure payment link for your locksmith job ${ref}: ${link.payment_url}. 24H Locksmiths: ${tel}. Please do not reply to this SMS.`;
+}
+
+function renderStripePaymentLinks(rows = []) {
+  if (!rows.length) return `<p class="muted-note">No Stripe payment links created for this job yet.</p>`;
+  return `
+    <div class="activity-list">
+      ${rows.map(row => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div>
+            <div class="activity-label">${escapeHtml(row.status || "created")} · ${money(row.amount || 0)} · ${escapeHtml((row.currency || "GBP").toUpperCase())}</div>
+            <div class="activity-value">
+              ${escapeHtml(row.reason || "Stripe payment link")}<br>
+              <a href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open Stripe link</a>
+              <button class="copy-mini" type="button" style="margin-left:8px; padding:7px 10px;" data-link="${escapeHtml(row.payment_url || "")}" onclick="copyText(this.dataset.link)">Copy</button>
+              <form method="POST" action="/jobs/${row.job_id}/stripe-link/${row.id}/send-sms" style="display:inline; margin-left:8px;" onsubmit="return confirm('Send this Stripe payment link by SMS?');">
+                <button type="submit" class="copy-mini" style="padding:7px 10px; background:#188a18;">Send SMS</button>
+              </form>
+              <br><span class="muted">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")} · ${escapeHtml(row.stripe_mode || "unknown")} mode</span>
+              ${row.sent_at ? `<br><span class="muted">SMS sent ${escapeHtml(formatDateTime(row.sent_at))} by ${escapeHtml(row.sent_by || "Unknown")}</span>` : ""}
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 
 function parseMoneyInput(value) {
   if (value === null || value === undefined || String(value).trim() === "") return null;
@@ -2689,6 +2770,42 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_evidence_links ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_job_idx ON job_evidence_links (job_id, added_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_evidence_links_archive_idx ON job_evidence_links (archived, added_at);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_payment_links (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      provider TEXT DEFAULT 'stripe',
+      amount NUMERIC(10,2) NOT NULL,
+      currency TEXT DEFAULT 'gbp',
+      reason TEXT,
+      payment_url TEXT NOT NULL,
+      provider_session_id TEXT,
+      status TEXT DEFAULT 'created',
+      stripe_mode TEXT,
+      provider_response TEXT,
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      sent_by TEXT,
+      sent_at TIMESTAMP
+    );
+  `);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'stripe';`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'gbp';`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS reason TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS payment_url TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS provider_session_id TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'created';`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS stripe_mode TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS provider_response TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS created_by TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
+  await pool.query(`ALTER TABLE job_payment_links ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_job_idx ON job_payment_links (job_id, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_payment_links_session_idx ON job_payment_links (provider_session_id);`);
 
 
   await pool.query(`
@@ -7569,6 +7686,10 @@ app.get("/jobs/:id/summary", async (req, res) => {
         </div>
 
         <script>
+          function copyText(text) {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => alert("Copied to clipboard."));
+          }
           function copySummary() {
             const box = document.getElementById("techSummary");
             box.focus();
@@ -7628,6 +7749,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
       WHERE job_id = $1
       ORDER BY created_at DESC, id DESC
       LIMIT 30
+    `, [id])).rows;
+
+    const stripeRows = (await pool.query(`
+      SELECT * FROM job_payment_links
+      WHERE job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 20
     `, [id])).rows;
 
     const isImportedJob = Boolean(job.is_imported);
@@ -7711,6 +7839,9 @@ app.get("/jobs/:id/edit", async (req, res) => {
           .imported-history-card h2 { color:#1d4ed8; }
           .info-block.wide { grid-column: 1 / -1; }
           .pill-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+          .stripe-warning { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; padding:12px; border-radius:14px; font-weight:800; font-size:13px; line-height:1.45; }
+          .stripe-live { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+          .stripe-ok { background:#f0fdf4; border-color:#bbf7d0; color:#166534; }
           @media (max-width: 1180px) {
             .job-control-grid { grid-template-columns: 1fr; }
             .summary-kpis, .money-grid, .edit-form-grid, .job-info-grid { grid-template-columns: 1fr; }
@@ -7858,6 +7989,20 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 <button class="copy-mini" type="button" onclick="copySummary()">Copy summary</button>
               </div>
 
+              <div class="control-card" id="stripe-card">
+                <h2>Stripe payment links</h2>
+                ${stripeConfigured() ? `<div class="stripe-warning ${stripeModeLabel() === "live" ? "stripe-live" : "stripe-ok"}">Stripe is configured in ${escapeHtml(stripeModeLabel()).toUpperCase()} mode. ${stripeModeLabel() === "live" ? "Live links can take real customer payments." : "Test links are safe for testing."}</div>` : `<div class="stripe-warning">Stripe is not configured. Add STRIPE_SECRET_KEY in Render to create payment links.</div>`}
+                <form method="POST" action="/jobs/${job.id}/stripe-link" class="quick-form" onsubmit="return confirm('Create a Stripe payment link for this amount?');">
+                  <label>Amount to request</label>
+                  <input name="amount" value="${job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 150.00" required>
+                  <label>Payment reason / note</label>
+                  <input name="reason" value="Locksmith job ${escapeHtml(job.job_number || jobNumber(job.id))}${job.postcode ? ` - ${escapeHtml(job.postcode)}` : ""}" maxlength="180" required>
+                  <button type="submit" ${stripeConfigured() ? "" : "disabled"}>Create Stripe payment link</button>
+                  <p class="muted-note">First version creates a Stripe Checkout payment link and stores it against the job. Webhook auto-reconciliation can be added later.</p>
+                </form>
+                ${renderStripePaymentLinks(stripeRows)}
+              </div>
+
               <div class="control-card" id="sms-card">
                 <h2>Send SMS</h2>
                 ${renderSmsConfigNotice()}
@@ -7925,6 +8070,10 @@ app.get("/jobs/:id/edit", async (req, res) => {
           </div>
         </div>
         <script>
+          function copyText(text) {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => alert("Copied to clipboard."));
+          }
           function copySummary() {
             const box = document.getElementById("techSummary");
             box.focus();
@@ -8046,6 +8195,120 @@ app.post("/jobs/:id/evidence", async (req, res) => {
   }
 });
 
+
+app.post("/jobs/:id/stripe-link", async (req, res) => {
+  const id = Number(req.params.id);
+  const client = await pool.connect();
+  try {
+    const jobResult = await client.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+    const job = jobResult.rows[0];
+    const amount = parseMoneyInput(req.body.amount);
+    const reason = String(req.body.reason || `Locksmith job ${job.job_number || jobNumber(job.id)}`).trim();
+    if (!amount || amount <= 0) return res.status(400).send("Stripe amount must be greater than zero.");
+    if (!stripeConfigured()) return res.status(400).send("Stripe is not configured. Add STRIPE_SECRET_KEY in Render.");
+
+    const baseUrl = portalBaseUrl(req);
+    const unitAmount = Math.round(amount * 100);
+    const ref = job.job_number || jobNumber(job.id);
+    const description = `${reason} · ${job.postcode || ""}`.slice(0, 240);
+
+    const form = new URLSearchParams();
+    form.append("mode", "payment");
+    form.append("success_url", `${baseUrl}/jobs/${id}/edit?stripe=success#stripe-card`);
+    form.append("cancel_url", `${baseUrl}/jobs/${id}/edit?stripe=cancelled#stripe-card`);
+    form.append("payment_method_types[0]", "card");
+    form.append("line_items[0][quantity]", "1");
+    form.append("line_items[0][price_data][currency]", "gbp");
+    form.append("line_items[0][price_data][unit_amount]", String(unitAmount));
+    form.append("line_items[0][price_data][product_data][name]", `24H Locksmiths payment ${ref}`);
+    form.append("line_items[0][price_data][product_data][description]", description);
+    form.append("metadata[job_id]", String(job.id));
+    form.append("metadata[job_number]", ref);
+    form.append("metadata[postcode]", job.postcode || "");
+    form.append("metadata[customer_phone]", job.customer_phone || "");
+    form.append("customer_creation", "if_required");
+    if (job.customer_email) form.append("customer_email", job.customer_email);
+
+    const stripeResult = await stripeApiFormRequest("/v1/checkout/sessions", form);
+    const session = stripeResult.json || {};
+    if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+
+    await client.query(`
+      INSERT INTO job_payment_links (job_id, provider, amount, currency, reason, payment_url, provider_session_id, status, stripe_mode, provider_response, created_by, created_at)
+      VALUES ($1, 'stripe', $2, 'gbp', $3, $4, $5, 'created', $6, $7, $8, NOW())
+    `, [
+      id,
+      amount,
+      reason,
+      session.url,
+      session.id || "",
+      stripeModeLabel(),
+      JSON.stringify({ id: session.id, url: session.url, payment_status: session.payment_status, amount_total: session.amount_total }).slice(0, 1600),
+      currentAgentName(req) || "Unknown"
+    ]);
+
+    await addJobAuditEntry(id, "stripe_link_created", "Stripe payment link", "—", `${money(amount)} ${reason}`, currentAgentName(req) || "Unknown");
+    res.redirect(`/jobs/${id}/edit#stripe-card`);
+  } catch (error) {
+    console.error("Stripe payment link error:", error);
+    res.status(500).send(`Stripe payment link error: ${escapeHtml(error.message || String(error))}. Check Render logs.`);
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/jobs/:id/stripe-link/:linkId/send-sms", async (req, res) => {
+  const id = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+  try {
+    const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+    const job = jobResult.rows[0];
+
+    const linkResult = await pool.query(`SELECT * FROM job_payment_links WHERE id = $1 AND job_id = $2`, [linkId, id]);
+    if (!linkResult.rows.length) return res.status(404).send("Payment link not found");
+    const link = linkResult.rows[0];
+
+    const to = cleanSmsNumber(job.customer_phone);
+    if (!to) return res.status(400).send("Customer phone number is missing.");
+    const message = buildStripePaymentSms(job, link);
+
+    let status = "sent";
+    let providerResponse = "";
+    try {
+      const sendResult = await sendYaySms(to, message, `${job.job_number || jobNumber(job.id)} - Stripe payment link`);
+      status = sendResult.status;
+      providerResponse = sendResult.providerResponse;
+    } catch (sendError) {
+      status = "failed";
+      providerResponse = sendError.message;
+      console.error("Stripe payment SMS error:", sendError);
+    }
+
+    await pool.query(`
+      INSERT INTO job_sms_log (job_id, sent_to, sms_type, template_name, message_body, status, provider, provider_response, sent_by, created_at)
+      VALUES ($1, $2, 'stripe_payment_link', 'Stripe payment link', $3, $4, 'yay', $5, $6, NOW())
+    `, [id, to, message, status, providerResponse, currentAgentName(req) || "Unknown"]);
+
+    await pool.query(`
+      UPDATE job_payment_links
+      SET sent_at = NOW(), sent_by = $1, status = CASE WHEN $2 = 'failed' THEN 'sms_failed' ELSE 'sms_sent' END
+      WHERE id = $3
+    `, [currentAgentName(req) || "Unknown", status, linkId]);
+
+    await addJobAuditEntry(id, "stripe_link_sms_sent", "Stripe payment SMS", "—", `${money(link.amount)} link to ${to}: ${status}`, currentAgentName(req) || "Unknown");
+    res.redirect(`/jobs/${id}/edit#stripe-card`);
+  } catch (error) {
+    console.error("Stripe payment SMS route error:", error);
+    res.status(500).send("Could not send Stripe payment SMS. Check Render logs.");
+  }
+});
 
 app.post("/jobs/:id/send-sms", async (req, res) => {
   const id = Number(req.params.id);
