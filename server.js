@@ -13517,7 +13517,7 @@ app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', asy
 
 
 // -----------------------------------------------------------------------------
-// Mobile Orders v87 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
+// Mobile Orders v88 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
 // Uses the same authenticated portal session and the same Postgres jobs table.
 // -----------------------------------------------------------------------------
 
@@ -13625,7 +13625,7 @@ function mobileOrdersPage(req, title, content, extraScript = "") {
   <body class="mobile-orders-page"><main class="mobile-shell">
     <div class="mobile-top"><div class="mobile-brand-wrap"><img class="mobile-brand-icon" src="/mobile-orders/icon-192.png" alt="Keys247"><div><div class="mobile-brand">Keys247 Orders</div><div class="mobile-brand-sub">Fast create and close workflow</div></div></div><div class="mobile-user">${escapeHtml(currentAgentName(req) || "Portal user")}<br><a href="/logout" style="color:#64748b">Logout</a></div></div>
     ${content}
-    <div class="mobile-footer">Mobile Orders v87 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
+    <div class="mobile-footer">Mobile Orders v88 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
   </main><script>${pageScript}</script></body></html>`;
 }
 
@@ -13663,7 +13663,7 @@ app.get('/mobile-orders/sw.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript');
   res.setHeader('Cache-Control', 'no-cache');
   res.send(`
-    const CACHE_NAME = 'keys247-mobile-orders-v87';
+    const CACHE_NAME = 'keys247-mobile-orders-v88';
     const ASSETS = ['/mobile-orders', '/mobile-orders/create', '/mobile-orders/close', '/mobile-orders/manifest.webmanifest', '/mobile-orders/icon-192.png', '/mobile-orders/icon-512.png'];
     self.addEventListener('install', event => {
       event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -13743,7 +13743,7 @@ app.get("/mobile-orders/create", async (req, res) => {
           <div class="mobile-section-title">Order</div>
           <div class="mobile-field"><label>Job category</label><select name="job_type" required><option value="">Select category</option>${categories.map(c=>`<option>${escapeHtml(c)}</option>`).join("")}</select></div>
           <div class="mobile-field"><label>Description</label><textarea name="job_description" placeholder="What does the customer need?"></textarea></div>
-          <div class="mobile-field"><label>Source / campaign</label><select name="source_campaign" required>${campaignOptions}</select><div class="mobile-inline-note">Required so reporting and campaign tracking stay accurate.</div></div>
+          <div class="mobile-field"><label>Source / campaign</label><select name="source_campaign" required><option value="">Select campaign...</option>${optionList(campaignOptions, "")}</select><div class="mobile-inline-note">Required so reporting and campaign tracking stay accurate.</div></div>
           <div class="mobile-grid-2"><div class="mobile-field"><label>Quoted price</label><input name="quoted_price" inputmode="decimal" placeholder="£"></div><div class="mobile-field"><label>Expected payment</label><select name="expected_payment_method"><option>Unknown</option>${splitPaymentMethods.map(m=>`<option>${escapeHtml(m)}</option>`).join("")}</select></div></div>
           <div class="mobile-section-title">Dispatch</div>
           <div class="mobile-field"><label>Technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${techOptions}</select></div>
