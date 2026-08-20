@@ -2705,6 +2705,7 @@ function nav(req) {
         <a class="side-link${active("/call-wallboard")}" href="/call-wallboard"><span class="side-dot dot-green"></span><span>Call wallboard</span></a>
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
+        <a class="side-link${active("/mobile-orders")}" href="/mobile-orders"><span class="side-dot dot-green"></span><span>Mobile Orders</span></a>
         <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
         <a class="side-link${active("/campaigns")}" href="/campaigns"><span class="side-dot dot-amber"></span><span>Campaigns</span></a>
         <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
@@ -13511,6 +13512,224 @@ app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', asy
     console.error('Technician manual Stripe payment check error:', error);
     res.status(500).send(`Could not check Stripe payment: ${escapeHtml(error.message || String(error))}`);
   }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// Mobile Orders v85 — deliberately stripped back to Create + Close only.
+// Uses the same authenticated portal session and the same Postgres jobs table.
+// -----------------------------------------------------------------------------
+
+function mobileOrdersStyles() {
+  return `
+    * { box-sizing: border-box; }
+    body.mobile-orders-page { margin:0; background:#f3f6fa; color:#132238; font-family:Arial,Helvetica,sans-serif; }
+    .mobile-shell { width:100%; max-width:720px; margin:0 auto; padding:16px 14px 42px; }
+    .mobile-top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 16px; }
+    .mobile-brand { font-size:14px; font-weight:900; letter-spacing:.02em; color:#263646; }
+    .mobile-user { font-size:12px; color:#64748b; text-align:right; }
+    .mobile-hero { background:#172433; color:#fff; border-radius:22px; padding:22px 20px; box-shadow:0 14px 36px rgba(15,23,42,.12); }
+    .mobile-hero h1 { margin:0 0 6px; font-size:26px; line-height:1.08; }
+    .mobile-hero p { margin:0; color:#d9e2ec; font-size:14px; line-height:1.45; }
+    .mobile-home-actions { display:grid; grid-template-columns:1fr; gap:14px; margin-top:18px; }
+    .mobile-big-action { display:block; text-decoration:none; border-radius:20px; padding:24px 20px; font-weight:900; font-size:21px; box-shadow:0 10px 26px rgba(15,23,42,.08); border:1px solid #dbe3ec; }
+    .mobile-big-action small { display:block; margin-top:5px; font-weight:600; font-size:12px; opacity:.76; }
+    .mobile-big-action.create { background:#16a34a; color:#fff; border-color:#16a34a; }
+    .mobile-big-action.close { background:#fff; color:#172433; }
+    .mobile-panel { background:#fff; border:1px solid #dbe3ec; border-radius:20px; padding:18px; margin-top:14px; box-shadow:0 9px 24px rgba(15,23,42,.05); }
+    .mobile-panel h2 { margin:0 0 14px; font-size:18px; }
+    .mobile-section-title { margin:18px 0 9px; color:#475569; font-size:12px; text-transform:uppercase; letter-spacing:.08em; font-weight:900; }
+    .mobile-field { margin:0 0 13px; }
+    .mobile-field label { display:block; margin:0 0 6px; font-size:12px; font-weight:900; color:#334155; }
+    .mobile-field input,.mobile-field select,.mobile-field textarea { width:100%; min-height:48px; border:1px solid #cbd5e1; border-radius:12px; padding:11px 12px; background:#fff; color:#0f172a; font:inherit; font-size:16px; }
+    .mobile-field textarea { min-height:86px; resize:vertical; }
+    .mobile-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .mobile-button { width:100%; min-height:52px; border:0; border-radius:14px; padding:13px 16px; background:#172433; color:#fff; font-weight:900; font-size:16px; cursor:pointer; }
+    .mobile-button.green { background:#16a34a; }
+    .mobile-button.red { background:#dc2626; }
+    .mobile-button.amber { background:#f59e0b; color:#172433; }
+    .mobile-secondary { display:block; text-align:center; color:#475569; font-weight:800; text-decoration:none; padding:13px 6px; margin-top:4px; }
+    .mobile-search { display:flex; gap:8px; margin-top:14px; }
+    .mobile-search input { flex:1; min-width:0; min-height:48px; border:1px solid #cbd5e1; border-radius:12px; padding:10px 12px; font-size:16px; }
+    .mobile-search button { min-width:92px; border:0; border-radius:12px; background:#172433; color:#fff; font-weight:900; }
+    .mobile-job { background:#fff; border:1px solid #dbe3ec; border-radius:17px; padding:15px; margin-top:11px; }
+    .mobile-job-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .mobile-job-title { font-weight:900; font-size:17px; }
+    .mobile-job-meta { color:#64748b; font-size:12px; line-height:1.5; margin-top:4px; }
+    .mobile-pill { white-space:nowrap; border-radius:999px; padding:5px 8px; background:#dcfce7; color:#166534; font-size:10px; font-weight:900; text-transform:uppercase; }
+    .mobile-job .mobile-button { margin-top:12px; min-height:44px; font-size:14px; text-decoration:none; display:flex; align-items:center; justify-content:center; }
+    .mobile-money-preview { background:#ecfdf5; border:1px solid #bbf7d0; color:#166534; border-radius:12px; padding:11px 12px; font-size:13px; font-weight:900; margin:4px 0 13px; }
+    .mobile-note { border-radius:12px; padding:11px 12px; font-size:12px; line-height:1.45; background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe; margin:0 0 13px; }
+    .mobile-success { background:#ecfdf5; color:#166534; border-color:#bbf7d0; }
+    .mobile-danger { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+    .mobile-empty { text-align:center; color:#64748b; padding:24px 10px; }
+    .mobile-footer { text-align:center; color:#94a3b8; font-size:11px; margin-top:24px; }
+    @media(max-width:520px){ .mobile-shell{padding:12px 10px 34px}.mobile-grid-2{grid-template-columns:1fr}.mobile-hero{border-radius:18px;padding:20px 16px}.mobile-hero h1{font-size:24px} }
+  `;
+}
+
+function mobileOrdersPage(req, title, content, extraScript = "") {
+  return `<!DOCTYPE html>
+  <html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>${escapeHtml(title)}</title>
+  <style>${mobileOrdersStyles()}</style></head>
+  <body class="mobile-orders-page"><main class="mobile-shell">
+    <div class="mobile-top"><div class="mobile-brand">Your Dispatch Partner</div><div class="mobile-user">${escapeHtml(currentAgentName(req) || "Portal user")}<br><a href="/logout" style="color:#64748b">Logout</a></div></div>
+    ${content}
+    <div class="mobile-footer">Mobile Orders v85 · Same live database as the Dispatch Portal</div>
+  </main>${extraScript ? `<script>${extraScript}</script>` : ""}</body></html>`;
+}
+
+app.get("/mobile-orders", async (req, res) => {
+  try {
+    const counts = (await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND closed_at IS NULL AND status NOT IN ('cancelled','fully_paid'))::int AS open_jobs,
+        COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND created_at::date=CURRENT_DATE)::int AS created_today,
+        COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND closed_at::date=CURRENT_DATE)::int AS closed_today
+      FROM jobs
+    `)).rows[0] || {};
+    res.send(mobileOrdersPage(req, "Mobile Orders", `
+      <section class="mobile-hero"><h1>Mobile Orders</h1><p>Fast access for creating and closing orders only. Everything saves into the main live portal.</p></section>
+      <div class="mobile-home-actions">
+        <a class="mobile-big-action create" href="/mobile-orders/create">＋ Create Order<small>${Number(counts.created_today||0)} created today</small></a>
+        <a class="mobile-big-action close" href="/mobile-orders/close">✓ Close Order<small>${Number(counts.open_jobs||0)} open · ${Number(counts.closed_today||0)} closed today</small></a>
+      </div>
+    `));
+  } catch (error) {
+    console.error("Mobile orders home error:", error);
+    res.status(500).send("Could not load Mobile Orders.");
+  }
+});
+
+app.get("/mobile-orders/create", async (req, res) => {
+  try {
+    const technicians = (await pool.query(`SELECT id,name,status,return_to_work_date FROM technicians WHERE active=TRUE ORDER BY name ASC`)).rows;
+    const techOptions = technicians.map(t => `<option value="${t.id}">${escapeHtml(t.name)}${t.status ? ` · ${escapeHtml(t.status)}` : ""}</option>`).join("");
+    const campaignOptions = await getCampaignOptions("Unknown");
+    const categories = ["BAILIFF (COURT ORDERED)","BIKE LOCK (FROM £75, 1HR ETA)","DOOR FIX/ REPLACEMENT","FIX LOCK","FRESH INSTALLATION (LOCK ON BLANK DOOR)","KEY BROKEN IN LOCK","KEY SAFE INSTALLATION","LOCK CHANGE","LOCKED IN","LOCKED OUT","OPEN SAFE (FROM £120)","QUOTE","RECALL (UNDER WARRANTY)","SPECIALIST"];
+    res.send(mobileOrdersPage(req, "Create Order", `
+      <section class="mobile-hero"><h1>Create Order</h1><p>The essentials only. The full order remains available in the desktop Job Control Panel after creation.</p></section>
+      <form method="POST" action="/mobile-orders/create">
+        <div class="mobile-panel">
+          <div class="mobile-section-title">Customer</div>
+          <div class="mobile-field"><label>Customer name</label><input name="customer_name" autocomplete="name" required></div>
+          <div class="mobile-field"><label>Phone</label><input name="customer_phone" type="tel" inputmode="tel" autocomplete="tel" required></div>
+          <div class="mobile-field"><label>Email (optional)</label><input name="customer_email" type="email" autocomplete="email"></div>
+          <div class="mobile-section-title">Address</div>
+          <div class="mobile-field"><label>Postcode</label><input name="postcode" autocapitalize="characters" required></div>
+          <div class="mobile-field"><label>Address</label><input name="address_line_1" autocomplete="street-address" required></div>
+          <div class="mobile-grid-2"><div class="mobile-field"><label>Town</label><input name="town"></div><div class="mobile-field"><label>County</label><input name="county"></div></div>
+          <div class="mobile-section-title">Order</div>
+          <div class="mobile-field"><label>Job category</label><select name="job_type" required><option value="">Select category</option>${categories.map(c=>`<option>${escapeHtml(c)}</option>`).join("")}</select></div>
+          <div class="mobile-field"><label>Description</label><textarea name="job_description" placeholder="What does the customer need?"></textarea></div>
+          <div class="mobile-field"><label>Source / campaign</label><select name="source_campaign">${campaignOptions}</select></div>
+          <div class="mobile-grid-2"><div class="mobile-field"><label>Quoted price</label><input name="quoted_price" inputmode="decimal" placeholder="£"></div><div class="mobile-field"><label>Expected payment</label><select name="expected_payment_method"><option>Unknown</option>${splitPaymentMethods.map(m=>`<option>${escapeHtml(m)}</option>`).join("")}</select></div></div>
+          <div class="mobile-section-title">Dispatch</div>
+          <div class="mobile-field"><label>Technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${techOptions}</select></div>
+          <div class="mobile-field"><label>ETA</label><select name="eta"><option value="">Not set</option><option>30 mins</option><option>45 mins</option><option>1 hour</option><option>1-2 hours</option><option>2-3 hours</option><option>Scheduled</option></select></div>
+          <div class="mobile-field"><label>Dispatcher notes</label><textarea name="dispatcher_notes"></textarea></div>
+          <button class="mobile-button green" type="submit">Create Order</button>
+          <a class="mobile-secondary" href="/mobile-orders">Cancel</a>
+        </div>
+      </form>
+    `));
+  } catch (error) {
+    console.error("Mobile create page error:", error);
+    res.status(500).send("Could not load mobile create order page.");
+  }
+});
+
+app.post("/mobile-orders/create", async (req, res) => {
+  try {
+    const body=req.body;
+    const createEta=normaliseEta(body);
+    const createScheduledAt=null; // Mobile quick-create intentionally does not schedule a date/time; use desktop for scheduled jobs.
+    const createTechId=parseOptionalInt(body.assigned_technician_id);
+    await assertTechnicianAssignableForJob(createTechId, targetDateForAssignment(createEta, createScheduledAt));
+    const result=await pool.query(`
+      INSERT INTO jobs (
+        customer_name,customer_phone,customer_email,address_line_1,town,county,postcode,
+        job_type,job_description,urgency,source_campaign,quoted_price,expected_payment_method,
+        assigned_technician_id,eta,scheduled_at,dispatcher_name,dispatcher_notes,status,created_at,updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Normal',$10,$11,$12,$13,$14,$15,$16,$17,'open',NOW(),NOW()) RETURNING id
+    `,[body.customer_name,compactPhone(body.customer_phone),body.customer_email,body.address_line_1,body.town,body.county,compactPostcode(body.postcode),body.job_type,body.job_description,body.source_campaign,parseMoneyInput(body.quoted_price),body.expected_payment_method||'Unknown',createTechId,createEta,createScheduledAt,currentAgentName(req),body.dispatcher_notes]);
+    const id=result.rows[0].id;
+    await pool.query(`UPDATE jobs SET job_number=$1 WHERE id=$2`,[jobNumber(id),id]);
+    await addJobAuditEntry(id,"job_created_mobile","status","—","Job created from Mobile Orders",currentAgentName(req));
+    res.redirect(`/mobile-orders/created/${id}`);
+  } catch(error){
+    console.error("Mobile create order error:",error);
+    res.status(500).send(`Could not create order: ${escapeHtml(error.message)}`);
+  }
+});
+
+app.get("/mobile-orders/created/:id", async (req,res)=>{
+  const job=(await pool.query(`SELECT j.*,t.name technician_name FROM jobs j LEFT JOIN technicians t ON t.id=j.assigned_technician_id WHERE j.id=$1`,[req.params.id])).rows[0];
+  if(!job) return res.status(404).send("Job not found");
+  res.send(mobileOrdersPage(req,"Order Created",`
+    <section class="mobile-hero"><h1>Order Created ✓</h1><p>${escapeHtml(job.job_number||jobNumber(job.id))} has been added to the live Dispatch Board.</p></section>
+    <div class="mobile-panel"><h2>${escapeHtml(job.postcode||"")} · ${escapeHtml(job.customer_name||"")}</h2><div class="mobile-note mobile-success">Technician: ${escapeHtml(job.technician_name||"Unassigned")}<br>ETA: ${escapeHtml(job.eta||"Not set")}</div>
+      <a class="mobile-button green" href="/mobile-orders/create">Create Another Order</a><a class="mobile-secondary" href="/mobile-orders">Mobile Orders Home</a></div>
+  `));
+});
+
+app.get("/mobile-orders/close", async (req,res)=>{
+  try {
+    const q=String(req.query.q||"").trim();
+    const params=[]; let searchSql="";
+    if(q){ params.push(`%${q}%`); searchSql=`AND (COALESCE(j.job_number,'') ILIKE $1 OR COALESCE(j.postcode,'') ILIKE $1 OR COALESCE(j.customer_phone,'') ILIKE $1 OR COALESCE(j.customer_name,'') ILIKE $1)`; }
+    const rows=(await pool.query(`SELECT j.*,t.name technician_name FROM jobs j LEFT JOIN technicians t ON t.id=j.assigned_technician_id WHERE COALESCE(j.is_imported,FALSE)=FALSE AND j.closed_at IS NULL AND COALESCE(j.status,'open') NOT IN ('cancelled','fully_paid') ${searchSql} ORDER BY j.created_at DESC LIMIT 60`,params)).rows;
+    const jobCards=rows.map(job=>`<div class="mobile-job"><div class="mobile-job-head"><div><div class="mobile-job-title">${escapeHtml(job.job_number||jobNumber(job.id))} · ${escapeHtml(job.postcode||"")}</div><div class="mobile-job-meta">${escapeHtml(job.customer_name||"")} · ${escapeHtml(job.customer_phone||"")}<br>${escapeHtml(job.job_type||"")} · ${escapeHtml(job.technician_name||"Unassigned")}</div></div><span class="mobile-pill">${escapeHtml(jobStatusLabel(job.status))}</span></div><a class="mobile-button red" href="/mobile-orders/job/${job.id}/close">Close this order</a></div>`).join("");
+    res.send(mobileOrdersPage(req,"Close Order",`<section class="mobile-hero"><h1>Close Order</h1><p>Search by order number, postcode, customer or phone, then open the close screen.</p></section><form class="mobile-search" method="GET" action="/mobile-orders/close"><input name="q" value="${escapeHtml(q)}" placeholder="Postcode, phone, order…"><button>Search</button></form>${jobCards||'<div class="mobile-panel mobile-empty">No open orders found.</div>'}<a class="mobile-secondary" href="/mobile-orders">Mobile Orders Home</a>`));
+  } catch(error){ console.error("Mobile close list error:",error); res.status(500).send("Could not load open orders."); }
+});
+
+app.get("/mobile-orders/job/:id/close", async (req,res)=>{
+  try {
+    const job=(await pool.query(`SELECT j.*,t.name technician_name FROM jobs j LEFT JOIN technicians t ON t.id=j.assigned_technician_id WHERE j.id=$1`,[req.params.id])).rows[0];
+    if(!job) return res.status(404).send("Job not found");
+    const stripePaid=(await pool.query(`SELECT COALESCE(SUM(amount),0)::numeric total FROM stripe_payment_receipts WHERE job_id=$1 AND status='paid'`,[job.id])).rows[0];
+    const paidByStripe=Number(stripePaid?.total||0)>0;
+    const defaultPaid=job.customer_paid||paidByStripe;
+    const defaultMethod=paidByStripe?'Stripe':(job.payment_method_1||job.payment_method||job.expected_payment_method||'');
+    res.send(mobileOrdersPage(req,"Close Order",`
+      <section class="mobile-hero"><h1>Close ${escapeHtml(job.job_number||jobNumber(job.id))}</h1><p>${escapeHtml(job.customer_name||"")} · ${escapeHtml(job.postcode||"")} · ${escapeHtml(job.technician_name||"Unassigned")}</p></section>
+      <form method="POST" action="/mobile-orders/job/${job.id}/close" onsubmit="return confirm('Close this order now?');"><div class="mobile-panel">
+        ${paidByStripe?`<div class="mobile-note mobile-success">✓ Stripe payment has already been confirmed by the portal.</div>`:""}
+        <div class="mobile-field"><label>NET job value</label><input id="mobileNet" name="net_value" inputmode="decimal" value="${job.net_value!=null?Number(job.net_value).toFixed(2):(job.final_value!=null?(Number(job.final_value)/1.2).toFixed(2):"")}" required></div>
+        <div id="mobileMoney" class="mobile-money-preview">Enter NET to calculate VAT and GROSS.</div>
+        <div class="mobile-grid-2"><div class="mobile-field"><label>Customer paid?</label><select name="customer_paid"><option value="true" ${defaultPaid?'selected':''}>Yes</option><option value="false" ${!defaultPaid?'selected':''}>No</option></select></div><div class="mobile-field"><label>Payment method</label><select name="payment_method_1"><option value="">Select method</option><option value="Stripe" ${defaultMethod==='Stripe'?'selected':''}>Stripe</option>${splitPaymentMethods.map(m=>`<option ${m===defaultMethod?'selected':''}>${escapeHtml(m)}</option>`).join("")}</select></div></div>
+        <div class="mobile-field"><label>Payment amount</label><input name="payment_amount_1" inputmode="decimal" value="${job.payment_amount_1!=null?Number(job.payment_amount_1).toFixed(2):(job.final_value!=null?Number(job.final_value).toFixed(2):"")}"></div>
+        <div class="mobile-grid-2"><div class="mobile-field"><label>Close status</label><select name="status">${literalClosingStatusOptions(defaultPaid?'fully_paid':(job.status||'awaiting_payment'))}</select></div><div class="mobile-field"><label>Outcome</label><select name="outcome">${optionList(jobOutcomes,job.outcome||'Completed')}</select></div></div>
+        <div class="mobile-field"><label>Materials cost</label><input name="materials_cost" inputmode="decimal" value="${job.materials_cost!=null?Number(job.materials_cost).toFixed(2):''}"></div>
+        <div class="mobile-field"><label>Materials used</label><textarea name="materials_used">${escapeHtml(job.materials_used||'')}</textarea></div>
+        <div class="mobile-field"><label>Technician / close notes</label><textarea name="close_notes">${escapeHtml(job.close_notes||'')}</textarea></div>
+        <input type="hidden" name="payment_method_2" value=""><input type="hidden" name="payment_amount_2" value=""><input type="hidden" name="card_is_amex" value="false"><input type="hidden" name="amex_id_provided" value="false"><input type="hidden" name="invoice_photos_confirmed" value="${job.invoice_photos_confirmed?'true':'false'}"><input type="hidden" name="tech_notes" value="${escapeHtml(job.tech_notes||'')}">
+        <button class="mobile-button red" type="submit">Close Order</button><a class="mobile-secondary" href="/mobile-orders/close">Back to open orders</a>
+      </div></form>
+    `,`function calc(){const e=document.getElementById('mobileNet');const b=document.getElementById('mobileMoney');const n=Number(String(e.value||'').replace(/[^0-9.-]/g,''))||0;const v=Math.round(n*.2*100)/100;const g=Math.round((n+v)*100)/100;b.textContent='NET £'+n.toFixed(2)+' · VAT @ 20% £'+v.toFixed(2)+' · GROSS £'+g.toFixed(2);}document.getElementById('mobileNet').addEventListener('input',calc);calc();`));
+  } catch(error){ console.error("Mobile close page error:",error); res.status(500).send("Could not load close order page."); }
+});
+
+app.post("/mobile-orders/job/:id/close", async (req,res)=>{
+  try {
+    const id=Number(req.params.id), body=req.body;
+    const oldJob=(await pool.query(`SELECT * FROM jobs WHERE id=$1`,[id])).rows[0];
+    if(!oldJob) return res.status(404).send("Job not found");
+    const netValue=parseMoneyInput(body.net_value), vatAmount=calculateVatFromNet(netValue), finalValue=calculateGrossFromNet(netValue);
+    const closeValues={net_value:netValue,vat_amount:vatAmount,final_value:finalValue,payment_method:buildSplitPaymentSummary(body),payment_method_1:body.payment_method_1||"",payment_amount_1:parseMoneyInput(body.payment_amount_1),payment_method_2:"",payment_amount_2:null,invoice_photos_confirmed:body.invoice_photos_confirmed==="true",card_is_amex:false,amex_id_provided:false,customer_paid:body.customer_paid==="true",materials_used:body.materials_used||"",materials_cost:parseMoneyInput(body.materials_cost),outcome:body.outcome||"Completed",tech_notes:body.tech_notes||"",close_notes:body.close_notes||"",status:body.status||(body.customer_paid==="true"?"fully_paid":"awaiting_payment")};
+    await pool.query(`UPDATE jobs SET net_value=$1,vat_amount=$2,final_value=$3,payment_method=$4,payment_method_1=$5,payment_amount_1=$6,payment_method_2=$7,payment_amount_2=$8,invoice_photos_confirmed=$9,card_is_amex=$10,amex_id_provided=$11,customer_paid=$12,materials_used=$13,materials_cost=$14,outcome=$15,tech_notes=$16,close_notes=$17,status=$18,closed_by=$19,closed_at=COALESCE(closed_at,NOW()),updated_at=NOW() WHERE id=$20`,[closeValues.net_value,closeValues.vat_amount,closeValues.final_value,closeValues.payment_method,closeValues.payment_method_1,closeValues.payment_amount_1,closeValues.payment_method_2,closeValues.payment_amount_2,closeValues.invoice_photos_confirmed,closeValues.card_is_amex,closeValues.amex_id_provided,closeValues.customer_paid,closeValues.materials_used,closeValues.materials_cost,closeValues.outcome,closeValues.tech_notes,closeValues.close_notes,closeValues.status,currentAgentName(req),id]);
+    await logJobChanges(id,oldJob,closeValues,currentAgentName(req),"job_closed_mobile");
+    await addJobAuditEntry(id,"job_closed_mobile","status",oldJob.status||"—",closeValues.status,currentAgentName(req));
+    res.redirect(`/mobile-orders/closed/${id}`);
+  } catch(error){console.error("Mobile close submit error:",error);res.status(500).send(`Could not close order: ${escapeHtml(error.message)}`);}
+});
+
+app.get("/mobile-orders/closed/:id", async(req,res)=>{
+  const job=(await pool.query(`SELECT * FROM jobs WHERE id=$1`,[req.params.id])).rows[0];
+  if(!job) return res.status(404).send("Job not found");
+  res.send(mobileOrdersPage(req,"Order Closed",`<section class="mobile-hero"><h1>Order Closed ✓</h1><p>${escapeHtml(job.job_number||jobNumber(job.id))} has been updated in the live portal.</p></section><div class="mobile-panel"><div class="mobile-note mobile-success"><strong>${escapeHtml(job.postcode||'')}</strong><br>GROSS ${money(job.final_value||0)} · ${escapeHtml(jobStatusLabel(job.status))}<br>Paid: ${job.customer_paid?'Yes':'No'}</div><a class="mobile-button red" href="/mobile-orders/close">Close Another Order</a><a class="mobile-secondary" href="/mobile-orders">Mobile Orders Home</a></div>`));
 });
 
 app.post("/webhook/yay", async (req, res) => {
