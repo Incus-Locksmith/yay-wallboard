@@ -2706,6 +2706,7 @@ function nav(req) {
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
         <a class="side-link${active("/mobile-orders")}" href="/mobile-orders"><span class="side-dot dot-green"></span><span>Mobile Orders</span></a>
+        <a class="side-link${active("/opportunities")}" href="/opportunities"><span class="side-dot dot-amber"></span><span>Opportunities</span></a>
         <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
         <a class="side-link${active("/campaigns")}" href="/campaigns"><span class="side-dot dot-amber"></span><span>Campaigns</span></a>
         <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
@@ -3480,6 +3481,70 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_status_idx ON disputes (status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_job_id_idx ON disputes (job_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_created_at_idx ON disputes (created_at);`);
+
+  // Non-converted calls / recoverable sales opportunities.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS opportunities (
+      id SERIAL PRIMARY KEY,
+      call_type TEXT NOT NULL,
+      customer_name TEXT,
+      customer_phone TEXT NOT NULL,
+      postcode TEXT,
+      address_line_1 TEXT,
+      address_line_2 TEXT,
+      address_line_3 TEXT,
+      town TEXT,
+      county TEXT,
+      latitude NUMERIC(12,8),
+      longitude NUMERIC(12,8),
+      udprn TEXT,
+      quoted_amount NUMERIC(10,2),
+      quote_notes TEXT,
+      notes TEXT NOT NULL,
+      source_campaign TEXT,
+      follow_up_status TEXT DEFAULT 'new',
+      service_follow_up_allowed BOOLEAN DEFAULT FALSE,
+      marketing_opt_in BOOLEAN DEFAULT FALSE,
+      do_not_contact BOOLEAN DEFAULT FALSE,
+      last_contacted_at TIMESTAMP,
+      next_follow_up_at TIMESTAMP,
+      converted_job_id INTEGER,
+      created_by TEXT,
+      updated_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS call_type TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS customer_name TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS customer_phone TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS postcode TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS address_line_1 TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS address_line_2 TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS address_line_3 TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS town TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS county TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS latitude NUMERIC(12,8);`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS longitude NUMERIC(12,8);`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS udprn TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS quoted_amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS quote_notes TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS source_campaign TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS follow_up_status TEXT DEFAULT 'new';`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS service_follow_up_allowed BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS marketing_opt_in BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS last_contacted_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS next_follow_up_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS converted_job_id INTEGER;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS created_by TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS opportunities_status_idx ON opportunities (follow_up_status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS opportunities_phone_idx ON opportunities (customer_phone);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS opportunities_created_at_idx ON opportunities (created_at);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS opportunities_campaign_idx ON opportunities (source_campaign);`);
 
   await seedDefaultPortalUsers();
   await seedDefaultInvoiceItems();
@@ -13517,7 +13582,7 @@ app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', asy
 
 
 // -----------------------------------------------------------------------------
-// Mobile Orders v88 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
+// Mobile Orders v89 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
 // Uses the same authenticated portal session and the same Postgres jobs table.
 // -----------------------------------------------------------------------------
 
@@ -13540,6 +13605,7 @@ function mobileOrdersStyles() {
     .mobile-big-action small { display:block; margin-top:5px; font-weight:600; font-size:12px; opacity:.76; }
     .mobile-big-action.create { background:#16a34a; color:#fff; border-color:#16a34a; }
     .mobile-big-action.close { background:#fff; color:#172433; }
+    .mobile-big-action.opportunity { background:#f59e0b; color:#172433; border-color:#f59e0b; }
     .mobile-panel { background:#fff; border:1px solid #dbe3ec; border-radius:20px; padding:18px; margin-top:14px; box-shadow:0 9px 24px rgba(15,23,42,.05); }
     .mobile-panel h2 { margin:0 0 14px; font-size:18px; }
     .mobile-section-title { margin:18px 0 9px; color:#475569; font-size:12px; text-transform:uppercase; letter-spacing:.08em; font-weight:900; }
@@ -13625,7 +13691,7 @@ function mobileOrdersPage(req, title, content, extraScript = "") {
   <body class="mobile-orders-page"><main class="mobile-shell">
     <div class="mobile-top"><div class="mobile-brand-wrap"><img class="mobile-brand-icon" src="/mobile-orders/icon-192.png" alt="Keys247"><div><div class="mobile-brand">Keys247 Orders</div><div class="mobile-brand-sub">Fast create and close workflow</div></div></div><div class="mobile-user">${escapeHtml(currentAgentName(req) || "Portal user")}<br><a href="/logout" style="color:#64748b">Logout</a></div></div>
     ${content}
-    <div class="mobile-footer">Mobile Orders v88 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
+    <div class="mobile-footer">Mobile Orders v89 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
   </main><script>${pageScript}</script></body></html>`;
 }
 
@@ -13663,7 +13729,7 @@ app.get('/mobile-orders/sw.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript');
   res.setHeader('Cache-Control', 'no-cache');
   res.send(`
-    const CACHE_NAME = 'keys247-mobile-orders-v88';
+    const CACHE_NAME = 'keys247-mobile-orders-v89';
     const ASSETS = ['/mobile-orders', '/mobile-orders/create', '/mobile-orders/close', '/mobile-orders/manifest.webmanifest', '/mobile-orders/icon-192.png', '/mobile-orders/icon-512.png'];
     self.addEventListener('install', event => {
       event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -13690,7 +13756,8 @@ app.get("/mobile-orders", async (req, res) => {
       SELECT
         COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND closed_at IS NULL AND status NOT IN ('cancelled','fully_paid'))::int AS open_jobs,
         COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND created_at::date=CURRENT_DATE)::int AS created_today,
-        COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND closed_at::date=CURRENT_DATE)::int AS closed_today
+        COUNT(*) FILTER (WHERE COALESCE(is_imported,FALSE)=FALSE AND closed_at::date=CURRENT_DATE)::int AS closed_today,
+        (SELECT COUNT(*)::int FROM opportunities WHERE created_at::date=CURRENT_DATE) AS opportunities_today
       FROM jobs
     `)).rows[0] || {};
     res.send(mobileOrdersPage(req, "Mobile Orders", `
@@ -13698,6 +13765,7 @@ app.get("/mobile-orders", async (req, res) => {
       <div class="mobile-home-actions">
         <a class="mobile-big-action create" href="/mobile-orders/create">＋ Create Order<small>${Number(counts.created_today||0)} created today</small></a>
         <a class="mobile-big-action close" href="/mobile-orders/close">✓ Close Order<small>${Number(counts.open_jobs||0)} open · ${Number(counts.closed_today||0)} closed today</small></a>
+        <a class="mobile-big-action opportunity" href="/mobile-orders/no-booking">☎ Log No Booking<small>${Number(counts.opportunities_today||0)} logged today</small></a>
       </div>
     `));
   } catch (error) {
@@ -13927,6 +13995,173 @@ app.get("/mobile-orders/closed/:id", async(req,res)=>{
   const job=(await pool.query(`SELECT * FROM jobs WHERE id=$1`,[req.params.id])).rows[0];
   if(!job) return res.status(404).send("Job not found");
   res.send(mobileOrdersPage(req,"Order Closed",`<section class="mobile-hero"><h1>Order Closed ✓</h1><p>${escapeHtml(job.job_number||jobNumber(job.id))} has been updated in the live portal.</p></section><div class="mobile-panel"><div class="mobile-note mobile-success"><strong>${escapeHtml(job.postcode||'')}</strong><br>GROSS ${money(job.final_value||0)} · ${escapeHtml(jobStatusLabel(job.status))}<br>Paid: ${job.customer_paid?'Yes':'No'}</div><a class="mobile-button red" href="/mobile-orders/close">Close Another Order</a><a class="mobile-secondary" href="/mobile-orders">Mobile Orders Home</a></div>`));
+});
+
+
+// -----------------------------------------------------------------------------
+// Opportunities v89 — capture calls that did not convert to bookings.
+// -----------------------------------------------------------------------------
+const opportunityCallTypes = [
+  "Wrong number",
+  "Lock out - Quote only",
+  "Lock change - Quote only",
+  "Fix lock - Quote only",
+  "Safe - Quote only",
+  "Lock issue misc - Quote only",
+  "Cancelled prior to attendance"
+];
+
+const opportunityStatuses = [
+  { value: "new", label: "New" },
+  { value: "follow_up", label: "Follow up" },
+  { value: "contacted", label: "Contacted" },
+  { value: "converted", label: "Converted" },
+  { value: "lost", label: "Lost" },
+  { value: "do_not_contact", label: "Do not contact" }
+];
+
+function opportunityStatusLabel(value) {
+  const match = opportunityStatuses.find(item => item.value === value);
+  return match ? match.label : (value || "New");
+}
+
+function opportunityStatusClass(value) {
+  if (value === "converted") return "stage-approved";
+  if (value === "do_not_contact" || value === "lost") return "stage-declined";
+  if (value === "follow_up") return "stage-drafted";
+  return "stage-sent";
+}
+
+function opportunityAddressPlain(row) {
+  return [row.address_line_1,row.address_line_2,row.address_line_3,row.town,row.county,row.postcode].filter(Boolean).join(", ");
+}
+
+app.get("/opportunities", async (req,res) => {
+  try {
+    const status = String(req.query.status || "active").trim();
+    const search = String(req.query.search || "").trim();
+    const params=[];
+    const where=["1=1"];
+    if (status === "active") where.push("COALESCE(follow_up_status,'new') IN ('new','follow_up','contacted')");
+    else if (status !== "all") { params.push(status); where.push(`COALESCE(follow_up_status,'new') = $${params.length}`); }
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(COALESCE(customer_phone,'') ILIKE $${params.length} OR COALESCE(customer_name,'') ILIKE $${params.length} OR COALESCE(postcode,'') ILIKE $${params.length} OR COALESCE(call_type,'') ILIKE $${params.length} OR COALESCE(source_campaign,'') ILIKE $${params.length})`);
+    }
+    const rows=(await pool.query(`SELECT * FROM opportunities WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 500`,params)).rows;
+    const counts=(await pool.query(`SELECT
+      COUNT(*) FILTER (WHERE COALESCE(follow_up_status,'new')='new')::int AS new_count,
+      COUNT(*) FILTER (WHERE COALESCE(follow_up_status,'new')='follow_up')::int AS follow_up_count,
+      COUNT(*) FILTER (WHERE COALESCE(follow_up_status,'new')='contacted')::int AS contacted_count,
+      COUNT(*) FILTER (WHERE COALESCE(follow_up_status,'new')='converted')::int AS converted_count,
+      COUNT(*) FILTER (WHERE created_at::date=CURRENT_DATE)::int AS today_count
+      FROM opportunities`)).rows[0] || {};
+    const body=rows.map(row=>`<tr>
+      <td><strong>#${row.id}</strong><br><span class="muted">${escapeHtml(formatDateTime(row.created_at))}</span></td>
+      <td><strong>${escapeHtml(row.call_type||"")}</strong><br><span class="muted">${escapeHtml(row.source_campaign||"Unknown")}</span></td>
+      <td><strong>${escapeHtml(row.customer_name||"Not given")}</strong><br><a href="tel:${escapeHtml(phoneHref(row.customer_phone))}">${escapeHtml(row.customer_phone||"")}</a></td>
+      <td>${escapeHtml(row.postcode||"")}<br><span class="muted">${escapeHtml(opportunityAddressPlain(row))}</span></td>
+      <td>${row.quoted_amount!==null && row.quoted_amount!==undefined ? money(row.quoted_amount) : "—"}<br><span class="muted">${escapeHtml(row.quote_notes||"")}</span></td>
+      <td><span class="pill ${opportunityStatusClass(row.follow_up_status)}">${escapeHtml(opportunityStatusLabel(row.follow_up_status))}</span><br><span class="muted">${row.do_not_contact?"Do not contact":row.marketing_opt_in?"Marketing opt-in":row.service_follow_up_allowed?"Enquiry follow-up OK":"Permission not recorded"}</span></td>
+      <td>${escapeHtml(row.notes||"")}</td>
+      <td>
+        <form method="POST" action="/opportunities/${row.id}/status" style="display:grid;gap:6px;min-width:145px;">
+          <select name="follow_up_status">${optionList(opportunityStatuses,row.follow_up_status||"new")}</select>
+          <button type="submit">Update</button>
+        </form>
+      </td>
+    </tr>`).join("");
+    res.send(`<!DOCTYPE html><html><head><title>Opportunities</title><style>${sharedStyles()}
+      .opp-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:16px 0}.opp-kpi{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:14px}.opp-kpi strong{display:block;font-size:24px}.opp-filter{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.opp-filter input,.opp-filter select{min-height:42px}.opp-table{overflow:auto}.opp-table table{min-width:1180px}@media(max-width:900px){.opp-kpis{grid-template-columns:repeat(2,1fr)}}
+    </style></head><body>${nav(req)}<main class="app-main"><div class="page-head"><div><h1>Opportunities</h1><div class="subtitle">Calls that did not become bookings — captured for service follow-up and compliant marketing where permission exists.</div></div><div><a class="button" href="/opportunities/new">＋ Log No Booking</a></div></div>
+      <div class="opp-kpis"><div class="opp-kpi"><span>New</span><strong>${Number(counts.new_count||0)}</strong></div><div class="opp-kpi"><span>Follow up</span><strong>${Number(counts.follow_up_count||0)}</strong></div><div class="opp-kpi"><span>Contacted</span><strong>${Number(counts.contacted_count||0)}</strong></div><div class="opp-kpi"><span>Converted</span><strong>${Number(counts.converted_count||0)}</strong></div><div class="opp-kpi"><span>Logged today</span><strong>${Number(counts.today_count||0)}</strong></div></div>
+      <form class="opp-filter" method="GET" action="/opportunities"><input name="search" value="${escapeHtml(search)}" placeholder="Phone, customer, postcode, type, campaign"><select name="status"><option value="active" ${status==='active'?'selected':''}>Active opportunities</option><option value="all" ${status==='all'?'selected':''}>All</option>${opportunityStatuses.map(x=>`<option value="${x.value}" ${status===x.value?'selected':''}>${x.label}</option>`).join('')}</select><button>Apply</button></form>
+      <div class="panel opp-table"><table><thead><tr><th>Ref / date</th><th>Call type</th><th>Customer / phone</th><th>Address</th><th>Quote</th><th>Follow-up</th><th>Notes</th><th>Action</th></tr></thead><tbody>${body||'<tr><td colspan="8" class="muted">No opportunities found.</td></tr>'}</tbody></table></div>
+    </main></body></html>`);
+  } catch(error){ console.error("Opportunities page error:",error); res.status(500).send("Could not load opportunities."); }
+});
+
+app.get("/opportunities/new", async (req,res) => {
+  try {
+    const campaignOptions=await getCampaignOptions("");
+    res.send(`<!DOCTYPE html><html><head><title>Log No Booking</title><style>${sharedStyles()}
+      .opp-form{max-width:850px}.opp-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.opp-form label{display:block;font-weight:800;font-size:12px;margin-bottom:6px}.opp-form input,.opp-form select,.opp-form textarea{width:100%;min-height:44px}.opp-form textarea{min-height:100px}.opp-wide{grid-column:1/-1}.consent-box{padding:12px;border:1px solid #dbe3ec;background:#f8fafc;border-radius:12px}.checkline{display:flex;gap:9px;align-items:flex-start;margin:8px 0}.checkline input{width:18px;min-height:18px}@media(max-width:700px){.opp-grid{grid-template-columns:1fr}.opp-wide{grid-column:auto}}
+    </style></head><body>${nav(req)}<main class="app-main"><div class="page-head"><div><h1>Log No Booking</h1><div class="subtitle">Capture enough information to follow up without creating a job.</div></div></div><form class="panel opp-form" method="POST" action="/opportunities"><div class="opp-grid">
+      <div><label>Call type</label><select name="call_type" required><option value="">Select reason...</option>${optionList(opportunityCallTypes,"")}</select></div>
+      <div><label>Phone number</label><input name="customer_phone" type="tel" required></div>
+      <div><label>Customer name (if known)</label><input name="customer_name"></div>
+      <div><label>Campaign / source</label><select name="source_campaign" required><option value="">Select campaign...</option>${optionList(campaignOptions,"")}</select></div>
+      <div><label>Postcode</label><input name="postcode"></div><div><label>Address</label><input name="address_line_1"></div>
+      <div><label>Town</label><input name="town"></div><div><label>County</label><input name="county"></div>
+      <div><label>Quoted amount £ (if any)</label><input name="quoted_amount" inputmode="decimal"></div><div><label>What was quoted / price notes</label><input name="quote_notes"></div>
+      <div class="opp-wide"><label>Dispatcher notes</label><textarea name="notes" required placeholder="What did the customer need, why did it not book, objections, timing, anything useful for follow-up..."></textarea></div>
+      <div class="opp-wide consent-box"><strong>Contact permission</strong><div class="checkline"><input type="checkbox" name="service_follow_up_allowed" value="true"><span>Customer agreed we can follow up about this enquiry.</span></div><div class="checkline"><input type="checkbox" name="marketing_opt_in" value="true"><span>Customer explicitly opted in to future offers / marketing.</span></div><div class="checkline"><input type="checkbox" name="do_not_contact" value="true"><span>Do not contact this number.</span></div><div class="muted">Wrong numbers are automatically treated as Do Not Contact.</div></div>
+      <div class="opp-wide"><button type="submit">Save Opportunity</button> <a class="button secondary" href="/opportunities">Cancel</a></div>
+    </div></form></main></body></html>`);
+  } catch(error){console.error("New opportunity page error:",error);res.status(500).send("Could not load opportunity form.");}
+});
+
+app.post("/opportunities", async (req,res) => {
+  try {
+    const b=req.body;
+    const phone=compactPhone(b.customer_phone);
+    if(!phone) return res.status(400).send("Phone number is required.");
+    if(!b.call_type) return res.status(400).send("Call type is required.");
+    if(!String(b.notes||"").trim()) return res.status(400).send("Dispatcher notes are required.");
+    const wrong=b.call_type==="Wrong number";
+    const doNot=wrong || b.do_not_contact==="true" || b.do_not_contact==="on";
+    const result=await pool.query(`INSERT INTO opportunities (call_type,customer_name,customer_phone,postcode,address_line_1,address_line_2,address_line_3,town,county,latitude,longitude,udprn,quoted_amount,quote_notes,notes,source_campaign,follow_up_status,service_follow_up_allowed,marketing_opt_in,do_not_contact,created_by,updated_by,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$21,NOW(),NOW()) RETURNING id`,[
+      b.call_type,b.customer_name||"",phone,compactPostcode(b.postcode||""),b.address_line_1||"",b.address_line_2||"",b.address_line_3||"",b.town||"",b.county||"",b.latitude?Number(b.latitude):null,b.longitude?Number(b.longitude):null,b.udprn||null,parseMoneyInput(b.quoted_amount),b.quote_notes||"",String(b.notes||"").trim(),b.source_campaign||"Unknown",doNot?"do_not_contact":"new",b.service_follow_up_allowed==="true"||b.service_follow_up_allowed==="on",b.marketing_opt_in==="true"||b.marketing_opt_in==="on",doNot,currentAgentName(req)
+    ]);
+    const next=String(b.return_to||"");
+    if(next==="mobile") return res.redirect(`/mobile-orders/no-booking/saved/${result.rows[0].id}`);
+    res.redirect(`/opportunities?created=${result.rows[0].id}`);
+  } catch(error){console.error("Save opportunity error:",error);res.status(500).send(`Could not save opportunity: ${escapeHtml(error.message)}`);}
+});
+
+app.post("/opportunities/:id/status", async(req,res)=>{
+  try{
+    const id=Number(req.params.id); const status=String(req.body.follow_up_status||"new");
+    if(!opportunityStatuses.some(x=>x.value===status)) return res.status(400).send("Invalid status");
+    await pool.query(`UPDATE opportunities SET follow_up_status=$1,do_not_contact=CASE WHEN $1='do_not_contact' THEN TRUE ELSE do_not_contact END,last_contacted_at=CASE WHEN $1='contacted' THEN NOW() ELSE last_contacted_at END,updated_by=$2,updated_at=NOW() WHERE id=$3`,[status,currentAgentName(req),id]);
+    res.redirect("/opportunities");
+  }catch(error){console.error("Opportunity status error:",error);res.status(500).send("Could not update opportunity.");}
+});
+
+app.get("/mobile-orders/no-booking", async(req,res)=>{
+  try{
+    const campaignOptions=await getCampaignOptions("");
+    res.send(mobileOrdersPage(req,"Log No Booking",`
+      <section class="mobile-hero"><h1>Log No Booking</h1><p>Capture the call so it can be followed up later without creating an order.</p></section>
+      <form method="POST" action="/opportunities"><div class="mobile-panel">
+        <input type="hidden" name="return_to" value="mobile">
+        <div class="mobile-section-title">Call</div>
+        <div class="mobile-field"><label>Call type</label><select name="call_type" required><option value="">Select reason...</option>${optionList(opportunityCallTypes,"")}</select></div>
+        <div class="mobile-field"><label>Phone number</label><input name="customer_phone" type="tel" inputmode="tel" required></div>
+        <div class="mobile-field"><label>Customer name (if known)</label><input name="customer_name"></div>
+        <div class="mobile-field"><label>Campaign / source</label><select name="source_campaign" required><option value="">Select campaign...</option>${optionList(campaignOptions,"")}</select></div>
+        <div class="mobile-section-title">Address if available</div>
+        <div class="mobile-field"><label>Postcode</label><div style="display:grid;grid-template-columns:1fr auto;gap:8px"><input id="opp-postcode" name="postcode" autocapitalize="characters"><button id="opp-find-address" type="button" style="border:0;border-radius:12px;background:#172433;color:#fff;font-weight:900;padding:0 14px">Find</button></div><div id="opp-address-status" class="mobile-inline-note">Optional — enter a postcode to find the address.</div></div>
+        <div id="opp-address-choice" class="mobile-field" style="display:none"><label>Select address</label><select id="opp-address-select"><option value="">Choose an address...</option></select></div>
+        <div class="mobile-field"><label>Address</label><input id="opp-address-line-1" name="address_line_1"></div><input id="opp-address-line-2" name="address_line_2" type="hidden"><input id="opp-address-line-3" name="address_line_3" type="hidden"><input id="opp-latitude" name="latitude" type="hidden"><input id="opp-longitude" name="longitude" type="hidden"><input id="opp-udprn" name="udprn" type="hidden">
+        <div class="mobile-grid-2"><div class="mobile-field"><label>Town</label><input id="opp-town" name="town"></div><div class="mobile-field"><label>County</label><input id="opp-county" name="county"></div></div>
+        <div class="mobile-section-title">Quote & notes</div>
+        <div class="mobile-field"><label>Quoted amount £ (if any)</label><input name="quoted_amount" inputmode="decimal"></div>
+        <div class="mobile-field"><label>What was quoted / price notes</label><input name="quote_notes"></div>
+        <div class="mobile-field"><label>Dispatcher notes</label><textarea name="notes" required placeholder="Why did this not book? What did they need? Anything useful for follow-up..."></textarea></div>
+        <div class="mobile-section-title">Contact permission</div>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin:10px 0"><input style="width:20px;height:20px" type="checkbox" name="service_follow_up_allowed" value="true"><span>Customer agreed we can follow up about this enquiry.</span></label>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin:10px 0"><input style="width:20px;height:20px" type="checkbox" name="marketing_opt_in" value="true"><span>Customer explicitly opted in to future offers / marketing.</span></label>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin:10px 0"><input style="width:20px;height:20px" type="checkbox" name="do_not_contact" value="true"><span>Do not contact.</span></label>
+        <div class="mobile-note">Wrong number is automatically saved as Do Not Contact.</div>
+        <button class="mobile-button amber" type="submit">Save Opportunity</button><a class="mobile-secondary" href="/mobile-orders">Cancel</a>
+      </div></form>
+    `,`(function(){const pc=document.getElementById('opp-postcode'),btn=document.getElementById('opp-find-address'),status=document.getElementById('opp-address-status'),choice=document.getElementById('opp-address-choice'),sel=document.getElementById('opp-address-select');let addresses=[];function setv(id,v){const e=document.getElementById(id);if(e)e.value=v==null?'':v;}async function find(){const q=String(pc.value||'').trim();if(!q)return;btn.disabled=true;btn.textContent='…';try{const r=await fetch('/api/postcoder-addresses?postcode='+encodeURIComponent(q),{headers:{Accept:'application/json'}});const d=await r.json();addresses=d&&Array.isArray(d.addresses)?d.addresses:[];sel.innerHTML='<option value="">Choose an address...</option>';if(!r.ok||!d.ok||!addresses.length){status.textContent=(d&&d.error)||'No addresses found — enter manually.';choice.style.display='none';return;}addresses.forEach(function(a,i){const o=document.createElement('option');o.value=String(i);o.textContent=a.summary||a.full_address||('Address '+(i+1));sel.appendChild(o);});choice.style.display='block';status.textContent=addresses.length+' address'+(addresses.length===1?'':'es')+' found.';}catch(e){status.textContent='Address lookup failed — enter manually.';}finally{btn.disabled=false;btn.textContent='Find';}}btn.addEventListener('click',find);sel.addEventListener('change',function(){const a=addresses[Number(sel.value)];if(!a)return;setv('opp-address-line-1',a.address_line_1);setv('opp-address-line-2',a.address_line_2);setv('opp-address-line-3',a.address_line_3);setv('opp-town',a.town);setv('opp-county',a.county);setv('opp-postcode',String(a.postcode||pc.value||'').toUpperCase());setv('opp-latitude',a.latitude);setv('opp-longitude',a.longitude);setv('opp-udprn',a.udprn);status.textContent='Address selected.';});})();`));
+  }catch(error){console.error("Mobile no booking page error:",error);res.status(500).send("Could not load no-booking form.");}
+});
+
+app.get("/mobile-orders/no-booking/saved/:id", async(req,res)=>{
+  try{const row=(await pool.query(`SELECT * FROM opportunities WHERE id=$1`,[req.params.id])).rows[0];if(!row)return res.status(404).send("Opportunity not found");res.send(mobileOrdersPage(req,"Opportunity Saved",`<section class="mobile-hero"><h1>Opportunity Saved ✓</h1><p>This call is now available for follow-up from the Opportunities screen.</p></section><div class="mobile-panel"><div class="mobile-note mobile-success"><strong>${escapeHtml(row.call_type||'')}</strong><br>${escapeHtml(row.customer_phone||'')} · ${escapeHtml(row.postcode||'')}<br>Status: ${escapeHtml(opportunityStatusLabel(row.follow_up_status))}</div><a class="mobile-button amber" href="/mobile-orders/no-booking">Log Another</a><a class="mobile-secondary" href="/mobile-orders">Mobile Orders Home</a></div>`));}catch(error){res.status(500).send("Could not load saved opportunity.");}
 });
 
 app.post("/webhook/yay", async (req, res) => {
