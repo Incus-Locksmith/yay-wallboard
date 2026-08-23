@@ -543,6 +543,7 @@ function invoiceStageClass(stage) {
 function invoiceStageOptions(selectedStage = "Draft only") {
   const stages = [
     "Draft only",
+    "Saved",
     "Awaiting manager approval",
     "Approved",
     "Emailed to client",
@@ -556,6 +557,18 @@ function invoiceStageOptions(selectedStage = "Draft only") {
   }).join("");
 }
 
+function invoiceIsEditable(stage = "") {
+  const value = String(stage || "Draft only").trim().toLowerCase();
+  return ["draft only", "draft", "saved", "awaiting manager approval"].includes(value);
+}
+
+function editableInvoiceStageOptions(selectedStage = "Draft only") {
+  const stages = ["Draft only", "Saved", "Awaiting manager approval"];
+  return stages.map(stage => {
+    const selected = stage === selectedStage ? "selected" : "";
+    return `<option ${selected}>${escapeHtml(stage)}</option>`;
+  }).join("");
+}
 
 
 const quotationStatuses = [
@@ -2796,6 +2809,7 @@ function invoiceRows(invoices) {
         </td>
         <td>
           <div class="actions">
+            ${invoiceIsEditable(stage) ? `<a href="/invoices/${invoice.id}/edit">Edit</a>` : ""}
             <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
             <a class="delete-link" href="/invoices/${invoice.id}/delete">Delete</a>
           </div>
@@ -5226,6 +5240,177 @@ app.post("/invoices/create", async (req, res) => {
   } catch (error) {
     console.error("Create invoice error:", error);
     res.status(500).send("Create invoice error. Check Render logs.");
+  }
+});
+
+app.get("/invoices/:id/edit", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const invoice = result.rows[0];
+    if (!invoice) return res.status(404).send("Invoice not found");
+
+    const currentStage = invoice.invoice_stage || "Draft only";
+    if (!invoiceIsEditable(currentStage)) {
+      return res.status(409).send(`
+        <!DOCTYPE html><html><head><title>Invoice locked</title><style>${sharedStyles()}</style></head><body>
+        ${nav(req)}
+        <div class="panel" style="max-width:760px">
+          <h1>Invoice is locked</h1>
+          <p>Invoice <strong>${escapeHtml(invoice.invoice_number)}</strong> is currently <strong>${escapeHtml(currentStage)}</strong>.</p>
+          <p>Only Draft, Saved, or Awaiting manager approval invoices can be edited.</p>
+          <a href="/invoices">Back to invoices</a> &nbsp; <a href="/invoices/${invoice.id}/pdf" target="_blank">View PDF</a>
+        </div></body></html>
+      `);
+    }
+
+    const itemResult = await pool.query(`SELECT * FROM invoice_items WHERE active = TRUE ORDER BY sort_order ASC, description ASC`);
+    const templateResult = await pool.query(`SELECT * FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`);
+    const itemOptions = itemResult.rows.map(item => `<option value="${item.id}" data-description="${escapeHtml(item.description)}" data-price="${Number(item.default_price || 0).toFixed(2)}">${escapeHtml(item.description)} — ${money(item.default_price)}</option>`).join("");
+    const templateOptions = templateResult.rows.map(template => `<option value="${template.id}" data-name="${escapeHtml(template.customer_name)}" data-address="${escapeHtml(template.customer_address)}" data-postcode="${escapeHtml(template.customer_postcode)}">${escapeHtml(template.template_name)}</option>`).join("");
+
+    let lineItems = invoice.line_items || [];
+    if (typeof lineItems === "string") {
+      try { lineItems = JSON.parse(lineItems); } catch (_) { lineItems = []; }
+    }
+    if (!Array.isArray(lineItems)) lineItems = [];
+
+    function lineBlock(number) {
+      const item = lineItems[number - 1] || {};
+      const qty = item.qty != null ? item.qty : "";
+      const unitPrice = item.unitPrice != null ? Number(item.unitPrice).toFixed(2) : (item.unit_price != null ? Number(item.unit_price).toFixed(2) : "");
+      const description = item.description || "";
+      return `
+        <div class="line-block">
+          <div class="line-grid">
+            <select name="line${number}_item_id" onchange="fillInvoiceLine(${number}, this)">
+              <option value="">Choose invoice line</option>
+              ${itemOptions}
+            </select>
+            <input name="line${number}_qty" value="${escapeHtml(qty)}" placeholder="Qty">
+            <input name="line${number}_unit_price" value="${escapeHtml(unitPrice)}" placeholder="Unit price">
+          </div>
+          <input class="description-input" name="line${number}_description" value="${escapeHtml(description)}" placeholder="Description appears on invoice">
+        </div>`;
+    }
+
+    const sameSite = invoice.site_same_as_invoice !== false;
+    const companyKey = invoice.company_key || "online";
+    const paymentMethod = invoice.payment_method || "Card";
+    const paidStatus = invoice.paid_status || "Unpaid";
+
+    res.send(`
+      <!DOCTYPE html><html><head><title>Edit Invoice ${escapeHtml(invoice.invoice_number)}</title>
+      <style>
+        ${sharedStyles()}
+        textarea { min-height:90px; }
+        .line-block { margin-bottom:18px; padding-bottom:18px; border-bottom:1px solid #374151; }
+        .line-grid { display:grid; grid-template-columns:1fr 90px 140px; gap:12px; margin-bottom:10px; }
+        .description-input { width:100%; box-sizing:border-box; }
+        .notice { background:#1f2937; border-left:5px solid #3b82f6; border-radius:10px; padding:18px; margin-bottom:25px; color:#d1d5db; }
+        .rule-box { display:grid; grid-template-columns:repeat(2,1fr); gap:15px; margin-top:15px; }
+        .rule { background:#111827; border-radius:10px; padding:15px; border:1px solid #374151; }
+        #site-fields { margin-top:18px; }
+        .account-row { display:grid; grid-template-columns:2fr 1fr; gap:15px; align-items:center; }
+        .button-row { display:flex; gap:12px; flex-wrap:wrap; }
+        .button-row button,.button-row a { min-height:46px; display:inline-flex; align-items:center; justify-content:center; padding:0 18px; border-radius:10px; border:0; text-decoration:none; font-weight:800; }
+        .save-button { background:#2563eb; color:#fff; }
+        .view-button { background:#16a34a; color:#fff; }
+        .cancel-button-link { background:#374151; color:#fff; }
+      </style>
+      <script>
+        function toggleSiteAddress(){const checkbox=document.getElementById("site_same_as_invoice");const siteFields=document.getElementById("site-fields");siteFields.style.display=checkbox.checked?"none":"block";}
+        function fillInvoiceLine(number,select){const selected=select.options[select.selectedIndex];const description=selected.getAttribute("data-description")||"";const price=selected.getAttribute("data-price")||"";const descriptionInput=document.querySelector("[name='line"+number+"_description']");const priceInput=document.querySelector("[name='line"+number+"_unit_price']");const qtyInput=document.querySelector("[name='line"+number+"_qty']");if(descriptionInput&&description)descriptionInput.value=description;if(priceInput&&price)priceInput.value=price;if(qtyInput&&!qtyInput.value)qtyInput.value="1";}
+        function fillTemplate(select){const selected=select.options[select.selectedIndex];if(!selected||!selected.value)return;document.querySelector("[name='customer_name']").value=selected.getAttribute("data-name")||"";document.querySelector("[name='customer_address']").value=selected.getAttribute("data-address")||"";document.querySelector("[name='customer_postcode']").value=selected.getAttribute("data-postcode")||"";document.getElementById("site_same_as_invoice").checked=false;toggleSiteAddress();}
+        window.addEventListener("DOMContentLoaded",toggleSiteAddress);
+      </script></head><body>
+      ${nav(req)}
+      <h1>Edit Invoice</h1>
+      <div class="subtitle">${escapeHtml(invoice.invoice_number)} · Current stage: ${escapeHtml(currentStage)}</div>
+      <div class="notice"><strong>This invoice is still editable.</strong><br>Changes recalculate NET, VAT and total. Once it is Approved or Emailed, the Edit option disappears.</div>
+      <div class="notice" style="border-left-color:#f59e0b"><strong>Invoice rules:</strong><div class="rule-box"><div class="rule"><strong>24H Locksmiths Ltd</strong><br>Bank transfer or Cash only</div><div class="rule"><strong>24H Online Services Ltd</strong><br>Card or Cash only</div></div></div>
+
+      <form method="POST" action="/invoices/${invoice.id}/edit">
+        <div class="panel"><h2>Invoice Details</h2>
+          <div class="grid-3">
+            <select name="company_key" required><option value="locksmiths" ${companyKey === "locksmiths" ? "selected" : ""}>24H Locksmiths Ltd</option><option value="online" ${companyKey === "online" ? "selected" : ""}>24H Online Services Ltd</option></select>
+            <select name="payment_method" required><option ${paymentMethod === "Bank transfer" ? "selected" : ""}>Bank transfer</option><option ${paymentMethod === "Cash" ? "selected" : ""}>Cash</option><option ${paymentMethod === "Card" ? "selected" : ""}>Card</option></select>
+            <input name="invoice_number" value="${escapeHtml(invoice.invoice_number)}" placeholder="Invoice / Job No." required>
+          </div><br>
+          <div class="grid-3"><input name="invoice_date" value="${escapeHtml(invoice.invoice_date || "")}" placeholder="Date"><input value="Editing as ${escapeHtml(currentAgentName(req))}" disabled><select name="invoice_stage" required>${editableInvoiceStageOptions(currentStage)}</select></div><br>
+          <div class="grid-3"><input name="locksmith_name" value="${escapeHtml(invoice.locksmith_name || "")}" placeholder="Locksmith name"><select name="paid_status"><option ${paidStatus === "Unpaid" ? "selected" : ""}>Unpaid</option><option ${paidStatus === "Paid with thanks" ? "selected" : ""}>Paid with thanks</option></select><input name="customer_email" value="${escapeHtml(invoice.customer_email || "")}" placeholder="Customer email"></div>
+        </div>
+
+        <div class="panel"><h2>Account Template / Invoice Address</h2>
+          <div class="account-row"><select name="invoice_template_id" onchange="fillTemplate(this)"><option value="">Normal customer / no template</option>${templateOptions}</select><a href="/invoice-templates">Edit account templates</a></div><br>
+          <div class="grid-2"><input name="customer_name" value="${escapeHtml(invoice.customer_name || "")}" placeholder="Customer / invoice name" required><input name="customer_postcode" value="${escapeHtml(invoice.customer_postcode || "")}" placeholder="Invoice postcode"></div><br>
+          <textarea name="customer_address" placeholder="Invoice address">${escapeHtml(invoice.customer_address || "")}</textarea>
+          <label class="checkbox-row"><input id="site_same_as_invoice" name="site_same_as_invoice" type="checkbox" value="yes" ${sameSite ? "checked" : ""} onchange="toggleSiteAddress()"> Site address same as invoice address</label>
+          <div id="site-fields"><h2>Site Address</h2><div class="grid-2"><input name="site_postcode" value="${escapeHtml(invoice.site_postcode || "")}" placeholder="Site postcode"><input name="site_address_line" value="${escapeHtml((invoice.site_address || "").split("\\n")[0] || "")}" placeholder="Quick site address line"></div><br><textarea name="site_address" placeholder="Full site address">${escapeHtml(invoice.site_address || "")}</textarea></div>
+        </div>
+
+        <div class="panel"><h2>Line Items</h2><div class="help">Edit descriptions, quantities or prices. Totals will be recalculated when saved.</div><br>${lineBlock(1)}${lineBlock(2)}${lineBlock(3)}${lineBlock(4)}${lineBlock(5)}<a href="/invoice-items">Edit invoice dropdown lines</a></div>
+        <div class="panel"><h2>Notes</h2><textarea name="notes" placeholder="Invoice notes">${escapeHtml(invoice.notes || "")}</textarea></div>
+        <div class="button-row"><button class="save-button" type="submit" name="after_save" value="list">Save Changes</button><button class="view-button" type="submit" name="after_save" value="pdf">Save & View PDF</button><a class="cancel-button-link" href="/invoices">Cancel</a></div>
+      </form></body></html>
+    `);
+  } catch (error) {
+    console.error("Edit invoice page error:", error);
+    res.status(500).send("Edit invoice page error. Check Render logs.");
+  }
+});
+
+app.post("/invoices/:id/edit", async (req, res) => {
+  try {
+    const existingResult = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const existing = existingResult.rows[0];
+    if (!existing) return res.status(404).send("Invoice not found");
+    if (!invoiceIsEditable(existing.invoice_stage || "Draft only")) return res.status(409).send("This invoice is no longer editable because it has already been approved, emailed, or otherwise locked.");
+
+    const companyKey = req.body.company_key;
+    const paymentMethod = req.body.payment_method;
+    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) return res.status(400).send(`<html><body style="font-family:Arial;padding:40px"><h1>Payment method not allowed</h1><p>${escapeHtml(paymentRuleMessage(companyKey))}</p><p><a href="/invoices/${existing.id}/edit">Go back to invoice</a></p></body></html>`);
+
+    const nextStage = req.body.invoice_stage || existing.invoice_stage || "Draft only";
+    if (!invoiceIsEditable(nextStage)) return res.status(400).send("Use the invoice list approval control to approve or email an invoice. The edit screen can only save Draft, Saved, or Awaiting manager approval stages.");
+
+    const siteSameAsInvoice = req.body.site_same_as_invoice === "yes";
+    const finalSiteAddress = siteSameAsInvoice ? req.body.customer_address : (req.body.site_address || req.body.site_address_line || "");
+    const finalSitePostcode = siteSameAsInvoice ? compactPostcode(req.body.customer_postcode) : compactPostcode(req.body.site_postcode);
+
+    const lineItems = [];
+    for (let i = 1; i <= 5; i += 1) {
+      const description = (req.body[`line${i}_description`] || "").trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
+      if (description && qty > 0) lineItems.push({ description, qty, unitPrice });
+    }
+    const subtotal = lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+    const vatAmount = subtotal * 0.2;
+    const total = subtotal + vatAmount;
+    const editor = currentAgentName(req);
+
+    await pool.query(`
+      UPDATE invoices SET
+        invoice_number=$1, company_key=$2, payment_method=$3, invoice_stage=$4,
+        stage_updated_by=$5, stage_updated_at=NOW(), customer_name=$6, customer_address=$7,
+        customer_postcode=$8, site_same_as_invoice=$9, site_address=$10, site_postcode=$11,
+        customer_email=$12, invoice_date=$13, locksmith_name=$14, paid_status=$15,
+        line_items=$16, subtotal=$17, vat_amount=$18, total=$19, notes=$20, updated_at=NOW()
+      WHERE id=$21
+    `, [
+      req.body.invoice_number, companyKey, paymentMethod, nextStage, editor,
+      req.body.customer_name, req.body.customer_address, compactPostcode(req.body.customer_postcode),
+      siteSameAsInvoice, finalSiteAddress, finalSitePostcode, req.body.customer_email,
+      req.body.invoice_date, req.body.locksmith_name, req.body.paid_status, JSON.stringify(lineItems),
+      subtotal.toFixed(2), vatAmount.toFixed(2), total.toFixed(2), req.body.notes, existing.id
+    ]);
+
+    if (req.body.after_save === "pdf") return res.redirect(`/invoices/${existing.id}/pdf`);
+    res.redirect("/invoices");
+  } catch (error) {
+    console.error("Edit invoice submit error:", error);
+    res.status(500).send("Edit invoice error. Check Render logs.");
   }
 });
 
@@ -13582,7 +13767,7 @@ app.post('/tech-workspace/:token/job/:id/stripe-link/:linkId/check-payment', asy
 
 
 // -----------------------------------------------------------------------------
-// Mobile Orders v90 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
+// Mobile Orders v91 — Create + Close only, with Postcoder address lookup on mobile create, campaign selection, and installable PWA support.
 // Uses the same authenticated portal session and the same Postgres jobs table.
 // -----------------------------------------------------------------------------
 
@@ -13692,7 +13877,7 @@ function mobileOrdersPage(req, title, content, extraScript = "") {
   <body class="mobile-orders-page"><main class="mobile-shell">
     <div class="mobile-top"><div class="mobile-brand-wrap"><img class="mobile-brand-icon" src="/mobile-orders/icon-192.png" alt="Keys247"><div><div class="mobile-brand">Keys247 Orders</div><div class="mobile-brand-sub">Fast create and close workflow</div></div></div><div class="mobile-user">${escapeHtml(currentAgentName(req) || "Portal user")}<br><a href="/logout" style="color:#64748b">Logout</a></div></div>
     ${content}
-    <div class="mobile-footer">Mobile Orders v90 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
+    <div class="mobile-footer">Mobile Orders v91 · Same live database as the Dispatch Portal<div class="mobile-install-wrap"><button id="mobile-install-button" class="mobile-install-button" type="button" hidden>Install app</button><div class="mobile-install-hint">Add this to the phone home screen for app-style use. On iPhone, use Share → Add to Home Screen.</div></div></div>
   </main><script>${pageScript}</script></body></html>`;
 }
 
@@ -13730,7 +13915,7 @@ app.get('/mobile-orders/sw.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript');
   res.setHeader('Cache-Control', 'no-cache');
   res.send(`
-    const CACHE_NAME = 'keys247-mobile-orders-v90';
+    const CACHE_NAME = 'keys247-mobile-orders-v91';
     const ASSETS = ['/mobile-orders', '/mobile-orders/create', '/mobile-orders/close', '/mobile-orders/manifest.webmanifest', '/mobile-orders/icon-192.png', '/mobile-orders/icon-512.png'];
     self.addEventListener('install', event => {
       event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
