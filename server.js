@@ -615,6 +615,7 @@ function invoiceStageClass(stage) {
 function invoiceStageOptions(selectedStage = "Draft only") {
   const stages = [
     "Draft only",
+    "Saved",
     "Awaiting manager approval",
     "Approved",
     "Emailed to client",
@@ -2462,7 +2463,7 @@ function invoiceRows(invoices) {
       <tr>
         <td>
           <div class="invoice-main">${escapeHtml(invoice.invoice_number)}</div>
-          <div class="invoice-sub">By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
+          <div class="invoice-sub">${escapeHtml((invoice.invoice_type || "standalone") === "standalone" ? "Standalone" : invoice.invoice_type)} · By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
         </td>
         <td>
           <div class="invoice-main">${escapeHtml(invoice.customer_name || "—")}</div>
@@ -2488,6 +2489,7 @@ function invoiceRows(invoices) {
         <td>
           <div class="actions">
             <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
+            ${["Draft only", "Saved", "Awaiting manager approval"].includes(stage) ? `<a href="/invoices/${invoice.id}/edit">Edit</a>` : ""}
             <a class="delete-link" href="/invoices/${invoice.id}/delete">Delete</a>
           </div>
         </td>
@@ -2681,6 +2683,22 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_type TEXT DEFAULT 'standalone';`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS internal_reference TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS batch_id TEXT;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoice_audit_log (
+      id SERIAL PRIMARY KEY,
+      invoice_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      details TEXT,
+      changed_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoice_audit_log_invoice_idx ON invoice_audit_log (invoice_id, created_at DESC);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -4691,7 +4709,8 @@ app.get("/invoices", async (req, res) => {
         <h1>Invoices</h1>
         <div class="subtitle">Active invoices only. Emailed invoices move into Historic Invoices.</div>
         <div class="panel">
-          <a href="/invoices/new">Create New Invoice</a>
+          <a href="/invoices/new">Create Standalone Invoice</a>
+          <a href="/invoices/bulk">Bulk Create Invoices</a>
           <a href="/invoices/historic">Historic Invoices</a>
         </div>
         <table class="invoice-table">
@@ -4777,6 +4796,9 @@ app.post("/invoices/stage", async (req, res) => {
     const redirectTo = req.get("referer") || "/invoices";
     const agentName = currentAgentName(req);
 
+    const existingStageResult = await pool.query(`SELECT invoice_number, invoice_stage FROM invoices WHERE id = $1`, [id]);
+    const existingStage = existingStageResult.rows[0];
+
     await pool.query(`
       UPDATE invoices
       SET invoice_stage = $1,
@@ -4785,6 +4807,13 @@ app.post("/invoices/stage", async (req, res) => {
           updated_at = NOW()
       WHERE id = $3
     `, [invoiceStage, agentName, id]);
+
+    if (existingStage) {
+      await pool.query(`
+        INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
+        VALUES ($1, 'stage_changed', $2, $3, NOW())
+      `, [id, `Stage changed from ${existingStage.invoice_stage || "Draft only"} to ${invoiceStage}`, agentName || "Unknown"]);
+    }
 
     res.redirect(redirectTo);
   } catch (error) {
@@ -4899,7 +4928,7 @@ app.get("/invoices/new", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>New Invoice</title>
+        <title>New Standalone Invoice</title>
         <style>
           ${sharedStyles()}
           textarea { min-height: 90px; }
@@ -4953,8 +4982,8 @@ app.get("/invoices/new", async (req, res) => {
       <body>
         ${nav(req)}
 
-        <h1>New Invoice</h1>
-        <div class="subtitle">Created by ${escapeHtml(agentName)}</div>
+        <h1>New Standalone Invoice</h1>
+        <div class="subtitle">Create an invoice without creating or linking a job · Created by ${escapeHtml(agentName)}</div>
 
         <div class="notice">
           <strong>Invoice rules:</strong>
@@ -4965,6 +4994,7 @@ app.get("/invoices/new", async (req, res) => {
         </div>
 
         <form method="POST" action="/invoices/create">
+          <input type="hidden" name="invoice_type" value="standalone">
           <div class="panel">
             <h2>Invoice Details</h2>
             <div class="grid-3">
@@ -4977,15 +5007,22 @@ app.get("/invoices/new", async (req, res) => {
                 <option>Cash</option>
                 <option>Card</option>
               </select>
-              <input name="invoice_number" placeholder="Invoice / Job No." required>
+              <input name="invoice_number" placeholder="Invoice number" required>
             </div>
 
             <br>
 
             <div class="grid-3">
-              <input name="invoice_date" value="${today}" placeholder="Date">
-              <input value="Created by ${escapeHtml(agentName)}" disabled>
+              <input name="invoice_date" value="${today}" placeholder="Invoice date">
+              <input name="due_date" placeholder="Due date (optional)">
               <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
+            </div>
+
+            <br>
+
+            <div class="grid-2">
+              <input name="internal_reference" placeholder="Internal / customer reference (optional)">
+              <input value="Created by ${escapeHtml(agentName)}" disabled>
             </div>
 
             <br>
@@ -5073,6 +5110,13 @@ app.post("/invoices/create", async (req, res) => {
     const companyKey = req.body.company_key;
     const paymentMethod = req.body.payment_method;
     const dispatcherName = currentAgentName(req);
+    const invoiceNumber = String(req.body.invoice_number || "").trim();
+
+    if (!invoiceNumber) return res.status(400).send("Invoice number is required.");
+    const duplicateInvoice = await pool.query(`SELECT id FROM invoices WHERE LOWER(invoice_number) = LOWER($1) LIMIT 1`, [invoiceNumber]);
+    if (duplicateInvoice.rows.length) {
+      return res.status(400).send(`Invoice number ${escapeHtml(invoiceNumber)} already exists. Please use a unique invoice number.`);
+    }
 
     if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
 
@@ -5121,12 +5165,13 @@ app.post("/invoices/create", async (req, res) => {
         stage_updated_by, stage_updated_at, customer_name, customer_address,
         customer_postcode, site_same_as_invoice, site_address, site_postcode,
         customer_email, invoice_date, locksmith_name, paid_status, line_items,
-        subtotal, vat_amount, total, notes, updated_at
+        subtotal, vat_amount, total, notes, updated_at,
+        invoice_type, internal_reference, due_date, batch_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW(), $22, $23, $24, $25)
       RETURNING id
     `, [
-      req.body.invoice_number,
+      invoiceNumber,
       companyKey,
       paymentMethod,
       dispatcherName,
@@ -5146,13 +5191,460 @@ app.post("/invoices/create", async (req, res) => {
       subtotal.toFixed(2),
       vatAmount.toFixed(2),
       total.toFixed(2),
-      req.body.notes
+      req.body.notes,
+      req.body.invoice_type || "standalone",
+      String(req.body.internal_reference || "").trim(),
+      String(req.body.due_date || "").trim(),
+      null
     ]);
+
+    await pool.query(`
+      INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
+      VALUES ($1, 'created', $2, $3, NOW())
+    `, [result.rows[0].id, `Standalone invoice ${invoiceNumber} created for ${req.body.customer_name || "customer"} · ${money(total)}`, dispatcherName || "Unknown"]);
 
     res.redirect(`/invoices/${result.rows[0].id}/pdf`);
   } catch (error) {
     console.error("Create invoice error:", error);
     res.status(500).send("Create invoice error. Check Render logs.");
+  }
+});
+
+
+app.get("/invoices/bulk", async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString("en-GB", {
+      timeZone: "Europe/London",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    });
+    const agentName = currentAgentName(req);
+
+    const bulkRows = Array.from({ length: 20 }, (_, index) => {
+      const n = index + 1;
+      return `
+        <tr>
+          <td>${n}</td>
+          <td><input name="invoice_number_${n}" placeholder="Invoice no."></td>
+          <td><input name="customer_name_${n}" placeholder="Customer / company"></td>
+          <td><input name="customer_postcode_${n}" placeholder="Postcode"></td>
+          <td><input name="customer_address_${n}" placeholder="Invoice address"></td>
+          <td><input name="description_${n}" placeholder="Description / service"></td>
+          <td><input name="net_amount_${n}" type="number" min="0" step="0.01" placeholder="0.00"></td>
+          <td><input name="internal_reference_${n}" placeholder="Reference"></td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Bulk Create Invoices</title>
+        <style>
+          ${sharedStyles()}
+          .bulk-wrap { overflow-x:auto; }
+          .bulk-table { min-width:1250px; }
+          .bulk-table input { width:100%; min-width:120px; box-sizing:border-box; }
+          .bulk-table td:nth-child(5) input, .bulk-table td:nth-child(6) input { min-width:210px; }
+          .warning-box { background:#fff7ed; color:#7c2d12; border:1px solid #fdba74; border-radius:12px; padding:16px; margin-bottom:18px; }
+          .confirm-box { background:#111827; border:1px solid #374151; border-radius:12px; padding:16px; margin:18px 0; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Bulk Create Standalone Invoices</h1>
+        <div class="subtitle">Create up to 20 genuine standalone invoices in one batch · Created by ${escapeHtml(agentName)}</div>
+
+        <div class="warning-box">
+          <strong>Important:</strong> each row creates a real invoice record and PDF-ready invoice in the portal.
+          Leave unused rows completely blank. Duplicate invoice numbers are blocked.
+        </div>
+
+        <form method="POST" action="/invoices/bulk/create">
+          <div class="panel">
+            <h2>Batch settings</h2>
+            <div class="grid-3">
+              <select name="company_key" required>
+                <option value="locksmiths">24H Locksmiths Ltd</option>
+                <option value="online">24H Online Services Ltd</option>
+              </select>
+              <select name="payment_method" required>
+                <option>Bank transfer</option>
+                <option>Cash</option>
+                <option>Card</option>
+              </select>
+              <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
+            </div>
+            <br>
+            <div class="grid-3">
+              <input name="invoice_date" value="${today}" placeholder="Invoice date">
+              <input name="due_date" placeholder="Due date (optional)">
+              <input value="VAT: 20% on net amount" disabled>
+            </div>
+          </div>
+
+          <div class="panel bulk-wrap">
+            <table class="bulk-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Invoice no.</th><th>Customer/company</th><th>Postcode</th>
+                  <th>Invoice address</th><th>Description</th><th>Net amount</th><th>Reference</th>
+                </tr>
+              </thead>
+              <tbody>${bulkRows}</tbody>
+            </table>
+          </div>
+
+          <div class="confirm-box">
+            <label class="checkbox-row">
+              <input type="checkbox" name="genuine_activity_confirmed" value="yes" required>
+              I confirm these invoices relate to genuine business activity, services, charges or amounts actually due.
+            </label>
+          </div>
+
+          <button type="submit" onclick="return confirm('Create all completed invoice rows as real invoice records?');">Create Invoice Batch</button>
+          <a class="button secondary" href="/invoices">Cancel</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Bulk invoice page error:", error);
+    res.status(500).send("Bulk invoice page error. Check Render logs.");
+  }
+});
+
+app.post("/invoices/bulk/create", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const companyKey = String(req.body.company_key || "").trim();
+    const paymentMethod = String(req.body.payment_method || "").trim();
+    const invoiceStage = String(req.body.invoice_stage || "Draft only").trim();
+    const dispatcherName = currentAgentName(req) || "Unknown";
+    const invoiceDate = String(req.body.invoice_date || "").trim();
+    const dueDate = String(req.body.due_date || "").trim();
+
+    if (req.body.genuine_activity_confirmed !== "yes") {
+      return res.status(400).send("Please confirm that the invoices relate to genuine business activity.");
+    }
+    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(escapeHtml(paymentRuleMessage(companyKey)));
+    }
+
+    const rows = [];
+    for (let i = 1; i <= 20; i += 1) {
+      const invoiceNumber = String(req.body[`invoice_number_${i}`] || "").trim();
+      const customerName = String(req.body[`customer_name_${i}`] || "").trim();
+      const customerPostcode = compactPostcode(req.body[`customer_postcode_${i}`] || "");
+      const customerAddress = String(req.body[`customer_address_${i}`] || "").trim();
+      const description = String(req.body[`description_${i}`] || "").trim();
+      const netRaw = String(req.body[`net_amount_${i}`] || "").trim();
+      const internalReference = String(req.body[`internal_reference_${i}`] || "").trim();
+
+      const anythingEntered = [invoiceNumber, customerName, customerPostcode, customerAddress, description, netRaw, internalReference].some(Boolean);
+      if (!anythingEntered) continue;
+
+      const netAmount = Number(netRaw);
+      if (!invoiceNumber || !customerName || !description || !Number.isFinite(netAmount) || netAmount < 0) {
+        return res.status(400).send(`Row ${i} is incomplete. Invoice number, customer, description and a valid net amount are required.`);
+      }
+
+      rows.push({
+        rowNumber: i,
+        invoiceNumber,
+        customerName,
+        customerPostcode,
+        customerAddress,
+        description,
+        netAmount,
+        internalReference
+      });
+    }
+
+    if (!rows.length) return res.status(400).send("No completed invoice rows were entered.");
+
+    const lowered = rows.map(row => row.invoiceNumber.toLowerCase());
+    if (new Set(lowered).size !== lowered.length) {
+      return res.status(400).send("The batch contains duplicate invoice numbers. Please make every invoice number unique.");
+    }
+
+    const existing = await pool.query(
+      `SELECT invoice_number FROM invoices WHERE LOWER(invoice_number) = ANY($1::text[])`,
+      [lowered]
+    );
+    if (existing.rows.length) {
+      return res.status(400).send(`These invoice numbers already exist: ${existing.rows.map(row => escapeHtml(row.invoice_number)).join(", ")}`);
+    }
+
+    const batchId = `BULK-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+    await client.query("BEGIN");
+
+    const created = [];
+    for (const row of rows) {
+      const subtotal = Math.round(row.netAmount * 100) / 100;
+      const vatAmount = Math.round(subtotal * UK_VAT_RATE * 100) / 100;
+      const total = Math.round((subtotal + vatAmount) * 100) / 100;
+      const lineItems = [{ description: row.description, qty: 1, unitPrice: subtotal }];
+
+      const result = await client.query(`
+        INSERT INTO invoices (
+          invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
+          stage_updated_by, stage_updated_at, customer_name, customer_address,
+          customer_postcode, site_same_as_invoice, site_address, site_postcode,
+          customer_email, invoice_date, locksmith_name, paid_status, line_items,
+          subtotal, vat_amount, total, notes, updated_at,
+          invoice_type, internal_reference, due_date, batch_id
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8,$9,TRUE,$8,$9,'',$10,'','Unpaid',$11,$12,$13,$14,'',NOW(),'standalone',$15,$16,$17)
+        RETURNING id, invoice_number
+      `, [
+        row.invoiceNumber, companyKey, paymentMethod, dispatcherName, invoiceStage,
+        dispatcherName, row.customerName, row.customerAddress, row.customerPostcode,
+        invoiceDate, JSON.stringify(lineItems), subtotal.toFixed(2), vatAmount.toFixed(2),
+        total.toFixed(2), row.internalReference, dueDate, batchId
+      ]);
+
+      await client.query(`
+        INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
+        VALUES ($1, 'bulk_created', $2, $3, NOW())
+      `, [result.rows[0].id, `Created in batch ${batchId} · ${row.customerName} · ${money(total)}`, dispatcherName]);
+
+      created.push({ id: result.rows[0].id, invoiceNumber: result.rows[0].invoice_number, total });
+    }
+
+    await client.query("COMMIT");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Invoice Batch Created</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Invoice Batch Created</h1>
+        <div class="subtitle">${created.length} invoice${created.length === 1 ? "" : "s"} created · Batch ${escapeHtml(batchId)}</div>
+        <div class="panel">
+          <a href="/invoices">Back to Invoices</a>
+          <a href="/invoices/bulk">Create Another Batch</a>
+        </div>
+        <table>
+          <thead><tr><th>Invoice</th><th>Total</th><th>PDF</th></tr></thead>
+          <tbody>
+            ${created.map(row => `
+              <tr>
+                <td>${escapeHtml(row.invoiceNumber)}</td>
+                <td>${money(row.total)}</td>
+                <td><a href="/invoices/${row.id}/pdf" target="_blank">Open PDF</a></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    console.error("Bulk create invoice error:", error);
+    res.status(500).send("Bulk create invoice error. Check Render logs.");
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/invoices/:id/edit", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const invoice = result.rows[0];
+    if (!invoice) return res.status(404).send("Invoice not found");
+
+    const editableStages = ["Draft only", "Saved", "Awaiting manager approval"];
+    if (!editableStages.includes(invoice.invoice_stage || "Draft only")) {
+      return res.status(400).send("Only Draft, Saved or Awaiting manager approval invoices can be edited.");
+    }
+
+    const lineItems = Array.isArray(invoice.line_items) ? invoice.line_items : JSON.parse(invoice.line_items || "[]");
+    const auditRows = (await pool.query(`
+      SELECT * FROM invoice_audit_log WHERE invoice_id = $1 ORDER BY created_at DESC, id DESC LIMIT 30
+    `, [invoice.id])).rows;
+
+    function editLine(number) {
+      const item = lineItems[number - 1] || {};
+      return `
+        <div class="line-block">
+          <div class="line-grid">
+            <input name="line${number}_qty" value="${escapeHtml(item.qty || "")}" placeholder="Qty">
+            <input name="line${number}_unit_price" value="${escapeHtml(item.unitPrice ?? "")}" placeholder="Unit price">
+          </div>
+          <input class="description-input" name="line${number}_description" value="${escapeHtml(item.description || "")}" placeholder="Description appears on invoice">
+        </div>
+      `;
+    }
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Edit Invoice ${escapeHtml(invoice.invoice_number)}</title>
+        <style>
+          ${sharedStyles()}
+          textarea { min-height:90px; }
+          .line-block { margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid #374151; }
+          .line-grid { display:grid; grid-template-columns:100px 160px; gap:12px; margin-bottom:10px; }
+          .description-input { width:100%; box-sizing:border-box; }
+          .audit-row { padding:10px 0; border-bottom:1px solid #374151; }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Edit Standalone Invoice</h1>
+        <div class="subtitle">${escapeHtml(invoice.invoice_number)} · ${escapeHtml(invoice.invoice_stage || "Draft only")}</div>
+
+        <form method="POST" action="/invoices/${invoice.id}/edit">
+          <div class="panel">
+            <h2>Invoice Details</h2>
+            <div class="grid-3">
+              <select name="company_key" required>
+                <option value="locksmiths" ${invoice.company_key === "locksmiths" ? "selected" : ""}>24H Locksmiths Ltd</option>
+                <option value="online" ${invoice.company_key === "online" ? "selected" : ""}>24H Online Services Ltd</option>
+              </select>
+              <select name="payment_method" required>
+                ${["Bank transfer","Cash","Card"].map(v => `<option ${v === invoice.payment_method ? "selected" : ""}>${v}</option>`).join("")}
+              </select>
+              <input name="invoice_number" value="${escapeHtml(invoice.invoice_number)}" required>
+            </div>
+            <br>
+            <div class="grid-3">
+              <input name="invoice_date" value="${escapeHtml(invoice.invoice_date || "")}" placeholder="Invoice date">
+              <input name="due_date" value="${escapeHtml(invoice.due_date || "")}" placeholder="Due date">
+              <select name="invoice_stage" required>${invoiceStageOptions(invoice.invoice_stage || "Draft only")}</select>
+            </div>
+            <br>
+            <div class="grid-2">
+              <input name="internal_reference" value="${escapeHtml(invoice.internal_reference || "")}" placeholder="Internal / customer reference">
+              <select name="paid_status">
+                <option ${invoice.paid_status === "Unpaid" ? "selected" : ""}>Unpaid</option>
+                <option ${invoice.paid_status === "Paid with thanks" ? "selected" : ""}>Paid with thanks</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Customer</h2>
+            <div class="grid-2">
+              <input name="customer_name" value="${escapeHtml(invoice.customer_name || "")}" placeholder="Customer / invoice name" required>
+              <input name="customer_postcode" value="${escapeHtml(invoice.customer_postcode || "")}" placeholder="Postcode">
+            </div>
+            <br>
+            <textarea name="customer_address" placeholder="Invoice address">${escapeHtml(invoice.customer_address || "")}</textarea>
+            <br><br>
+            <input name="customer_email" value="${escapeHtml(invoice.customer_email || "")}" placeholder="Customer email">
+          </div>
+
+          <div class="panel">
+            <h2>Line Items</h2>
+            ${editLine(1)}${editLine(2)}${editLine(3)}${editLine(4)}${editLine(5)}
+          </div>
+
+          <div class="panel">
+            <h2>Notes</h2>
+            <textarea name="notes">${escapeHtml(invoice.notes || "")}</textarea>
+          </div>
+
+          <button type="submit">Save Invoice Changes</button>
+          <a class="button secondary" href="/invoices/${invoice.id}/pdf" target="_blank">Open PDF</a>
+          <a class="button secondary" href="/invoices">Cancel</a>
+        </form>
+
+        <div class="panel">
+          <h2>Invoice Audit Trail</h2>
+          ${auditRows.length ? auditRows.map(row => `
+            <div class="audit-row">
+              <strong>${escapeHtml(row.action_type)}</strong> · ${escapeHtml(formatDateTime(row.created_at))} · ${escapeHtml(row.changed_by || "Unknown")}<br>
+              <span class="muted">${escapeHtml(row.details || "")}</span>
+            </div>
+          `).join("") : `<div class="muted">No invoice audit entries yet.</div>`}
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit invoice page error:", error);
+    res.status(500).send("Edit invoice page error. Check Render logs.");
+  }
+});
+
+app.post("/invoices/:id/edit", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const existingResult = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [id]);
+    const existing = existingResult.rows[0];
+    if (!existing) return res.status(404).send("Invoice not found");
+
+    const editableStages = ["Draft only", "Saved", "Awaiting manager approval"];
+    if (!editableStages.includes(existing.invoice_stage || "Draft only")) {
+      return res.status(400).send("Only Draft, Saved or Awaiting manager approval invoices can be edited.");
+    }
+
+    const companyKey = String(req.body.company_key || "").trim();
+    const paymentMethod = String(req.body.payment_method || "").trim();
+    const invoiceNumber = String(req.body.invoice_number || "").trim();
+    const agentName = currentAgentName(req) || "Unknown";
+
+    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(escapeHtml(paymentRuleMessage(companyKey)));
+    }
+    if (!invoiceNumber) return res.status(400).send("Invoice number is required.");
+
+    const duplicate = await pool.query(
+      `SELECT id FROM invoices WHERE LOWER(invoice_number) = LOWER($1) AND id <> $2 LIMIT 1`,
+      [invoiceNumber, id]
+    );
+    if (duplicate.rows.length) return res.status(400).send("That invoice number is already in use.");
+
+    const lineItems = [];
+    for (let i = 1; i <= 5; i += 1) {
+      const description = String(req.body[`line${i}_description`] || "").trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
+      if (description && qty > 0 && Number.isFinite(unitPrice)) lineItems.push({ description, qty, unitPrice });
+    }
+    if (!lineItems.length) return res.status(400).send("At least one invoice line is required.");
+
+    const subtotal = Math.round(lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0) * 100) / 100;
+    const vatAmount = Math.round(subtotal * UK_VAT_RATE * 100) / 100;
+    const total = Math.round((subtotal + vatAmount) * 100) / 100;
+
+    await pool.query(`
+      UPDATE invoices
+      SET invoice_number=$1, company_key=$2, payment_method=$3, invoice_stage=$4,
+          stage_updated_by=$5, stage_updated_at=NOW(), customer_name=$6,
+          customer_address=$7, customer_postcode=$8, site_same_as_invoice=TRUE,
+          site_address=$7, site_postcode=$8, customer_email=$9, invoice_date=$10,
+          paid_status=$11, line_items=$12, subtotal=$13, vat_amount=$14, total=$15,
+          notes=$16, internal_reference=$17, due_date=$18, invoice_type='standalone',
+          updated_at=NOW()
+      WHERE id=$19
+    `, [
+      invoiceNumber, companyKey, paymentMethod, req.body.invoice_stage || "Saved",
+      agentName, req.body.customer_name, req.body.customer_address,
+      compactPostcode(req.body.customer_postcode), req.body.customer_email,
+      req.body.invoice_date, req.body.paid_status || "Unpaid", JSON.stringify(lineItems),
+      subtotal.toFixed(2), vatAmount.toFixed(2), total.toFixed(2), req.body.notes,
+      String(req.body.internal_reference || "").trim(), String(req.body.due_date || "").trim(), id
+    ]);
+
+    await pool.query(`
+      INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
+      VALUES ($1, 'edited', $2, $3, NOW())
+    `, [id, `Invoice updated · total ${money(existing.total)} → ${money(total)} · stage ${existing.invoice_stage || "Draft only"} → ${req.body.invoice_stage || "Saved"}`, agentName]);
+
+    res.redirect(`/invoices/${id}/pdf`);
+  } catch (error) {
+    console.error("Edit invoice error:", error);
+    res.status(500).send("Edit invoice error. Check Render logs.");
   }
 });
 
@@ -5198,7 +5690,8 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.fontSize(10).font("Helvetica")
       .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
       .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
-      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120);
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name || "—")}`, 390, 120)
+      .text(`Due: ${pdfText(invoice.due_date || "—")}`, 390, 135);
 
     doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
@@ -5222,7 +5715,8 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.font("Helvetica").fontSize(10)
       .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
-      .text(`Status: ${pdfText(invoice.paid_status)}`, 250, 342);
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 210, 342)
+      .text(`Ref: ${pdfText(invoice.internal_reference || "—")}`, 350, 342, { width: 175 });
 
     const tableTop = 390;
 
