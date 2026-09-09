@@ -4910,8 +4910,8 @@ app.get("/refund-documents/:id/pdf", async (req, res) => {
     doc.font("Helvetica-Bold").fontSize(12).text("TOTAL REFUND",350,450).text(money(row.total_amount),465,450);
     if (row.notes) doc.text(`Notes: ${pdfText(row.notes)}`,50,435,{width:250});
     if (isClientInvoice) {
+      doc.font("Helvetica").fontSize(10).fillColor("#000000").text("Please make payments to the agreed bank account.", 50, 505, { width: 495, align: "center" });
     }
-    doc.fillColor("#000000").fontSize(8).text(`Created in the 24H Locksmiths operations portal · ${pdfText(row.created_by || "Unknown")} · ${formatDateTime(row.created_at)}`,50,755,{width:495,align:"center"});
     doc.end();
   } catch (error) { console.error("Refund PDF error:", error); res.status(500).send("Could not create refund PDF."); }
 });
