@@ -2720,6 +2720,8 @@ async function initDb() {
       total_amount NUMERIC(10,2) NOT NULL,
       vat_treatment TEXT DEFAULT 'No VAT / refund support document',
       bank_reference TEXT,
+      client_account_number TEXT,
+      client_sort_code TEXT,
       notes TEXT,
       status TEXT DEFAULT 'Draft',
       created_by TEXT,
@@ -2727,6 +2729,8 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_account_number TEXT;`);
+  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_sort_code TEXT;`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS refund_documents_number_unique ON refund_documents (document_number);`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS refund_document_audit_log (
@@ -4794,6 +4798,8 @@ app.get("/refund-documents/new", async (req, res) => {
         <div class="field wide"><label>Refund reason</label><input name="reason" required placeholder="e.g. Agreed refund for locksmith services"></div>
         <div class="field"><label>Refund amount</label><input name="total_amount" type="number" step="0.01" min="0.01" required></div>
         <div class="field"><label>Bank/reference notes</label><input name="bank_reference"></div>
+        <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" placeholder="Enter manually"></div>
+        <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" placeholder="e.g. 12-34-56"></div>
         <div class="field"><label>Status</label><select name="status">${refundStatusOptions("Draft")}</select></div>
         <div class="field wide"><label>Notes</label><textarea name="notes" rows="3"></textarea></div>
       </div>
@@ -4817,9 +4823,9 @@ app.post("/refund-documents/create", async (req, res) => {
       INSERT INTO refund_documents (
         document_type, document_number, document_date, client_name, client_address, client_postcode, client_email, client_vat_number,
         original_job_reference, original_invoice_reference, reason, net_amount, vat_amount, total_amount, vat_treatment,
-        bank_reference, notes, status, created_by, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW(),NOW()) RETURNING id
-    `, [type, number, req.body.document_date, clientName, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", reason, 0, 0, total, "", req.body.bank_reference || "", req.body.notes || "", req.body.status || "Draft", currentAgentName(req) || "Unknown"]);
+        bank_reference, client_account_number, client_sort_code, notes, status, created_by, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW()) RETURNING id
+    `, [type, number, req.body.document_date, clientName, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", currentAgentName(req) || "Unknown"]);
     const id = result.rows[0].id;
     await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id, action_type, details, changed_by, created_at) VALUES ($1,'created',$2,$3,NOW())`, [id, `${refundDocumentTypeLabel(type)} ${number} created for ${clientName}, total ${money(total)}`, currentAgentName(req) || "Unknown"]);
     res.redirect(`/refund-documents/${id}/edit?created=1`);
@@ -4850,6 +4856,8 @@ app.get("/refund-documents/:id/edit", async (req, res) => {
           <div class="field wide"><label>Refund reason</label><input name="reason" required value="${escapeHtml(docRow.reason || "")}"></div>
           <div class="field"><label>Refund amount</label><input type="number" step="0.01" min="0.01" required name="total_amount" value="${Number(docRow.total_amount || 0).toFixed(2)}"></div>
           <div class="field"><label>Bank/reference notes</label><input name="bank_reference" value="${escapeHtml(docRow.bank_reference || "")}"></div>
+          <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" value="${escapeHtml(docRow.client_account_number || "")}"></div>
+          <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" value="${escapeHtml(docRow.client_sort_code || "")}"></div>
           <div class="field"><label>Status</label><select name="status">${refundStatusOptions(docRow.status || "Draft")}</select></div>
           <div class="field wide"><label>Notes</label><textarea name="notes" rows="3">${escapeHtml(docRow.notes || "")}</textarea></div>
         </div><button class="button green" type="submit">Save changes</button>
@@ -4868,7 +4876,7 @@ app.post("/refund-documents/:id/edit", async (req, res) => {
     if (!number || !String(req.body.client_name || "").trim() || !String(req.body.reason || "").trim() || !Number.isFinite(total) || total <= 0) return res.status(400).send("Required refund document fields are missing.");
     const duplicate = await pool.query(`SELECT id FROM refund_documents WHERE LOWER(document_number)=LOWER($1) AND id<>$2 LIMIT 1`, [number, req.params.id]);
     if (duplicate.rows.length) return res.status(400).send("That refund document number already exists.");
-    await pool.query(`UPDATE refund_documents SET document_number=$1,document_date=$2,client_name=$3,client_address=$4,client_postcode=$5,client_email=$6,client_vat_number=$7,original_job_reference=$8,original_invoice_reference=$9,reason=$10,net_amount=$11,vat_amount=$12,total_amount=$13,vat_treatment=$14,bank_reference=$15,notes=$16,status=$17,updated_at=NOW() WHERE id=$18`, [number, req.body.document_date, req.body.client_name, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", req.body.reason, 0, 0, total, "", req.body.bank_reference || "", req.body.notes || "", req.body.status || "Draft", req.params.id]);
+    await pool.query(`UPDATE refund_documents SET document_number=$1,document_date=$2,client_name=$3,client_address=$4,client_postcode=$5,client_email=$6,client_vat_number=$7,original_job_reference=$8,original_invoice_reference=$9,reason=$10,net_amount=$11,vat_amount=$12,total_amount=$13,vat_treatment=$14,bank_reference=$15,client_account_number=$16,client_sort_code=$17,notes=$18,status=$19,updated_at=NOW() WHERE id=$20`, [number, req.body.document_date, req.body.client_name, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", req.body.reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", req.params.id]);
     await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'edited',$2,$3,NOW())`, [req.params.id, `Updated ${number}; status ${req.body.status || "Draft"}; total ${money(total)}`, currentAgentName(req) || "Unknown"]);
     res.redirect(`/refund-documents/${req.params.id}/edit?saved=1`);
   } catch (error) { console.error("Save refund document error:", error); res.status(500).send("Could not save refund document."); }
@@ -4911,6 +4919,10 @@ app.get("/refund-documents/:id/pdf", async (req, res) => {
     if (row.notes) doc.text(`Notes: ${pdfText(row.notes)}`,50,435,{width:250});
     if (isClientInvoice) {
       doc.font("Helvetica").fontSize(10).fillColor("#000000").text("Please make payments to the agreed bank account.", 50, 505, { width: 495, align: "center" });
+      if (row.client_account_number || row.client_sort_code) {
+        doc.font("Helvetica-Bold").fontSize(10).text("Bank details for refund", 50, 530, { width: 495, align: "center" });
+        doc.font("Helvetica").fontSize(10).text(`Account number: ${pdfText(row.client_account_number || "—")}    Sort code: ${pdfText(row.client_sort_code || "—")}`, 50, 548, { width: 495, align: "center" });
+      }
     }
     doc.end();
   } catch (error) { console.error("Refund PDF error:", error); res.status(500).send("Could not create refund PDF."); }
