@@ -1478,6 +1478,232 @@ async function yayApiRequest(method, path, body = null) {
   return { text: providerText, json: parsed, status: response.status };
 }
 
+
+const yaySipLiveCache = {
+  users: { expiresAt: 0, rows: [] },
+  statuses: { expiresAt: 0, rows: [] },
+  availability: new Map()
+};
+
+function yayArrayFromResponse(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const candidates = [
+    payload.result,
+    payload.results,
+    payload.data,
+    payload.users,
+    payload.user_status,
+    payload.statuses
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+    if (candidate && typeof candidate === "object") {
+      if (Array.isArray(candidate.data)) return candidate.data;
+      if (Array.isArray(candidate.results)) return candidate.results;
+      if (Array.isArray(candidate.users)) return candidate.users;
+    }
+  }
+  return [];
+}
+
+function yayObjectFromResponse(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  if (payload.result && !Array.isArray(payload.result) && typeof payload.result === "object") return payload.result;
+  if (payload.data && !Array.isArray(payload.data) && typeof payload.data === "object") return payload.data;
+  return payload;
+}
+
+function yaySipExtension(row) {
+  return String(
+    row?.extension ??
+    row?.extension_number ??
+    row?.sip_extension ??
+    row?.user_extension ??
+    row?.number ??
+    ""
+  ).trim();
+}
+
+function yaySipUuid(row) {
+  return String(
+    row?.uuid ??
+    row?.user_uuid ??
+    row?.sip_user_uuid ??
+    row?.id ??
+    ""
+  ).trim();
+}
+
+function yayStatusUuid(row) {
+  return String(
+    row?.uuid ??
+    row?.user_uuid ??
+    row?.sip_user_uuid ??
+    row?.id ??
+    ""
+  ).trim();
+}
+
+function yayStatusExtension(row) {
+  return String(
+    row?.extension ??
+    row?.extension_number ??
+    row?.sip_extension ??
+    row?.user_extension ??
+    ""
+  ).trim();
+}
+
+function yayTruthy(value) {
+  if (value === true || value === 1) return true;
+  const v = String(value ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "on", "available", "registered", "online", "active", "ready"].includes(v);
+}
+
+function yayFalsy(value) {
+  if (value === false || value === 0) return true;
+  const v = String(value ?? "").trim().toLowerCase();
+  return ["0", "false", "no", "off", "unavailable", "unregistered", "offline", "inactive", "not_registered"].includes(v);
+}
+
+function yayRegisteredFromStatus(row) {
+  if (!row || typeof row !== "object") return null;
+  const direct = [
+    row.registered,
+    row.is_registered,
+    row.online,
+    row.is_online,
+    row.connected,
+    row.is_connected,
+    row.registration_status,
+    row.status
+  ];
+  for (const value of direct) {
+    if (yayTruthy(value)) return true;
+    if (yayFalsy(value)) return false;
+  }
+  const registrations = row.registrations ?? row.registration_count ?? row.registered_devices;
+  if (registrations !== undefined && registrations !== null && registrations !== "") {
+    const n = Number(registrations);
+    if (Number.isFinite(n)) return n > 0;
+  }
+  return null;
+}
+
+function yayQueueAvailableFromPayload(payload) {
+  const row = yayObjectFromResponse(payload);
+  const values = [
+    row.available,
+    row.availability,
+    row.queue_available,
+    row.available_in_queues,
+    row.is_available,
+    row.is_available_in_queues,
+    row.enabled
+  ];
+  for (const value of values) {
+    if (yayTruthy(value)) return true;
+    if (yayFalsy(value)) return false;
+    if (value && typeof value === "object") {
+      for (const nested of [value.available, value.enabled, value.status]) {
+        if (yayTruthy(nested)) return true;
+        if (yayFalsy(nested)) return false;
+      }
+    }
+  }
+  return null;
+}
+
+async function getYaySipUsersCached() {
+  const now = Date.now();
+  if (yaySipLiveCache.users.expiresAt > now) return yaySipLiveCache.users.rows;
+  const result = await yayApiRequest("GET", "/voip/user");
+  const rows = yayArrayFromResponse(result.json);
+  yaySipLiveCache.users = { rows, expiresAt: now + 10 * 60 * 1000 };
+  return rows;
+}
+
+async function getYaySipStatusesCached() {
+  const now = Date.now();
+  if (yaySipLiveCache.statuses.expiresAt > now) return yaySipLiveCache.statuses.rows;
+  const result = await yayApiRequest("GET", "/voip/user-status");
+  const rows = yayArrayFromResponse(result.json);
+  yaySipLiveCache.statuses = { rows, expiresAt: now + 20 * 1000 };
+  return rows;
+}
+
+async function getYayQueueAvailabilityCached(uuid) {
+  if (!uuid) return null;
+  const now = Date.now();
+  const cached = yaySipLiveCache.availability.get(uuid);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const result = await yayApiRequest("GET", `/voip/user/${encodeURIComponent(uuid)}/availability`);
+  const value = yayQueueAvailableFromPayload(result.json);
+  yaySipLiveCache.availability.set(uuid, { value, expiresAt: now + 60 * 1000 });
+  return value;
+}
+
+async function getYayWallboardPresence(wallboardAgents = {}) {
+  const fallback = {};
+  Object.keys(wallboardAgents).forEach(ext => {
+    fallback[ext] = { extension: ext, registered: null, queueAvailable: null, state: "Unknown" };
+  });
+  if (!yayAuthConfigured()) return fallback;
+
+  try {
+    const [users, statuses] = await Promise.all([
+      getYaySipUsersCached(),
+      getYaySipStatusesCached()
+    ]);
+
+    const userByExt = new Map();
+    users.forEach(row => {
+      const ext = yaySipExtension(row);
+      if (ext) userByExt.set(ext, row);
+    });
+
+    const statusByUuid = new Map();
+    const statusByExt = new Map();
+    statuses.forEach(row => {
+      const uuid = yayStatusUuid(row);
+      const ext = yayStatusExtension(row);
+      if (uuid) statusByUuid.set(uuid, row);
+      if (ext) statusByExt.set(ext, row);
+    });
+
+    const entries = await Promise.all(Object.keys(wallboardAgents).map(async ext => {
+      const user = userByExt.get(String(ext));
+      const uuid = yaySipUuid(user);
+      const statusRow = (uuid && statusByUuid.get(uuid)) || statusByExt.get(String(ext)) || user || null;
+      const registered = yayRegisteredFromStatus(statusRow);
+
+      let queueAvailable = null;
+      if (uuid) {
+        try {
+          queueAvailable = await getYayQueueAvailabilityCached(uuid);
+        } catch (availabilityError) {
+          console.warn(`Yay availability lookup failed for extension ${ext}:`, availabilityError.message);
+        }
+      }
+
+      let state = "Unknown";
+      if (registered === false || queueAvailable === false) state = "Offline";
+      else if (registered === true && queueAvailable === true) state = "Available";
+      else if (registered === true && queueAvailable === null) state = "Available";
+      else if (registered === null && queueAvailable === true) state = "Available";
+
+      return [String(ext), { extension: String(ext), uuid, registered, queueAvailable, state }];
+    }));
+
+    return Object.fromEntries(entries);
+  } catch (error) {
+    console.warn("Yay SIP presence refresh failed:", error.message);
+    return fallback;
+  }
+}
+
 function yayFutureSendOn(minutesAhead = 2) {
   // Yay rejects send_on if it is too close to their current server time.
   // Use a safe future time, rounded to whole seconds with no milliseconds.
@@ -3990,7 +4216,7 @@ function wallboardTodaySql() {
   `;
 }
 
-function wallboardSnapshotFromCalls(calls, wallboardAgents) {
+function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
   const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
   const answeredCalls = inboundCalls.filter(call => String(call.answered_by || "").trim());
@@ -4013,14 +4239,17 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents) {
 
   const agentStats = {};
   Object.entries(wallboardAgents).forEach(([ext, name]) => {
+    const presence = yayPresence[String(ext)] || {};
     agentStats[ext] = {
       ext,
       name,
       answered: 0,
       totalDuration: 0,
       lastCallTime: null,
-      status: "Ready",
-      currentDuration: 0
+      status: presence.state === "Available" ? "Available" : presence.state === "Offline" ? "Offline" : "Unknown",
+      currentDuration: 0,
+      registered: presence.registered ?? null,
+      queueAvailable: presence.queueAvailable ?? null
     };
   });
 
@@ -4095,7 +4324,8 @@ app.get("/api/call-wallboard/live", async (req, res) => {
       pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
       getWallboardAgents()
     ]);
-    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents);
+    const yayPresence = await getYayWallboardPresence(wallboardAgents);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents, yayPresence);
     snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
     snapshot.generatedAt = new Date().toISOString();
     res.setHeader("Cache-Control", "no-store");
@@ -4113,7 +4343,8 @@ app.get("/call-wallboard", async (req, res) => {
       pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
       getWallboardAgents()
     ]);
-    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents);
+    const yayPresence = await getYayWallboardPresence(wallboardAgents);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents, yayPresence);
     snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
 
     function wbSeconds(seconds) {
@@ -4131,13 +4362,13 @@ app.get("/call-wallboard", async (req, res) => {
           return b.answered - a.answered || a.name.localeCompare(b.name);
         })
         .map(agent => `
-          <article class="agent-card ${agent.status === "On Call" ? "on-call" : "ready"}">
+          <article class="agent-card ${agent.status === "On Call" ? "on-call" : agent.status === "Available" ? "ready" : "offline"}">
             <div class="agent-head">
               <div class="agent-name-wrap">
                 <span class="agent-dot"></span>
                 <div><strong>${escapeHtml(agent.name)}</strong><span class="agent-ext">${escapeHtml(agent.ext)}</span></div>
               </div>
-              <span class="agent-state">${agent.status === "On Call" ? `On Call · ${wbSeconds(agent.currentDuration)}` : "Ready"}</span>
+              <span class="agent-state">${agent.status === "On Call" ? `On Call · ${wbSeconds(agent.currentDuration)}` : escapeHtml(agent.status)}</span>
             </div>
             <div class="agent-metrics">
               <div><span>Calls Today</span><strong>${agent.answered}</strong></div>
@@ -4174,7 +4405,7 @@ app.get("/call-wallboard", async (req, res) => {
       `).join("");
     }
 
-    const availableAgents = snapshot.agents.filter(a => a.status !== "On Call").length;
+    const availableAgents = snapshot.agents.filter(a => a.status === "Available").length;
     const totalAgents = snapshot.agents.length;
     const alertOn = snapshot.totals.waiting > 0;
     const alertText = snapshot.totals.waiting === 1
@@ -4240,12 +4471,15 @@ app.get("/call-wallboard", async (req, res) => {
           .agent-grid{padding:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;align-content:start}
           .agent-card{border:1px solid rgba(32,219,119,.38);background:linear-gradient(145deg,rgba(6,53,54,.45),rgba(8,31,53,.8));border-radius:13px;padding:11px;min-width:0}
           .agent-card.on-call{border-color:rgba(255,89,104,.55);background:linear-gradient(145deg,rgba(90,20,38,.34),rgba(8,31,53,.84))}
+          .agent-card.offline{border-color:rgba(148,163,184,.22);background:linear-gradient(145deg,rgba(30,41,59,.40),rgba(8,31,53,.70));opacity:.72}
           .agent-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
           .agent-name-wrap{display:flex;gap:7px;align-items:center;min-width:0}.agent-name-wrap strong{font-size:14px}.agent-ext{font-size:10px;color:#90a8bf;margin-left:5px}
           .agent-dot{width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(33,223,119,.7);flex:0 0 auto}
           .on-call .agent-dot{background:var(--red);box-shadow:0 0 9px rgba(255,89,104,.7)}
+          .offline .agent-dot{background:#64748b;box-shadow:none}
           .agent-state{font-size:9px;font-weight:900;padding:4px 7px;border-radius:999px;background:rgba(33,223,119,.13);color:#80f3ae;white-space:nowrap}
           .on-call .agent-state{background:rgba(255,89,104,.13);color:#ff9aa4}
+          .offline .agent-state{background:rgba(100,116,139,.14);color:#a8b3c2}
           .agent-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:12px}
           .agent-metrics div{border-left:1px solid rgba(148,163,184,.14);padding-left:7px}.agent-metrics div:first-child{border-left:0;padding-left:0}
           .agent-metrics span{display:block;font-size:9px;color:#8fa6bc}.agent-metrics strong{display:block;margin-top:2px;font-size:14px}
@@ -4284,7 +4518,7 @@ app.get("/call-wallboard", async (req, res) => {
             <div class="kpi red"><div class="kpi-label">Missed</div><div class="kpi-value" data-kpi="missed">${snapshot.totals.missed}</div><div class="kpi-foot"><span data-kpi="missedRate">${snapshot.totals.missedRate}</span>% of inbound</div></div>
             <div class="kpi amber"><div class="kpi-label">Waiting Now</div><div class="kpi-value" data-kpi="waiting">${snapshot.totals.waiting}</div><div class="kpi-foot">Live unconnected calls</div></div>
             <div class="kpi blue"><div class="kpi-label">Avg Talk Time</div><div class="kpi-value" data-kpi="avgTalk">${wbSeconds(snapshot.totals.avgTalkSeconds)}</div><div class="kpi-foot">Answered inbound calls</div></div>
-            <div class="kpi green"><div class="kpi-label">Agents Ready</div><div class="kpi-value"><span data-kpi="availableAgents">${availableAgents}</span>/<span data-kpi="totalAgents">${totalAgents}</span></div><div class="kpi-foot">Mapped wallboard agents</div></div>
+            <div class="kpi green"><div class="kpi-label">Agents Available</div><div class="kpi-value"><span data-kpi="availableAgents">${availableAgents}</span>/<span data-kpi="totalAgents">${totalAgents}</span></div><div class="kpi-foot">Registered + queue available</div></div>
           </section>
 
           <section class="alertbar ${alertOn ? "hot" : ""}" id="waitingAlert">
@@ -4294,7 +4528,7 @@ app.get("/call-wallboard", async (req, res) => {
 
           <section class="main-grid">
             <div class="panel">
-              <div class="panel-head"><div class="panel-title">Team Status</div><div class="panel-note"><span id="agentCount">${totalAgents}</span> mapped agents · green = ready · red = on call</div></div>
+              <div class="panel-head"><div class="panel-title">Team Status</div><div class="panel-note"><span id="agentCount">${totalAgents}</span> mapped agents · green = available · red = on call · grey = offline</div></div>
               <div class="agent-grid" id="agentGrid">${wbAgentCards(snapshot.agents)}</div>
             </div>
             <div class="panel">
@@ -4353,10 +4587,10 @@ app.get("/call-wallboard", async (req, res) => {
               return b.answered-a.answered || a.name.localeCompare(b.name);
             });
             return sorted.map(a =>
-              '<article class="agent-card '+(a.status==="On Call"?"on-call":"ready")+'">'+
+              '<article class="agent-card '+(a.status==="On Call"?"on-call":a.status==="Available"?"ready":"offline")+'">'+
                 '<div class="agent-head">'+
                   '<div class="agent-name-wrap"><span class="agent-dot"></span><div><strong>'+html(a.name)+'</strong><span class="agent-ext">'+html(a.ext)+'</span></div></div>'+
-                  '<span class="agent-state">'+(a.status==="On Call" ? "On Call · "+duration(a.currentDuration) : "Ready")+'</span>'+
+                  '<span class="agent-state">'+(a.status==="On Call" ? "On Call · "+duration(a.currentDuration) : html(a.status || "Unknown"))+'</span>'+
                 '</div>'+
                 '<div class="agent-metrics">'+
                   '<div><span>Calls Today</span><strong>'+a.answered+'</strong></div>'+
@@ -4400,7 +4634,7 @@ app.get("/call-wallboard", async (req, res) => {
               setKpi("avgTalk",duration(data.totals.avgTalkSeconds));
               setKpi("longestWait",duration(data.totals.longestWaitSeconds));
               setKpi("inProgress",data.totals.inProgress);
-              const ready=data.agents.filter(a=>a.status!=="On Call").length;
+              const ready=data.agents.filter(a=>a.status==="Available").length;
               setKpi("availableAgents",ready); setKpi("totalAgents",data.agents.length);
               document.getElementById("agentCount").textContent=data.agents.length;
               document.getElementById("agentGrid").innerHTML=renderAgents(data.agents);
