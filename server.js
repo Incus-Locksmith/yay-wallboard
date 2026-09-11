@@ -2624,6 +2624,7 @@ async function initDb() {
   `);
 
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS is_subcontractor BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
@@ -7178,12 +7179,18 @@ async function assertTechnicianAssignableForJob(technicianId, targetDateValue) {
 }
 
 function technicianOptions(technicians, selectedId = "", targetDateValue = null) {
-  return technicians.map(tech => {
+  const ordered = [...technicians].sort((a, b) => {
+    const aSub = Boolean(a.is_subcontractor);
+    const bSub = Boolean(b.is_subcontractor);
+    if (aSub !== bSub) return aSub ? 1 : -1;
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  return ordered.map(tech => {
     const selected = String(tech.id) === String(selectedId || "") ? "selected" : "";
     const assignableForTarget = targetDateValue ? technicianCanBeAssignedOn(tech, targetDateValue) : true;
     const disabled = !assignableForTarget && !selected ? "disabled" : "";
     const returnDate = dateInputValue(tech.return_to_work_date);
-    const labelBits = [tech.name];
+    const labelBits = [tech.is_subcontractor ? `[SUB] ${tech.name}` : tech.name];
     if (tech.status) labelBits.push(tech.status);
     if (returnDate) labelBits.push(`returns ${returnDate}`);
     return `<option value="${tech.id}" data-status="${escapeHtml(tech.status || '')}" data-return-date="${escapeHtml(returnDate)}" ${selected} ${disabled}>${escapeHtml(labelBits.join(" — "))}</option>`;
@@ -7412,7 +7419,12 @@ app.get("/jobs", async (req, res) => {
       `, params),
       pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`),
       pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE closed_at IS NOT NULL AND DATE(closed_at) = CURRENT_DATE`),
-      pool.query(`SELECT id, name, status, priority, location_checked_in_at FROM technicians WHERE active = TRUE ORDER BY name ASC`),
+      pool.query(`
+        SELECT id, name, status, priority, is_subcontractor, location_checked_in_at
+        FROM technicians
+        WHERE active = TRUE
+        ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+      `),
       pool.query(`SELECT DISTINCT COALESCE(source_campaign, '') AS campaign FROM jobs WHERE COALESCE(source_campaign, '') <> '' ORDER BY campaign ASC LIMIT 80`),
       pool.query(`
         SELECT
@@ -7877,7 +7889,12 @@ app.get("/jobs/new", async (req, res) => {
     const addressesJson = JSON.stringify(addresses).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
     const addressOptions = addresses.map((address, index) => `<option value="${index}">${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</option>`).join("");
 
-    const technicians = (await pool.query(`SELECT id, name, status, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`
+      SELECT id, name, status, return_to_work_date, is_subcontractor
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+    `)).rows;
     const templates = (await pool.query(`SELECT id, template_name, customer_name, customer_address, customer_postcode FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 
@@ -8616,7 +8633,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
     `, [id]);
     if (!jobResult.rows.length) return res.status(404).send("Job not found");
     const job = jobResult.rows[0];
-    const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`
+      SELECT id, name, status, phone, checkin_token, return_to_work_date, is_subcontractor
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+    `)).rows;
     const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const campaignOptions = await getCampaignOptions(job.source_campaign || "Unknown");
     const summary = jobTechnicianSummary(job);
@@ -11888,6 +11910,10 @@ app.get("/technicians", async (req, res) => {
           ELSE 4
         END,
         CASE
+          WHEN COALESCE(is_subcontractor, FALSE) = FALSE THEN 1
+          ELSE 2
+        END,
+        CASE
           WHEN LOWER(priority) LIKE '%high%' THEN 1
           WHEN LOWER(priority) LIKE '%push%' THEN 2
           WHEN LOWER(priority) LIKE '%do not%' THEN 9
@@ -11902,8 +11928,11 @@ app.get("/technicians", async (req, res) => {
       const priorityBadgeClass = priorityClass(priority);
 
       return `
-        <tr>
-          <td>${escapeHtml(tech.name)}</td>
+        <tr class="${tech.is_subcontractor ? "sub-tech-row" : ""}">
+          <td>
+            <strong>${escapeHtml(tech.name)}</strong>
+            ${tech.is_subcontractor ? `<span class="sub-badge">SUB</span><div class="audit">Second priority</div>` : `<div class="audit">Primary</div>`}
+          </td>
           <td>${escapeHtml(tech.phone)}</td>
           <td>${escapeHtml(tech.base_postcode)}</td>
           <td>${escapeHtml(tech.current_postcode)}</td>
@@ -11943,12 +11972,18 @@ app.get("/technicians", async (req, res) => {
           ${sharedStyles()}
           form.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
           textarea { grid-column: span 4; min-height: 70px; }
+          .sub-badge { display:inline-block; margin-left:7px; padding:3px 7px; border-radius:999px; background:#f59e0b; color:#2b1700; font-size:10px; font-weight:900; letter-spacing:.08em; vertical-align:middle; }
+          .sub-tech-row td { background:#fffbeb; }
+          .sub-toggle { display:flex; align-items:center; gap:9px; padding:10px 12px; border:1px solid #f5d58a; border-radius:12px; background:#fffaf0; font-weight:700; }
+          .sub-toggle input { width:auto; margin:0; }
+          .sub-note { margin:14px 0 0; padding:12px 14px; border-radius:12px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45; }
         </style>
       </head>
       <body>
         ${nav(req)}
         <h1>Technician Availability</h1>
         <div class="subtitle">Live locksmith availability board · Auto-refreshes every 30 seconds</div>
+        <div class="sub-note"><strong>SUB = subcontractor / second priority.</strong> When checking ETA with a sub by phone, continue using the partial postcode manually. No postcode masking is applied in the system.</div>
         <div class="panel">
           <h2>Add Technician</h2>
           <form class="grid" method="POST" action="/technicians/save">
@@ -11962,6 +11997,7 @@ app.get("/technicians", async (req, res) => {
             <select name="priority">
               <option>Normal</option><option>Push</option><option>High priority</option><option>Do not prioritise</option>
             </select>
+            <label class="sub-toggle"><input type="checkbox" name="is_subcontractor" value="1"> Subcontractor / second priority</label>
             <input name="available_from" placeholder="Available from e.g. 15:30">
             <input type="date" name="return_to_work_date" title="Return to work date">
             <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
@@ -12044,6 +12080,10 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
             <select name="status">${statusOptions}</select>
             <select name="priority">${priorityOptions}</select>
+            <label style="display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #f5d58a;border-radius:12px;background:#fffaf0;font-weight:700;">
+              <input type="checkbox" name="is_subcontractor" value="1" ${tech.is_subcontractor ? "checked" : ""} style="width:auto;margin:0;">
+              Subcontractor / second priority
+            </label>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
@@ -12068,6 +12108,7 @@ app.post("/technicians/save", async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
     const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, return_to_work_date, skills, notes } = req.body;
+    const isSubcontractor = req.body.is_subcontractor === "1" || req.body.is_subcontractor === "on";
     const technicianPin = String(req.body.technician_pin || '').replace(/\D/g, '').slice(0, 4) || makeTechnicianPin();
     const agentName = currentAgentName(req);
 
@@ -12076,17 +12117,17 @@ app.post("/technicians/save", async (req, res) => {
         UPDATE technicians
         SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
             status = $5, priority = $6, available_from = $7, return_to_work_date = $8, skills = $9,
-            notes = $10, technician_pin = $11, updated_by = $12, updated_at = NOW()
-        WHERE id = $13
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, agentName, id]);
+            notes = $10, technician_pin = $11, is_subcontractor = $12, updated_by = $13, updated_at = NOW()
+        WHERE id = $14
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, isSubcontractor, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, return_to_work_date, skills, notes, updated_by, checkin_token, technician_pin, updated_at
+          available_from, return_to_work_date, skills, notes, is_subcontractor, updated_by, checkin_token, technician_pin, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, agentName, makeCheckinToken(), technicianPin]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, isSubcontractor, agentName, makeCheckinToken(), technicianPin]);
     }
 
     res.redirect("/technicians");
