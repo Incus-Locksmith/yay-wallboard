@@ -4219,17 +4219,54 @@ function wallboardTodaySql() {
 function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
   const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
+  const now = Date.now();
+
+  // Yay occasionally leaves a call record without an end_time if the final webhook event
+  // is not received. Without a guard, that record looks "waiting" forever.
+  // An unanswered call is only considered live/waiting for this many seconds.
+  // Default: 10 minutes. Can be changed in Render with WALLBOARD_WAITING_MAX_SECONDS.
+  const waitingMaxSecondsRaw = Number(process.env.WALLBOARD_WAITING_MAX_SECONDS || 600);
+  const waitingMaxSeconds = Number.isFinite(waitingMaxSecondsRaw) && waitingMaxSecondsRaw >= 60
+    ? waitingMaxSecondsRaw
+    : 600;
+
+  function callAgeSeconds(call) {
+    const started = call.start_time || call.received_at || call.updated_at;
+    if (!started) return Number.POSITIVE_INFINITY;
+    const stamp = new Date(started).getTime();
+    if (!Number.isFinite(stamp)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, Math.floor((now - stamp) / 1000));
+  }
+
   const answeredCalls = inboundCalls.filter(call => String(call.answered_by || "").trim());
-  const missedCalls = inboundCalls.filter(call => !String(call.answered_by || "").trim() && call.end_time);
-  const waitingCalls = inboundCalls.filter(call => !String(call.answered_by || "").trim() && !call.end_time);
-  const inProgressCalls = calls.filter(call => !call.end_time);
+
+  const waitingCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && !call.end_time && callAgeSeconds(call) <= waitingMaxSeconds;
+  });
+
+  const staleUnansweredCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && !call.end_time && callAgeSeconds(call) > waitingMaxSeconds;
+  });
+
+  const missedCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && Boolean(call.end_time);
+  }).concat(staleUnansweredCalls);
+
+  const inProgressCalls = calls.filter(call => {
+    if (call.end_time) return false;
+    const answeredBy = String(call.answered_by || "").trim();
+    if (!answeredBy) return callAgeSeconds(call) <= waitingMaxSeconds;
+    return true;
+  });
 
   const totalTalkSeconds = answeredCalls.reduce((sum, call) => sum + Number(call.duration_seconds || 0), 0);
   const avgTalkSeconds = answeredCalls.length ? Math.round(totalTalkSeconds / answeredCalls.length) : 0;
   const answerRate = inboundCalls.length ? Math.round((answeredCalls.length / inboundCalls.length) * 100) : 0;
   const missedRate = inboundCalls.length ? Math.round((missedCalls.length / inboundCalls.length) * 100) : 0;
 
-  const now = Date.now();
   const waitingWithSeconds = waitingCalls.map(call => {
     const started = call.start_time || call.received_at;
     const seconds = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
@@ -4280,7 +4317,7 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   const recent = inboundCalls.slice(0, 12).map(call => {
     const ext = String(call.answered_by || "").trim();
     let status = "Missed";
-    if (!call.end_time && !ext) status = "Waiting";
+    if (!call.end_time && !ext && callAgeSeconds(call) <= waitingMaxSeconds) status = "Waiting";
     else if (ext) status = call.end_time ? "Answered" : "On Call";
     return {
       id: call.id,
@@ -4304,7 +4341,8 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
       missedRate,
       avgTalkSeconds,
       outbound: outboundCalls.length,
-      longestWaitSeconds
+      longestWaitSeconds,
+      waitingMaxSeconds
     },
     waitingCalls: waitingWithSeconds.slice(0, 10).map(call => ({
       id: call.id,
