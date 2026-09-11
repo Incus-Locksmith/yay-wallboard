@@ -615,7 +615,6 @@ function invoiceStageClass(stage) {
 function invoiceStageOptions(selectedStage = "Draft only") {
   const stages = [
     "Draft only",
-    "Saved",
     "Awaiting manager approval",
     "Approved",
     "Emailed to client",
@@ -2415,7 +2414,6 @@ function nav(req) {
             <a href="/invoices">Active invoices</a>
             <a href="/invoices/historic">Historic invoices</a>
             <a href="/invoices/new">New invoice</a>
-            <a href="/refund-documents">Refund documentation</a>
             <a href="/invoice-items">Invoice items</a>
             <a href="/invoice-templates">Account templates</a>
           </div>
@@ -2464,7 +2462,7 @@ function invoiceRows(invoices) {
       <tr>
         <td>
           <div class="invoice-main">${escapeHtml(invoice.invoice_number)}</div>
-          <div class="invoice-sub">${escapeHtml((invoice.invoice_type || "standalone") === "standalone" ? "Standalone" : invoice.invoice_type)} · By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
+          <div class="invoice-sub">By ${escapeHtml(invoice.dispatcher_name || "Unknown")}</div>
         </td>
         <td>
           <div class="invoice-main">${escapeHtml(invoice.customer_name || "—")}</div>
@@ -2490,7 +2488,6 @@ function invoiceRows(invoices) {
         <td>
           <div class="actions">
             <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
-            ${["Draft only", "Saved", "Awaiting manager approval"].includes(stage) ? `<a href="/invoices/${invoice.id}/edit">Edit</a>` : ""}
             <a class="delete-link" href="/invoices/${invoice.id}/delete">Delete</a>
           </div>
         </td>
@@ -2684,65 +2681,6 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_type TEXT DEFAULT 'standalone';`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS internal_reference TEXT;`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date TEXT;`);
-  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS batch_id TEXT;`);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS invoice_audit_log (
-      id SERIAL PRIMARY KEY,
-      invoice_id INTEGER NOT NULL,
-      action_type TEXT NOT NULL,
-      details TEXT,
-      changed_by TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS invoice_audit_log_invoice_idx ON invoice_audit_log (invoice_id, created_at DESC);`);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS refund_documents (
-      id SERIAL PRIMARY KEY,
-      document_type TEXT NOT NULL,
-      document_number TEXT NOT NULL UNIQUE,
-      document_date TEXT NOT NULL,
-      client_name TEXT NOT NULL,
-      client_address TEXT,
-      client_postcode TEXT,
-      client_email TEXT,
-      client_vat_number TEXT,
-      original_job_reference TEXT,
-      original_invoice_reference TEXT,
-      reason TEXT NOT NULL,
-      net_amount NUMERIC(10,2) DEFAULT 0,
-      vat_amount NUMERIC(10,2) DEFAULT 0,
-      total_amount NUMERIC(10,2) NOT NULL,
-      vat_treatment TEXT DEFAULT 'No VAT / refund support document',
-      bank_reference TEXT,
-      client_account_number TEXT,
-      client_sort_code TEXT,
-      notes TEXT,
-      status TEXT DEFAULT 'Draft',
-      created_by TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_account_number TEXT;`);
-  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_sort_code TEXT;`);
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS refund_documents_number_unique ON refund_documents (document_number);`);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS refund_document_audit_log (
-      id SERIAL PRIMARY KEY,
-      refund_document_id INTEGER NOT NULL,
-      action_type TEXT NOT NULL,
-      details TEXT,
-      changed_by TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS refund_document_audit_idx ON refund_document_audit_log (refund_document_id, created_at DESC);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -4042,113 +3980,447 @@ app.get("/start-shift", async (req, res) => {
 });
 app.get("/", (req, res) => res.redirect("/start-shift"));
 
+function wallboardTodaySql() {
+  return `
+    SELECT *
+    FROM calls
+    WHERE start_time >= DATE_TRUNC('day', NOW())
+    ORDER BY start_time DESC
+  `;
+}
+
+function wallboardSnapshotFromCalls(calls, wallboardAgents) {
+  const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
+  const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
+  const answeredCalls = inboundCalls.filter(call => String(call.answered_by || "").trim());
+  const missedCalls = inboundCalls.filter(call => !String(call.answered_by || "").trim() && call.end_time);
+  const waitingCalls = inboundCalls.filter(call => !String(call.answered_by || "").trim() && !call.end_time);
+  const inProgressCalls = calls.filter(call => !call.end_time);
+
+  const totalTalkSeconds = answeredCalls.reduce((sum, call) => sum + Number(call.duration_seconds || 0), 0);
+  const avgTalkSeconds = answeredCalls.length ? Math.round(totalTalkSeconds / answeredCalls.length) : 0;
+  const answerRate = inboundCalls.length ? Math.round((answeredCalls.length / inboundCalls.length) * 100) : 0;
+  const missedRate = inboundCalls.length ? Math.round((missedCalls.length / inboundCalls.length) * 100) : 0;
+
+  const now = Date.now();
+  const waitingWithSeconds = waitingCalls.map(call => {
+    const started = call.start_time || call.received_at;
+    const seconds = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
+    return { ...call, wait_seconds: seconds };
+  }).sort((a, b) => b.wait_seconds - a.wait_seconds);
+  const longestWaitSeconds = waitingWithSeconds[0]?.wait_seconds || 0;
+
+  const agentStats = {};
+  Object.entries(wallboardAgents).forEach(([ext, name]) => {
+    agentStats[ext] = {
+      ext,
+      name,
+      answered: 0,
+      totalDuration: 0,
+      lastCallTime: null,
+      status: "Ready",
+      currentDuration: 0
+    };
+  });
+
+  answeredCalls.forEach(call => {
+    const ext = String(call.answered_by || "").trim();
+    if (!agentStats[ext]) return;
+    const agent = agentStats[ext];
+    agent.answered += 1;
+    agent.totalDuration += Number(call.duration_seconds || 0);
+    const callTime = call.start_time || call.received_at;
+    if (!agent.lastCallTime || (callTime && new Date(callTime) > new Date(agent.lastCallTime))) {
+      agent.lastCallTime = callTime;
+    }
+    if (!call.end_time) {
+      agent.status = "On Call";
+      const started = call.start_time || call.received_at;
+      agent.currentDuration = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
+    }
+  });
+
+  // An active outbound call may not carry answered_by. If Yay puts the extension in raw_json,
+  // retain the historic behaviour rather than guessing an agent here.
+  const agents = Object.values(agentStats).map(agent => ({
+    ...agent,
+    avgDuration: agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0
+  }));
+
+  const recent = inboundCalls.slice(0, 12).map(call => {
+    const ext = String(call.answered_by || "").trim();
+    let status = "Missed";
+    if (!call.end_time && !ext) status = "Waiting";
+    else if (ext) status = call.end_time ? "Answered" : "On Call";
+    return {
+      id: call.id,
+      time: call.start_time || call.received_at,
+      caller: call.from_number || "Unknown",
+      status,
+      duration: Number(call.duration_seconds || 0),
+      agent: wallboardAgents[ext] || ext || "",
+      extension: ext
+    };
+  });
+
+  return {
+    totals: {
+      callsToday: inboundCalls.length,
+      answered: answeredCalls.length,
+      missed: missedCalls.length,
+      waiting: waitingCalls.length,
+      inProgress: inProgressCalls.length,
+      answerRate,
+      missedRate,
+      avgTalkSeconds,
+      outbound: outboundCalls.length,
+      longestWaitSeconds
+    },
+    waitingCalls: waitingWithSeconds.slice(0, 10).map(call => ({
+      id: call.id,
+      caller: call.from_number || "Unknown",
+      start_time: call.start_time || call.received_at,
+      wait_seconds: call.wait_seconds
+    })),
+    agents,
+    recent
+  };
+}
+
+app.get("/api/call-wallboard/live", async (req, res) => {
+  try {
+    const [callsResult, latestResult, wallboardAgents] = await Promise.all([
+      pool.query(wallboardTodaySql()),
+      pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
+      getWallboardAgents()
+    ]);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents);
+    snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
+    snapshot.generatedAt = new Date().toISOString();
+    res.setHeader("Cache-Control", "no-store");
+    res.json(snapshot);
+  } catch (error) {
+    console.error("Wallboard live API error:", error);
+    res.status(500).json({ error: "Wallboard data unavailable" });
+  }
+});
+
 app.get("/call-wallboard", async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT *
-      FROM calls
-      WHERE start_time >= NOW() - INTERVAL '24 hours'
-      ORDER BY start_time DESC
-    `);
+    const [callsResult, latestResult, wallboardAgents] = await Promise.all([
+      pool.query(wallboardTodaySql()),
+      pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
+      getWallboardAgents()
+    ]);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents);
+    snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
 
-    const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
-    const recentCalls = result.rows;
+    function wbSeconds(seconds) {
+      const total = Math.max(0, Number(seconds || 0));
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
 
-    // Only inbound calls should count towards answered/missed call reporting.
-    // This stops outgoing/internal calls with no answered_by value being treated as missed customer calls.
-    const inboundCalls = recentCalls.filter(call => (call.call_type || "").toLowerCase() === "inbound");
-    const answeredCalls = inboundCalls.filter(call => call.answered_by);
-    const missedCalls = inboundCalls.filter(call => !call.answered_by);
-    const reportableCalls = inboundCalls;
+    function wbAgentCards(agents) {
+      return [...agents]
+        .sort((a, b) => {
+          if (a.status === "On Call" && b.status !== "On Call") return -1;
+          if (b.status === "On Call" && a.status !== "On Call") return 1;
+          return b.answered - a.answered || a.name.localeCompare(b.name);
+        })
+        .map(agent => `
+          <article class="agent-card ${agent.status === "On Call" ? "on-call" : "ready"}">
+            <div class="agent-head">
+              <div class="agent-name-wrap">
+                <span class="agent-dot"></span>
+                <div><strong>${escapeHtml(agent.name)}</strong><span class="agent-ext">${escapeHtml(agent.ext)}</span></div>
+              </div>
+              <span class="agent-state">${agent.status === "On Call" ? `On Call · ${wbSeconds(agent.currentDuration)}` : "Ready"}</span>
+            </div>
+            <div class="agent-metrics">
+              <div><span>Calls Today</span><strong>${agent.answered}</strong></div>
+              <div><span>Avg Duration</span><strong>${wbSeconds(agent.avgDuration)}</strong></div>
+              <div><span>Last Call</span><strong>${agent.lastCallTime ? escapeHtml(formatTimeOnly(agent.lastCallTime)) : "—"}</strong></div>
+            </div>
+          </article>
+        `).join("");
+    }
 
-    const missedRate = reportableCalls.length ? Math.round((missedCalls.length / reportableCalls.length) * 100) : 0;
+    function wbRecentRows(recent) {
+      if (!recent.length) return `<tr><td colspan="5" class="empty-cell">No inbound calls yet today.</td></tr>`;
+      return recent.map(call => `
+        <tr>
+          <td>${call.time ? escapeHtml(formatTimeOnly(call.time)) : "—"}</td>
+          <td>${escapeHtml(call.caller)}</td>
+          <td><span class="call-status ${call.status.toLowerCase().replace(/\s+/g, "-")}">${escapeHtml(call.status)}</span></td>
+          <td>${call.status === "Waiting" ? "—" : wbSeconds(call.duration)}</td>
+          <td>${escapeHtml(call.agent || "—")}</td>
+        </tr>
+      `).join("");
+    }
 
-    let missedRateClass = "good";
-    if (reportableCalls.length === 0) missedRateClass = "neutral";
-    else if (missedRate >= 20) missedRateClass = "bad";
-    else if (missedRate >= 10) missedRateClass = "soon";
+    function wbLeaderboard(agents) {
+      const ranked = [...agents].sort((a, b) => b.answered - a.answered || a.name.localeCompare(b.name)).slice(0, 5);
+      const max = Math.max(1, ...ranked.map(a => a.answered));
+      return ranked.map((agent, index) => `
+        <div class="leader-row">
+          <span class="rank">${index + 1}</span>
+          <span class="leader-name">${escapeHtml(agent.name)} <small>(${escapeHtml(agent.ext)})</small></span>
+          <span class="leader-track"><i style="width:${Math.max(4, Math.round(agent.answered / max * 100))}%"></i></span>
+          <strong>${agent.answered}</strong>
+        </div>
+      `).join("");
+    }
 
-    const lastReceived = latestResult.rows[0].last_received;
-    const lastUpdatedText = lastReceived ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}` : "No calls received yet";
-    const pageUpdatedText = `Page refreshed: ${formatDateTimeWithSeconds(new Date())}`;
-
-    const wallboardAgents = await getWallboardAgents();
-    const agentStats = {};
-    Object.entries(wallboardAgents).forEach(([ext, name]) => {
-      agentStats[ext] = { ext, name, answered: 0, totalDuration: 0, lastCallTime: null, status: "No active call" };
-    });
-
-    answeredCalls.forEach(call => {
-      const ext = String(call.answered_by || "").trim();
-      if (!wallboardAgents[ext]) return;
-      agentStats[ext].answered += 1;
-      agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
-      const callTime = call.start_time || call.received_at;
-      if (!agentStats[ext].lastCallTime || new Date(callTime) > new Date(agentStats[ext].lastCallTime)) {
-        agentStats[ext].lastCallTime = callTime;
-      }
-      if (!call.end_time) agentStats[ext].status = "Engaged";
-    });
-
-    const agentRows = Object.values(agentStats)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map(agent => {
-        const avgDuration = agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0;
-        const statusClass = agent.status === "Engaged" ? "engaged" : "inactive";
-        return `
-          <tr>
-            <td>${escapeHtml(agent.name)}</td>
-            <td>${agent.answered}</td>
-            <td>${formatSeconds(avgDuration)}</td>
-            <td>${formatTimeOnly(agent.lastCallTime)}</td>
-            <td><span class="status ${statusClass}">${agent.status}</span></td>
-          </tr>
-        `;
-      }).join("");
+    const availableAgents = snapshot.agents.filter(a => a.status !== "On Call").length;
+    const totalAgents = snapshot.agents.length;
+    const alertOn = snapshot.totals.waiting > 0;
+    const alertText = snapshot.totals.waiting === 1
+      ? `1 caller waiting${snapshot.totals.longestWaitSeconds ? ` · ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : ""}`
+      : `${snapshot.totals.waiting} callers waiting${snapshot.totals.longestWaitSeconds ? ` · longest ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : ""}`;
 
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Call wallboard</title>
-        <meta http-equiv="refresh" content="5">
+        <title>Live Call Wallboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          ${sharedStyles()}
-          .updated { color: #6b7280; font-size: 16px; margin-bottom: 30px; font-weight: 600; }
-          .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }
-          .card { background: #1f2937; border-radius: 14px; padding: 25px; border: 2px solid transparent; box-shadow: 0 14px 30px rgba(17, 24, 39, 0.12); }
-          .card.good { border-color: #16a34a; }
-          .card.soon { border-color: #f59e0b; }
-          .card.bad { border-color: #dc2626; }
-          .card.neutral { border-color: #94a3b8; }
-          .label { color: #e5e7eb; font-size: 16px; font-weight: 700; }
-          .value { color: #ffffff; font-size: 42px; font-weight: bold; margin-top: 10px; }
-          .value.good { color: #22c55e; }
-          .value.soon { color: #fbbf24; }
-          .value.bad { color: #ef4444; }
-          .value.neutral { color: white; }
-          .card-link { color: inherit; text-decoration: none; display: block; }
-          .card-link:hover { text-decoration: none; transform: translateY(-1px); }
-          .card-link .card { cursor: pointer; }
+          :root {
+            --navy:#06192e;
+            --navy-2:#08243f;
+            --panel:#0a223b;
+            --panel-2:#0d2a48;
+            --line:rgba(148,163,184,.18);
+            --text:#f8fafc;
+            --muted:#9fb2c8;
+            --green:#21df77;
+            --red:#ff5968;
+            --amber:#ffc447;
+            --blue:#66b8ff;
+          }
+          *{box-sizing:border-box}
+          html,body{margin:0;min-height:100%;background:#031424;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+          body{min-height:100vh;background:
+            radial-gradient(circle at 16% 0%,rgba(16,83,145,.22),transparent 31%),
+            radial-gradient(circle at 85% 15%,rgba(16,110,95,.12),transparent 28%),
+            linear-gradient(145deg,#03111f,#06192e 52%,#03111f);}
+          .wallboard{min-height:100vh;padding:18px 20px 20px;display:grid;grid-template-rows:auto auto auto 1fr auto;gap:12px}
+          .topbar{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(380px,1.5fr) auto;align-items:center;gap:18px}
+          .brand{display:flex;align-items:center;gap:13px;min-width:0}
+          .brand img{width:54px;height:54px;object-fit:contain}
+          .brand-title{font-size:20px;font-weight:900;line-height:1.05}
+          .brand-sub{font-size:9px;letter-spacing:.28em;color:#b8c8d8;margin-top:5px;text-transform:uppercase}
+          .title-wrap{border-left:1px solid rgba(148,163,184,.32);padding-left:24px}
+          h1{font-size:clamp(30px,3vw,48px);margin:0;letter-spacing:-.035em}
+          .subtitle{margin-top:3px;font-size:15px;color:#9dc0e4}
+          .clock{text-align:right}
+          .clock .date{font-size:13px;color:#b8c8d8}
+          .clock .time{font-size:31px;font-weight:900;line-height:1.1;margin-top:3px}
+          .live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);margin-left:8px}
+          .portal-link{position:fixed;right:16px;bottom:14px;z-index:20;background:rgba(4,19,34,.82);color:#a9c1da;border:1px solid rgba(148,163,184,.2);padding:8px 11px;border-radius:10px;text-decoration:none;font-size:11px;opacity:.45;transition:.2s}
+          .portal-link:hover{opacity:1;color:white}
+          .kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+          .kpi{background:linear-gradient(180deg,rgba(12,39,66,.96),rgba(7,29,50,.96));border:1px solid var(--line);border-radius:15px;padding:13px 15px;min-width:0;box-shadow:0 12px 30px rgba(0,0,0,.16)}
+          .kpi-label{color:#c1d0df;font-size:13px;font-weight:800}
+          .kpi-value{font-size:clamp(28px,3vw,45px);line-height:1;font-weight:950;margin-top:7px;letter-spacing:-.04em}
+          .kpi-foot{font-size:11px;color:#91a8bd;margin-top:6px}
+          .green .kpi-value{color:var(--green)} .red .kpi-value{color:#ff6b78}.amber .kpi-value{color:var(--amber)}.blue .kpi-value{color:#8dcaff}
+          .alertbar{border-radius:14px;padding:11px 18px;display:flex;justify-content:space-between;align-items:center;gap:20px;background:rgba(8,35,59,.95);border:1px solid var(--line);min-height:55px}
+          .alertbar.hot{background:linear-gradient(90deg,rgba(114,8,27,.92),rgba(66,8,24,.92));border-color:#ff4155;box-shadow:0 0 22px rgba(255,50,70,.24);animation:alertPulse 1.4s infinite}
+          @keyframes alertPulse{0%,100%{box-shadow:0 0 12px rgba(255,50,70,.15)}50%{box-shadow:0 0 30px rgba(255,50,70,.4)}}
+          .alert-main{display:flex;align-items:center;gap:13px;font-size:clamp(18px,2vw,28px);font-weight:900}.alert-icon{font-size:27px}
+          .alert-meta{font-size:12px;color:#c8d8e7;text-align:right}.hot .alert-meta{color:#ffd1d6}
+          .main-grid{display:grid;grid-template-columns:minmax(0,2.25fr) minmax(330px,.95fr);gap:10px;min-height:0}
+          .panel{background:linear-gradient(180deg,rgba(8,31,53,.96),rgba(5,25,44,.96));border:1px solid var(--line);border-radius:15px;min-height:0;overflow:hidden}
+          .panel-head{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line)}
+          .panel-title{font-size:16px;font-weight:900}.panel-note{font-size:10px;color:#8fa8c0}
+          .agent-grid{padding:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;align-content:start}
+          .agent-card{border:1px solid rgba(32,219,119,.38);background:linear-gradient(145deg,rgba(6,53,54,.45),rgba(8,31,53,.8));border-radius:13px;padding:11px;min-width:0}
+          .agent-card.on-call{border-color:rgba(255,89,104,.55);background:linear-gradient(145deg,rgba(90,20,38,.34),rgba(8,31,53,.84))}
+          .agent-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+          .agent-name-wrap{display:flex;gap:7px;align-items:center;min-width:0}.agent-name-wrap strong{font-size:14px}.agent-ext{font-size:10px;color:#90a8bf;margin-left:5px}
+          .agent-dot{width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(33,223,119,.7);flex:0 0 auto}
+          .on-call .agent-dot{background:var(--red);box-shadow:0 0 9px rgba(255,89,104,.7)}
+          .agent-state{font-size:9px;font-weight:900;padding:4px 7px;border-radius:999px;background:rgba(33,223,119,.13);color:#80f3ae;white-space:nowrap}
+          .on-call .agent-state{background:rgba(255,89,104,.13);color:#ff9aa4}
+          .agent-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:12px}
+          .agent-metrics div{border-left:1px solid rgba(148,163,184,.14);padding-left:7px}.agent-metrics div:first-child{border-left:0;padding-left:0}
+          .agent-metrics span{display:block;font-size:9px;color:#8fa6bc}.agent-metrics strong{display:block;margin-top:2px;font-size:14px}
+          .recent-wrap{overflow:auto;max-height:100%}
+          table{width:100%;border-collapse:collapse;font-size:11px}
+          th{color:#9eb4ca;text-align:left;font-weight:700;padding:8px 9px;background:rgba(255,255,255,.025);position:sticky;top:0}
+          td{padding:8px 9px;border-top:1px solid rgba(148,163,184,.1);white-space:nowrap}
+          .call-status{font-weight:900}.answered{color:var(--green)}.missed{color:var(--red)}.waiting,.on-call{color:var(--amber)}
+          .empty-cell{text-align:center;color:#8fa8c0;padding:30px}
+          .bottom-grid{display:grid;grid-template-columns:minmax(300px,.95fr) minmax(480px,1.35fr);gap:10px}
+          .leader-list{padding:10px 13px}.leader-row{display:grid;grid-template-columns:24px minmax(110px,.9fr) minmax(110px,1.6fr) 35px;gap:8px;align-items:center;margin:8px 0;font-size:11px}
+          .rank{width:22px;height:22px;border-radius:6px;background:#183858;display:grid;place-items:center;font-weight:900}.leader-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.leader-name small{color:#839bb2}
+          .leader-track{height:8px;background:#16334e;border-radius:999px;overflow:hidden}.leader-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#20da78,#5ef0a0)}
+          .health-grid{padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.health{background:rgba(255,255,255,.025);border:1px solid rgba(148,163,184,.13);border-radius:11px;padding:10px}.health span{display:block;color:#8fa8c0;font-size:9px}.health strong{display:block;font-size:22px;margin-top:5px}.health small{display:block;margin-top:4px;color:#9fb2c8;font-size:9px}
+          @media(max-width:1200px){.agent-grid{grid-template-columns:repeat(3,1fr)}.kpis{grid-template-columns:repeat(3,1fr)}}
+          @media(max-width:900px){.wallboard{display:block}.topbar,.main-grid,.bottom-grid{grid-template-columns:1fr}.topbar,.kpis,.main-grid,.bottom-grid{margin-bottom:12px}.agent-grid{grid-template-columns:repeat(2,1fr)}.kpis{grid-template-columns:repeat(2,1fr)}.clock{text-align:left}.title-wrap{border-left:0;padding-left:0}.panel{margin-bottom:10px}}
         </style>
       </head>
       <body>
-        ${nav(req)}
-        <h1>Call wallboard</h1>
-        <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
-        <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
-        <div class="cards">
-          <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
-          <div class="card"><div class="label">Answered</div><div class="value">${answeredCalls.length}</div></div>
-          <div class="card"><div class="label">Missed</div><div class="value">${missedCalls.length}</div></div>
-          <a class="card-link" href="/call-wallboard/missed-calls"><div class="card ${missedRateClass}"><div class="label">Miss Rate · click for details</div><div class="value ${missedRateClass}">${missedRate}%</div></div></a>
-        </div>
-        <table>
-          <thead>
-            <tr><th>Agent</th><th>Answered</th><th>Avg Duration</th><th>Last Call</th><th>Status</th></tr>
-          </thead>
-          <tbody>${agentRows}</tbody>
-        </table>
+        <main class="wallboard">
+          <header class="topbar">
+            <div class="brand">
+              <img src="/brand-logo.png" alt="">
+              <div><div class="brand-title">Your Dispatch<br>Partner</div><div class="brand-sub">24H Locksmiths</div></div>
+            </div>
+            <div class="title-wrap">
+              <h1>Live Call Wallboard</h1>
+              <div class="subtitle">Yay-powered call overview · today's live operation</div>
+            </div>
+            <div class="clock"><div class="date" id="wbDate"></div><div class="time"><span id="wbTime"></span><span class="live-dot"></span></div></div>
+          </header>
+
+          <section class="kpis">
+            <div class="kpi blue"><div class="kpi-label">Calls Today</div><div class="kpi-value" data-kpi="callsToday">${snapshot.totals.callsToday}</div><div class="kpi-foot">Inbound calls</div></div>
+            <div class="kpi green"><div class="kpi-label">Answered</div><div class="kpi-value" data-kpi="answered">${snapshot.totals.answered}</div><div class="kpi-foot"><span data-kpi="answerRate">${snapshot.totals.answerRate}</span>% answer rate</div></div>
+            <div class="kpi red"><div class="kpi-label">Missed</div><div class="kpi-value" data-kpi="missed">${snapshot.totals.missed}</div><div class="kpi-foot"><span data-kpi="missedRate">${snapshot.totals.missedRate}</span>% of inbound</div></div>
+            <div class="kpi amber"><div class="kpi-label">Waiting Now</div><div class="kpi-value" data-kpi="waiting">${snapshot.totals.waiting}</div><div class="kpi-foot">Live unconnected calls</div></div>
+            <div class="kpi blue"><div class="kpi-label">Avg Talk Time</div><div class="kpi-value" data-kpi="avgTalk">${wbSeconds(snapshot.totals.avgTalkSeconds)}</div><div class="kpi-foot">Answered inbound calls</div></div>
+            <div class="kpi green"><div class="kpi-label">Agents Ready</div><div class="kpi-value"><span data-kpi="availableAgents">${availableAgents}</span>/<span data-kpi="totalAgents">${totalAgents}</span></div><div class="kpi-foot">Mapped wallboard agents</div></div>
+          </section>
+
+          <section class="alertbar ${alertOn ? "hot" : ""}" id="waitingAlert">
+            <div class="alert-main"><span class="alert-icon">${alertOn ? "⚠" : "✓"}</span><span id="waitingAlertText">${alertOn ? escapeHtml(alertText) : "No callers currently waiting"}</span></div>
+            <div class="alert-meta"><strong id="longestWaitLabel">${alertOn ? `Longest wait ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : "Queue clear"}</strong><br><span id="lastDataText">${snapshot.lastReceived ? `Latest Yay event ${escapeHtml(formatTimeOnly(snapshot.lastReceived))}` : "Waiting for Yay call data"}</span></div>
+          </section>
+
+          <section class="main-grid">
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Team Status</div><div class="panel-note"><span id="agentCount">${totalAgents}</span> mapped agents · green = ready · red = on call</div></div>
+              <div class="agent-grid" id="agentGrid">${wbAgentCards(snapshot.agents)}</div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Live Queue / Recent Calls</div><div class="panel-note">Latest inbound activity</div></div>
+              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Duration</th><th>Agent</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
+            </div>
+          </section>
+
+          <section class="bottom-grid">
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">🏆 Leaderboard Today</div><div class="panel-note">Answered calls</div></div>
+              <div class="leader-list" id="leaderboard">${wbLeaderboard(snapshot.agents)}</div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Queue Health</div><div class="panel-note">Live system status</div></div>
+              <div class="health-grid">
+                <div class="health"><span>Miss Rate</span><strong><span data-kpi="missedRate2">${snapshot.totals.missedRate}</span>%</strong><small>Today's inbound calls</small></div>
+                <div class="health"><span>Longest Wait</span><strong data-kpi="longestWait">${wbSeconds(snapshot.totals.longestWaitSeconds)}</strong><small>Current queue</small></div>
+                <div class="health"><span>Calls In Progress</span><strong data-kpi="inProgress">${snapshot.totals.inProgress}</strong><small>Inbound + outbound</small></div>
+                <div class="health"><span>Answer Rate</span><strong><span data-kpi="answerRate2">${snapshot.totals.answerRate}</span>%</strong><small>Answered inbound</small></div>
+              </div>
+            </div>
+          </section>
+        </main>
+        <a class="portal-link" href="/jobs">Back to Portal</a>
+
+        <script>
+          function pad2(n){ return String(n).padStart(2,"0"); }
+          function duration(seconds){
+            seconds = Math.max(0, Number(seconds || 0));
+            return pad2(Math.floor(seconds/60)) + ":" + pad2(seconds%60);
+          }
+          function html(value){
+            return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+          }
+          function timeOnly(value){
+            if(!value) return "—";
+            const d = new Date(value);
+            if(Number.isNaN(d.getTime())) return "—";
+            return new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Europe/London"}).format(d);
+          }
+          function updateClock(){
+            const now = new Date();
+            document.getElementById("wbDate").textContent = new Intl.DateTimeFormat("en-GB",{weekday:"short",day:"2-digit",month:"short",year:"numeric",timeZone:"Europe/London"}).format(now);
+            document.getElementById("wbTime").textContent = new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Europe/London"}).format(now);
+          }
+          updateClock(); setInterval(updateClock,1000);
+
+          function setKpi(key,value){
+            document.querySelectorAll('[data-kpi="'+key+'"]').forEach(el => el.textContent = value);
+          }
+          function renderAgents(agents){
+            const sorted=[...agents].sort((a,b)=>{
+              if(a.status==="On Call" && b.status!=="On Call") return -1;
+              if(b.status==="On Call" && a.status!=="On Call") return 1;
+              return b.answered-a.answered || a.name.localeCompare(b.name);
+            });
+            return sorted.map(a =>
+              '<article class="agent-card '+(a.status==="On Call"?"on-call":"ready")+'">'+
+                '<div class="agent-head">'+
+                  '<div class="agent-name-wrap"><span class="agent-dot"></span><div><strong>'+html(a.name)+'</strong><span class="agent-ext">'+html(a.ext)+'</span></div></div>'+
+                  '<span class="agent-state">'+(a.status==="On Call" ? "On Call · "+duration(a.currentDuration) : "Ready")+'</span>'+
+                '</div>'+
+                '<div class="agent-metrics">'+
+                  '<div><span>Calls Today</span><strong>'+a.answered+'</strong></div>'+
+                  '<div><span>Avg Duration</span><strong>'+duration(a.avgDuration)+'</strong></div>'+
+                  '<div><span>Last Call</span><strong>'+timeOnly(a.lastCallTime)+'</strong></div>'+
+                '</div>'+
+              '</article>'
+            ).join("");
+          }
+          function renderRecent(recent){
+            if(!recent.length) return '<tr><td colspan="5" class="empty-cell">No inbound calls yet today.</td></tr>';
+            return recent.map(c =>
+              '<tr>'+
+                '<td>'+timeOnly(c.time)+'</td><td>'+html(c.caller)+'</td>'+
+                '<td><span class="call-status '+html(c.status.toLowerCase().replace(/\\s+/g,"-"))+'">'+html(c.status)+'</span></td>'+
+                '<td>'+(c.status==="Waiting" ? "—" : duration(c.duration))+'</td><td>'+html(c.agent || "—")+'</td>'+
+              '</tr>'
+            ).join("");
+          }
+          function renderLeaders(agents){
+            const ranked=[...agents].sort((a,b)=>b.answered-a.answered || a.name.localeCompare(b.name)).slice(0,5);
+            const max=Math.max(1,...ranked.map(a=>a.answered));
+            return ranked.map((a,i) =>
+              '<div class="leader-row"><span class="rank">'+(i+1)+'</span><span class="leader-name">'+html(a.name)+' <small>('+html(a.ext)+')</small></span>'+
+              '<span class="leader-track"><i style="width:'+Math.max(4,Math.round(a.answered/max*100))+'%"></i></span><strong>'+a.answered+'</strong></div>'
+            ).join("");
+          }
+          async function refreshWallboard(){
+            try{
+              const r=await fetch("/api/call-wallboard/live",{cache:"no-store"});
+              if(!r.ok) return;
+              const data=await r.json();
+              setKpi("callsToday",data.totals.callsToday);
+              setKpi("answered",data.totals.answered);
+              setKpi("missed",data.totals.missed);
+              setKpi("waiting",data.totals.waiting);
+              setKpi("answerRate",data.totals.answerRate);
+              setKpi("answerRate2",data.totals.answerRate);
+              setKpi("missedRate",data.totals.missedRate);
+              setKpi("missedRate2",data.totals.missedRate);
+              setKpi("avgTalk",duration(data.totals.avgTalkSeconds));
+              setKpi("longestWait",duration(data.totals.longestWaitSeconds));
+              setKpi("inProgress",data.totals.inProgress);
+              const ready=data.agents.filter(a=>a.status!=="On Call").length;
+              setKpi("availableAgents",ready); setKpi("totalAgents",data.agents.length);
+              document.getElementById("agentCount").textContent=data.agents.length;
+              document.getElementById("agentGrid").innerHTML=renderAgents(data.agents);
+              document.getElementById("recentRows").innerHTML=renderRecent(data.recent);
+              document.getElementById("leaderboard").innerHTML=renderLeaders(data.agents);
+
+              const alert=document.getElementById("waitingAlert");
+              const text=document.getElementById("waitingAlertText");
+              const longest=document.getElementById("longestWaitLabel");
+              if(data.totals.waiting>0){
+                alert.classList.add("hot");
+                text.textContent=(data.totals.waiting===1 ? "1 caller waiting" : data.totals.waiting+" callers waiting") + (data.totals.longestWaitSeconds ? " · "+duration(data.totals.longestWaitSeconds) : "");
+                longest.textContent="Longest wait "+duration(data.totals.longestWaitSeconds);
+              }else{
+                alert.classList.remove("hot"); text.textContent="No callers currently waiting"; longest.textContent="Queue clear";
+              }
+              document.getElementById("lastDataText").textContent=data.lastReceived ? "Latest Yay event "+timeOnly(data.lastReceived) : "Waiting for Yay call data";
+            }catch(e){}
+          }
+          setInterval(refreshWallboard,5000);
+        </script>
       </body>
       </html>
     `);
@@ -4732,202 +5004,6 @@ app.post("/invoice-templates/save", async (req, res) => {
   }
 });
 
-
-function refundDocumentTypeLabel(type) {
-  if (type === "client_refund_invoice") return "Client Refund Invoice / Bank Supporting Document";
-  return "24H Credit Note";
-}
-
-function refundStatusOptions(selected = "Draft") {
-  return ["Draft", "Approved", "Refund processed", "Cancelled"].map(value =>
-    `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`
-  ).join("");
-}
-
-app.get("/refund-documents", async (req, res) => {
-  try {
-    const rows = (await pool.query(`SELECT * FROM refund_documents ORDER BY created_at DESC, id DESC LIMIT 150`)).rows;
-    res.send(`<!DOCTYPE html><html><head><title>Refund Documentation</title><style>${sharedStyles()}</style></head><body>
-      ${nav(req)}
-      <h1>Refund Documentation</h1>
-      <div class="subtitle">Keep refund paperwork separate from normal sales invoices.</div>
-      <div class="panel">
-        <a class="button green" href="/refund-documents/new?type=client_refund_invoice">Create client refund invoice / bank document</a>
-        <a class="button secondary" href="/refund-documents/new?type=credit_note">Create 24H credit note</a>
-        <a class="button secondary" href="/invoices">Back to invoices</a>
-      </div>
-      <div class="panel">
-        <table><thead><tr><th>Document</th><th>Client</th><th>Reason / reference</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-        ${rows.map(row => `<tr>
-          <td><strong>${escapeHtml(row.document_number)}</strong><br><span class="muted">${escapeHtml(refundDocumentTypeLabel(row.document_type))}<br>${escapeHtml(row.document_date || "")}</span></td>
-          <td>${escapeHtml(row.client_name || "—")}<br><span class="muted">${escapeHtml(row.client_postcode || "")}</span></td>
-          <td>${escapeHtml(row.reason || "—")}<br><span class="muted">Job: ${escapeHtml(row.original_job_reference || "—")} · Invoice: ${escapeHtml(row.original_invoice_reference || "—")}</span></td>
-          <td><strong>${money(row.total_amount)}</strong></td>
-          <td>${escapeHtml(row.status || "Draft")}</td>
-          <td><a href="/refund-documents/${row.id}/pdf" target="_blank">PDF</a> · <a href="/refund-documents/${row.id}/edit">Edit</a></td>
-        </tr>`).join("") || `<tr><td colspan="6">No refund documents yet.</td></tr>`}
-        </tbody></table>
-      </div>
-    </body></html>`);
-  } catch (error) {
-    console.error("Refund documents list error:", error);
-    res.status(500).send("Refund documents error. Check Render logs.");
-  }
-});
-
-app.get("/refund-documents/new", async (req, res) => {
-  const type = req.query.type === "credit_note" ? "credit_note" : "client_refund_invoice";
-  const today = new Date().toISOString().slice(0, 10);
-  const prefix = type === "credit_note" ? "CN" : "CRI";
-  const suggested = `${prefix}-${today.replaceAll("-", "")}-${String(Date.now()).slice(-4)}`;
-  res.send(`<!DOCTYPE html><html><head><title>New Refund Document</title><style>${sharedStyles()}</style></head><body>
-    ${nav(req)}
-    <h1>${escapeHtml(refundDocumentTypeLabel(type))}</h1>
-    <div class="subtitle">${type === "client_refund_invoice" ? "A supporting document showing the client as the party requesting/receiving the refund from 24H Locksmiths Ltd." : "A credit note issued by 24H Locksmiths Ltd to the client."}</div>
-    <form class="panel" method="post" action="/refund-documents/create">
-      <input type="hidden" name="document_type" value="${escapeHtml(type)}">
-      <div class="grid-2">
-        <div class="field"><label>Document number</label><input name="document_number" required value="${escapeHtml(suggested)}"></div>
-        <div class="field"><label>Document date</label><input type="date" name="document_date" required value="${today}"></div>
-        <div class="field"><label>Client name / company</label><input name="client_name" required></div>
-        <div class="field"><label>Client email</label><input name="client_email" type="email"></div>
-        <div class="field wide"><label>Client address</label><textarea name="client_address" rows="3"></textarea></div>
-        <div class="field"><label>Client postcode</label><input name="client_postcode"></div>
-        <div class="field"><label>Original job reference</label><input name="original_job_reference" placeholder="Optional but recommended"></div>
-        <div class="field"><label>Original 24H invoice/reference</label><input name="original_invoice_reference" placeholder="Optional but recommended"></div>
-        <div class="field wide"><label>Refund reason</label><input name="reason" required placeholder="e.g. Agreed refund for locksmith services"></div>
-        <div class="field"><label>Refund amount</label><input name="total_amount" type="number" step="0.01" min="0.01" required></div>
-        <div class="field"><label>Bank/reference notes</label><input name="bank_reference"></div>
-        <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" placeholder="Enter manually"></div>
-        <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" placeholder="e.g. 12-34-56"></div>
-        <div class="field"><label>Status</label><select name="status">${refundStatusOptions("Draft")}</select></div>
-        <div class="field wide"><label>Notes</label><textarea name="notes" rows="3"></textarea></div>
-      </div>
-      ${type === "client_refund_invoice" ? `<div style="padding:12px;margin:14px 0;border:1px solid #f59e0b;border-radius:10px;background:#fffbeb;"><strong>Important:</strong> This is stored as refund/bank supporting documentation, not as a 24H sales invoice. Only use it where the client and refund details are genuine.</div>` : ""}
-      <button class="button green" type="submit">Create document</button> <a class="button secondary" href="/refund-documents">Cancel</a>
-    </form>
-  </body></html>`);
-});
-
-app.post("/refund-documents/create", async (req, res) => {
-  try {
-    const type = req.body.document_type === "credit_note" ? "credit_note" : "client_refund_invoice";
-    const number = String(req.body.document_number || "").trim();
-    const clientName = String(req.body.client_name || "").trim();
-    const reason = String(req.body.reason || "").trim();
-    const total = Number(req.body.total_amount || 0);
-    if (!number || !clientName || !reason || !Number.isFinite(total) || total <= 0) return res.status(400).send("Document number, client, reason and a positive total are required.");
-    const duplicate = await pool.query(`SELECT id FROM refund_documents WHERE LOWER(document_number)=LOWER($1) LIMIT 1`, [number]);
-    if (duplicate.rows.length) return res.status(400).send("That refund document number already exists.");
-    const result = await pool.query(`
-      INSERT INTO refund_documents (
-        document_type, document_number, document_date, client_name, client_address, client_postcode, client_email, client_vat_number,
-        original_job_reference, original_invoice_reference, reason, net_amount, vat_amount, total_amount, vat_treatment,
-        bank_reference, client_account_number, client_sort_code, notes, status, created_by, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW()) RETURNING id
-    `, [type, number, req.body.document_date, clientName, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", currentAgentName(req) || "Unknown"]);
-    const id = result.rows[0].id;
-    await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id, action_type, details, changed_by, created_at) VALUES ($1,'created',$2,$3,NOW())`, [id, `${refundDocumentTypeLabel(type)} ${number} created for ${clientName}, total ${money(total)}`, currentAgentName(req) || "Unknown"]);
-    res.redirect(`/refund-documents/${id}/edit?created=1`);
-  } catch (error) {
-    console.error("Create refund document error:", error);
-    res.status(500).send("Could not create refund document. Check Render logs.");
-  }
-});
-
-app.get("/refund-documents/:id/edit", async (req, res) => {
-  try {
-    const docRow = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
-    if (!docRow) return res.status(404).send("Refund document not found");
-    const audit = (await pool.query(`SELECT * FROM refund_document_audit_log WHERE refund_document_id=$1 ORDER BY created_at DESC,id DESC LIMIT 30`, [req.params.id])).rows;
-    res.send(`<!DOCTYPE html><html><head><title>Edit Refund Document</title><style>${sharedStyles()}</style></head><body>${nav(req)}
-      <h1>${escapeHtml(docRow.document_number)}</h1><div class="subtitle">${escapeHtml(refundDocumentTypeLabel(docRow.document_type))}</div>
-      <div class="panel"><a class="button green" href="/refund-documents/${docRow.id}/pdf" target="_blank">Open PDF</a> <a class="button secondary" href="/refund-documents">Back to refund documents</a></div>
-      <form class="panel" method="post" action="/refund-documents/${docRow.id}/edit">
-        <div class="grid-2">
-          <div class="field"><label>Document number</label><input name="document_number" required value="${escapeHtml(docRow.document_number)}"></div>
-          <div class="field"><label>Date</label><input type="date" name="document_date" required value="${escapeHtml(docRow.document_date || "")}"></div>
-          <div class="field"><label>Client name/company</label><input name="client_name" required value="${escapeHtml(docRow.client_name || "")}"></div>
-          <div class="field"><label>Client email</label><input name="client_email" type="email" value="${escapeHtml(docRow.client_email || "")}"></div>
-          <div class="field wide"><label>Client address</label><textarea name="client_address" rows="3">${escapeHtml(docRow.client_address || "")}</textarea></div>
-          <div class="field"><label>Client postcode</label><input name="client_postcode" value="${escapeHtml(docRow.client_postcode || "")}"></div>
-          <div class="field"><label>Original job reference</label><input name="original_job_reference" value="${escapeHtml(docRow.original_job_reference || "")}"></div>
-          <div class="field"><label>Original 24H invoice/reference</label><input name="original_invoice_reference" value="${escapeHtml(docRow.original_invoice_reference || "")}"></div>
-          <div class="field wide"><label>Refund reason</label><input name="reason" required value="${escapeHtml(docRow.reason || "")}"></div>
-          <div class="field"><label>Refund amount</label><input type="number" step="0.01" min="0.01" required name="total_amount" value="${Number(docRow.total_amount || 0).toFixed(2)}"></div>
-          <div class="field"><label>Bank/reference notes</label><input name="bank_reference" value="${escapeHtml(docRow.bank_reference || "")}"></div>
-          <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" value="${escapeHtml(docRow.client_account_number || "")}"></div>
-          <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" value="${escapeHtml(docRow.client_sort_code || "")}"></div>
-          <div class="field"><label>Status</label><select name="status">${refundStatusOptions(docRow.status || "Draft")}</select></div>
-          <div class="field wide"><label>Notes</label><textarea name="notes" rows="3">${escapeHtml(docRow.notes || "")}</textarea></div>
-        </div><button class="button green" type="submit">Save changes</button>
-      </form>
-      <div class="panel"><h2>Audit trail</h2>${audit.map(a => `<div style="padding:9px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.action_type)}</strong> · ${escapeHtml(formatDateTime(a.created_at))} · ${escapeHtml(a.changed_by || "Unknown")}<br><span class="muted">${escapeHtml(a.details || "")}</span></div>`).join("") || `<p class="muted">No audit entries.</p>`}</div>
-    </body></html>`);
-  } catch (error) { console.error("Edit refund document page error:", error); res.status(500).send("Refund document error."); }
-});
-
-app.post("/refund-documents/:id/edit", async (req, res) => {
-  try {
-    const old = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
-    if (!old) return res.status(404).send("Refund document not found");
-    const number = String(req.body.document_number || "").trim();
-    const total = Number(req.body.total_amount || 0);
-    if (!number || !String(req.body.client_name || "").trim() || !String(req.body.reason || "").trim() || !Number.isFinite(total) || total <= 0) return res.status(400).send("Required refund document fields are missing.");
-    const duplicate = await pool.query(`SELECT id FROM refund_documents WHERE LOWER(document_number)=LOWER($1) AND id<>$2 LIMIT 1`, [number, req.params.id]);
-    if (duplicate.rows.length) return res.status(400).send("That refund document number already exists.");
-    await pool.query(`UPDATE refund_documents SET document_number=$1,document_date=$2,client_name=$3,client_address=$4,client_postcode=$5,client_email=$6,client_vat_number=$7,original_job_reference=$8,original_invoice_reference=$9,reason=$10,net_amount=$11,vat_amount=$12,total_amount=$13,vat_treatment=$14,bank_reference=$15,client_account_number=$16,client_sort_code=$17,notes=$18,status=$19,updated_at=NOW() WHERE id=$20`, [number, req.body.document_date, req.body.client_name, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", req.body.reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", req.params.id]);
-    await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'edited',$2,$3,NOW())`, [req.params.id, `Updated ${number}; status ${req.body.status || "Draft"}; total ${money(total)}`, currentAgentName(req) || "Unknown"]);
-    res.redirect(`/refund-documents/${req.params.id}/edit?saved=1`);
-  } catch (error) { console.error("Save refund document error:", error); res.status(500).send("Could not save refund document."); }
-});
-
-app.get("/refund-documents/:id/pdf", async (req, res) => {
-  try {
-    const row = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
-    if (!row) return res.status(404).send("Refund document not found");
-    const company = companies.locksmiths;
-    const isClientInvoice = row.document_type === "client_refund_invoice";
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="${isClientInvoice ? "client-refund-invoice" : "credit-note"}-${row.document_number}.pdf"`);
-    const doc = new PDFDocument({ size: "A4", margin: 50 }); doc.pipe(res);
-    doc.font("Helvetica-Bold").fontSize(22).text(isClientInvoice ? "CLIENT REFUND INVOICE" : "CREDIT NOTE", 50, 48);
-    doc.font("Helvetica").fontSize(9).text(isClientInvoice ? "Bank supporting document for an agreed refund" : "Issued by 24H Locksmiths Ltd", 50, 78);
-    doc.fontSize(10).text(`Document No: ${pdfText(row.document_number)}`, 380, 52).text(`Date: ${pdfText(row.document_date)}`, 380, 68).text(`Status: ${pdfText(row.status || "Draft")}`, 380, 84);
-    doc.moveTo(50, 112).lineTo(545,112).stroke();
-    if (isClientInvoice) {
-      doc.font("Helvetica-Bold").fontSize(11).text("FROM — Client", 50, 132);
-      doc.font("Helvetica").fontSize(10).text(pdfText(row.client_name), 50, 151).text(pdfText(row.client_address || ""), 50, 168, {width:210}).text(pdfText(row.client_postcode || ""), 50, 206).text(row.client_vat_number ? `VAT: ${pdfText(row.client_vat_number)}` : "", 50, 221);
-      doc.font("Helvetica-Bold").fontSize(11).text("TO — 24H Locksmiths Ltd", 315, 132);
-      doc.font("Helvetica").fontSize(10).text(company.name,315,151).text(company.address1,315,168).text(`${company.address2}, ${company.postcode}`,315,185).text(`Company No: ${company.reg}`,315,202);
-    } else {
-      doc.font("Helvetica-Bold").fontSize(11).text("FROM — 24H Locksmiths Ltd", 50, 132);
-      doc.font("Helvetica").fontSize(10).text(company.name,50,151).text(company.address1,50,168).text(`${company.address2}, ${company.postcode}`,50,185).text(`Company No: ${company.reg}`,50,202);
-      doc.font("Helvetica-Bold").fontSize(11).text("TO — Client", 315,132);
-      doc.font("Helvetica").fontSize(10).text(pdfText(row.client_name),315,151).text(pdfText(row.client_address || ""),315,168,{width:210}).text(pdfText(row.client_postcode || ""),315,206).text(row.client_vat_number ? `VAT: ${pdfText(row.client_vat_number)}` : "",315,221);
-    }
-    doc.moveTo(50,250).lineTo(545,250).stroke();
-    doc.font("Helvetica-Bold").fontSize(11).text("Refund details",50,270);
-    doc.font("Helvetica").fontSize(10).text(`Reason: ${pdfText(row.reason)}`,50,292,{width:495});
-    doc.text(`Original job reference: ${pdfText(row.original_job_reference || "—")}`,50,322);
-    doc.text(`Original 24H invoice/reference: ${pdfText(row.original_invoice_reference || "—")}`,50,340);
-    if (row.bank_reference) doc.text(`Bank/reference: ${pdfText(row.bank_reference)}`,50,358);
-    doc.roundedRect(330,395,215,78,8).stroke();
-    doc.font("Helvetica").fontSize(10).text("Refund amount",350,412).text(money(row.total_amount),465,412);
-    doc.moveTo(350,438).lineTo(525,438).strokeColor("#222222").stroke();
-    doc.font("Helvetica-Bold").fontSize(12).text("TOTAL REFUND",350,450).text(money(row.total_amount),465,450);
-    if (row.notes) doc.text(`Notes: ${pdfText(row.notes)}`,50,435,{width:250});
-    if (isClientInvoice) {
-      doc.font("Helvetica").fontSize(10).fillColor("#000000").text("Please make payments to the agreed bank account.", 50, 505, { width: 495, align: "center" });
-      if (row.client_account_number || row.client_sort_code) {
-        doc.font("Helvetica-Bold").fontSize(10).text("Bank details for refund", 50, 530, { width: 495, align: "center" });
-        doc.font("Helvetica").fontSize(10).text(`Account number: ${pdfText(row.client_account_number || "—")}    Sort code: ${pdfText(row.client_sort_code || "—")}`, 50, 548, { width: 495, align: "center" });
-      }
-    }
-    doc.end();
-  } catch (error) { console.error("Refund PDF error:", error); res.status(500).send("Could not create refund PDF."); }
-});
-
 app.get("/invoices", async (req, res) => {
   try {
     const result = await pool.query(`
@@ -4949,9 +5025,7 @@ app.get("/invoices", async (req, res) => {
         <h1>Invoices</h1>
         <div class="subtitle">Active invoices only. Emailed invoices move into Historic Invoices.</div>
         <div class="panel">
-          <a href="/invoices/new">Create Standalone Invoice</a>
-          <a href="/invoices/bulk">Bulk Create Invoices</a>
-          <a href="/refund-documents">Refund Documentation</a>
+          <a href="/invoices/new">Create New Invoice</a>
           <a href="/invoices/historic">Historic Invoices</a>
         </div>
         <table class="invoice-table">
@@ -5037,9 +5111,6 @@ app.post("/invoices/stage", async (req, res) => {
     const redirectTo = req.get("referer") || "/invoices";
     const agentName = currentAgentName(req);
 
-    const existingStageResult = await pool.query(`SELECT invoice_number, invoice_stage FROM invoices WHERE id = $1`, [id]);
-    const existingStage = existingStageResult.rows[0];
-
     await pool.query(`
       UPDATE invoices
       SET invoice_stage = $1,
@@ -5048,13 +5119,6 @@ app.post("/invoices/stage", async (req, res) => {
           updated_at = NOW()
       WHERE id = $3
     `, [invoiceStage, agentName, id]);
-
-    if (existingStage) {
-      await pool.query(`
-        INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
-        VALUES ($1, 'stage_changed', $2, $3, NOW())
-      `, [id, `Stage changed from ${existingStage.invoice_stage || "Draft only"} to ${invoiceStage}`, agentName || "Unknown"]);
-    }
 
     res.redirect(redirectTo);
   } catch (error) {
@@ -5169,7 +5233,7 @@ app.get("/invoices/new", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>New Standalone Invoice</title>
+        <title>New Invoice</title>
         <style>
           ${sharedStyles()}
           textarea { min-height: 90px; }
@@ -5223,8 +5287,8 @@ app.get("/invoices/new", async (req, res) => {
       <body>
         ${nav(req)}
 
-        <h1>New Standalone Invoice</h1>
-        <div class="subtitle">Create an invoice without creating or linking a job · Created by ${escapeHtml(agentName)}</div>
+        <h1>New Invoice</h1>
+        <div class="subtitle">Created by ${escapeHtml(agentName)}</div>
 
         <div class="notice">
           <strong>Invoice rules:</strong>
@@ -5235,7 +5299,6 @@ app.get("/invoices/new", async (req, res) => {
         </div>
 
         <form method="POST" action="/invoices/create">
-          <input type="hidden" name="invoice_type" value="standalone">
           <div class="panel">
             <h2>Invoice Details</h2>
             <div class="grid-3">
@@ -5248,22 +5311,15 @@ app.get("/invoices/new", async (req, res) => {
                 <option>Cash</option>
                 <option>Card</option>
               </select>
-              <input name="invoice_number" placeholder="Invoice number" required>
+              <input name="invoice_number" placeholder="Invoice / Job No." required>
             </div>
 
             <br>
 
             <div class="grid-3">
-              <input name="invoice_date" value="${today}" placeholder="Invoice date">
-              <input name="due_date" placeholder="Due date (optional)">
-              <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
-            </div>
-
-            <br>
-
-            <div class="grid-2">
-              <input name="internal_reference" placeholder="Internal / customer reference (optional)">
+              <input name="invoice_date" value="${today}" placeholder="Date">
               <input value="Created by ${escapeHtml(agentName)}" disabled>
+              <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
             </div>
 
             <br>
@@ -5351,13 +5407,6 @@ app.post("/invoices/create", async (req, res) => {
     const companyKey = req.body.company_key;
     const paymentMethod = req.body.payment_method;
     const dispatcherName = currentAgentName(req);
-    const invoiceNumber = String(req.body.invoice_number || "").trim();
-
-    if (!invoiceNumber) return res.status(400).send("Invoice number is required.");
-    const duplicateInvoice = await pool.query(`SELECT id FROM invoices WHERE LOWER(invoice_number) = LOWER($1) LIMIT 1`, [invoiceNumber]);
-    if (duplicateInvoice.rows.length) {
-      return res.status(400).send(`Invoice number ${escapeHtml(invoiceNumber)} already exists. Please use a unique invoice number.`);
-    }
 
     if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
 
@@ -5406,13 +5455,12 @@ app.post("/invoices/create", async (req, res) => {
         stage_updated_by, stage_updated_at, customer_name, customer_address,
         customer_postcode, site_same_as_invoice, site_address, site_postcode,
         customer_email, invoice_date, locksmith_name, paid_status, line_items,
-        subtotal, vat_amount, total, notes, updated_at,
-        invoice_type, internal_reference, due_date, batch_id
+        subtotal, vat_amount, total, notes, updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW(), $22, $23, $24, $25)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
       RETURNING id
     `, [
-      invoiceNumber,
+      req.body.invoice_number,
       companyKey,
       paymentMethod,
       dispatcherName,
@@ -5432,460 +5480,13 @@ app.post("/invoices/create", async (req, res) => {
       subtotal.toFixed(2),
       vatAmount.toFixed(2),
       total.toFixed(2),
-      req.body.notes,
-      req.body.invoice_type || "standalone",
-      String(req.body.internal_reference || "").trim(),
-      String(req.body.due_date || "").trim(),
-      null
+      req.body.notes
     ]);
-
-    await pool.query(`
-      INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
-      VALUES ($1, 'created', $2, $3, NOW())
-    `, [result.rows[0].id, `Standalone invoice ${invoiceNumber} created for ${req.body.customer_name || "customer"} · ${money(total)}`, dispatcherName || "Unknown"]);
 
     res.redirect(`/invoices/${result.rows[0].id}/pdf`);
   } catch (error) {
     console.error("Create invoice error:", error);
     res.status(500).send("Create invoice error. Check Render logs.");
-  }
-});
-
-
-app.get("/invoices/bulk", async (req, res) => {
-  try {
-    const today = new Date().toLocaleDateString("en-GB", {
-      timeZone: "Europe/London",
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric"
-    });
-    const agentName = currentAgentName(req);
-
-    const bulkRows = Array.from({ length: 20 }, (_, index) => {
-      const n = index + 1;
-      return `
-        <tr>
-          <td>${n}</td>
-          <td><input name="invoice_number_${n}" placeholder="Invoice no."></td>
-          <td><input name="customer_name_${n}" placeholder="Customer / company"></td>
-          <td><input name="customer_postcode_${n}" placeholder="Postcode"></td>
-          <td><input name="customer_address_${n}" placeholder="Invoice address"></td>
-          <td><input name="description_${n}" placeholder="Description / service"></td>
-          <td><input name="net_amount_${n}" type="number" min="0" step="0.01" placeholder="0.00"></td>
-          <td><input name="internal_reference_${n}" placeholder="Reference"></td>
-        </tr>
-      `;
-    }).join("");
-
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Bulk Create Invoices</title>
-        <style>
-          ${sharedStyles()}
-          .bulk-wrap { overflow-x:auto; }
-          .bulk-table { min-width:1250px; }
-          .bulk-table input { width:100%; min-width:120px; box-sizing:border-box; }
-          .bulk-table td:nth-child(5) input, .bulk-table td:nth-child(6) input { min-width:210px; }
-          .warning-box { background:#fff7ed; color:#7c2d12; border:1px solid #fdba74; border-radius:12px; padding:16px; margin-bottom:18px; }
-          .confirm-box { background:#111827; border:1px solid #374151; border-radius:12px; padding:16px; margin:18px 0; }
-        </style>
-      </head>
-      <body>
-        ${nav(req)}
-        <h1>Bulk Create Standalone Invoices</h1>
-        <div class="subtitle">Create up to 20 genuine standalone invoices in one batch · Created by ${escapeHtml(agentName)}</div>
-
-        <div class="warning-box">
-          <strong>Important:</strong> each row creates a real invoice record and PDF-ready invoice in the portal.
-          Leave unused rows completely blank. Duplicate invoice numbers are blocked.
-        </div>
-
-        <form method="POST" action="/invoices/bulk/create">
-          <div class="panel">
-            <h2>Batch settings</h2>
-            <div class="grid-3">
-              <select name="company_key" required>
-                <option value="locksmiths">24H Locksmiths Ltd</option>
-                <option value="online">24H Online Services Ltd</option>
-              </select>
-              <select name="payment_method" required>
-                <option>Bank transfer</option>
-                <option>Cash</option>
-                <option>Card</option>
-              </select>
-              <select name="invoice_stage" required>${invoiceStageOptions("Draft only")}</select>
-            </div>
-            <br>
-            <div class="grid-3">
-              <input name="invoice_date" value="${today}" placeholder="Invoice date">
-              <input name="due_date" placeholder="Due date (optional)">
-              <input value="VAT: 20% on net amount" disabled>
-            </div>
-          </div>
-
-          <div class="panel bulk-wrap">
-            <table class="bulk-table">
-              <thead>
-                <tr>
-                  <th>#</th><th>Invoice no.</th><th>Customer/company</th><th>Postcode</th>
-                  <th>Invoice address</th><th>Description</th><th>Net amount</th><th>Reference</th>
-                </tr>
-              </thead>
-              <tbody>${bulkRows}</tbody>
-            </table>
-          </div>
-
-          <div class="confirm-box">
-            <label class="checkbox-row">
-              <input type="checkbox" name="genuine_activity_confirmed" value="yes" required>
-              I confirm these invoices relate to genuine business activity, services, charges or amounts actually due.
-            </label>
-          </div>
-
-          <button type="submit" onclick="return confirm('Create all completed invoice rows as real invoice records?');">Create Invoice Batch</button>
-          <a class="button secondary" href="/invoices">Cancel</a>
-        </form>
-      </body>
-      </html>
-    `);
-  } catch (error) {
-    console.error("Bulk invoice page error:", error);
-    res.status(500).send("Bulk invoice page error. Check Render logs.");
-  }
-});
-
-app.post("/invoices/bulk/create", async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const companyKey = String(req.body.company_key || "").trim();
-    const paymentMethod = String(req.body.payment_method || "").trim();
-    const invoiceStage = String(req.body.invoice_stage || "Draft only").trim();
-    const dispatcherName = currentAgentName(req) || "Unknown";
-    const invoiceDate = String(req.body.invoice_date || "").trim();
-    const dueDate = String(req.body.due_date || "").trim();
-
-    if (req.body.genuine_activity_confirmed !== "yes") {
-      return res.status(400).send("Please confirm that the invoices relate to genuine business activity.");
-    }
-    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
-    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
-      return res.status(400).send(escapeHtml(paymentRuleMessage(companyKey)));
-    }
-
-    const rows = [];
-    for (let i = 1; i <= 20; i += 1) {
-      const invoiceNumber = String(req.body[`invoice_number_${i}`] || "").trim();
-      const customerName = String(req.body[`customer_name_${i}`] || "").trim();
-      const customerPostcode = compactPostcode(req.body[`customer_postcode_${i}`] || "");
-      const customerAddress = String(req.body[`customer_address_${i}`] || "").trim();
-      const description = String(req.body[`description_${i}`] || "").trim();
-      const netRaw = String(req.body[`net_amount_${i}`] || "").trim();
-      const internalReference = String(req.body[`internal_reference_${i}`] || "").trim();
-
-      const anythingEntered = [invoiceNumber, customerName, customerPostcode, customerAddress, description, netRaw, internalReference].some(Boolean);
-      if (!anythingEntered) continue;
-
-      const netAmount = Number(netRaw);
-      if (!invoiceNumber || !customerName || !description || !Number.isFinite(netAmount) || netAmount < 0) {
-        return res.status(400).send(`Row ${i} is incomplete. Invoice number, customer, description and a valid net amount are required.`);
-      }
-
-      rows.push({
-        rowNumber: i,
-        invoiceNumber,
-        customerName,
-        customerPostcode,
-        customerAddress,
-        description,
-        netAmount,
-        internalReference
-      });
-    }
-
-    if (!rows.length) return res.status(400).send("No completed invoice rows were entered.");
-
-    const lowered = rows.map(row => row.invoiceNumber.toLowerCase());
-    if (new Set(lowered).size !== lowered.length) {
-      return res.status(400).send("The batch contains duplicate invoice numbers. Please make every invoice number unique.");
-    }
-
-    const existing = await pool.query(
-      `SELECT invoice_number FROM invoices WHERE LOWER(invoice_number) = ANY($1::text[])`,
-      [lowered]
-    );
-    if (existing.rows.length) {
-      return res.status(400).send(`These invoice numbers already exist: ${existing.rows.map(row => escapeHtml(row.invoice_number)).join(", ")}`);
-    }
-
-    const batchId = `BULK-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
-    await client.query("BEGIN");
-
-    const created = [];
-    for (const row of rows) {
-      const subtotal = Math.round(row.netAmount * 100) / 100;
-      const vatAmount = Math.round(subtotal * UK_VAT_RATE * 100) / 100;
-      const total = Math.round((subtotal + vatAmount) * 100) / 100;
-      const lineItems = [{ description: row.description, qty: 1, unitPrice: subtotal }];
-
-      const result = await client.query(`
-        INSERT INTO invoices (
-          invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
-          stage_updated_by, stage_updated_at, customer_name, customer_address,
-          customer_postcode, site_same_as_invoice, site_address, site_postcode,
-          customer_email, invoice_date, locksmith_name, paid_status, line_items,
-          subtotal, vat_amount, total, notes, updated_at,
-          invoice_type, internal_reference, due_date, batch_id
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8,$9,TRUE,$8,$9,'',$10,'','Unpaid',$11,$12,$13,$14,'',NOW(),'standalone',$15,$16,$17)
-        RETURNING id, invoice_number
-      `, [
-        row.invoiceNumber, companyKey, paymentMethod, dispatcherName, invoiceStage,
-        dispatcherName, row.customerName, row.customerAddress, row.customerPostcode,
-        invoiceDate, JSON.stringify(lineItems), subtotal.toFixed(2), vatAmount.toFixed(2),
-        total.toFixed(2), row.internalReference, dueDate, batchId
-      ]);
-
-      await client.query(`
-        INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
-        VALUES ($1, 'bulk_created', $2, $3, NOW())
-      `, [result.rows[0].id, `Created in batch ${batchId} · ${row.customerName} · ${money(total)}`, dispatcherName]);
-
-      created.push({ id: result.rows[0].id, invoiceNumber: result.rows[0].invoice_number, total });
-    }
-
-    await client.query("COMMIT");
-
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head><title>Invoice Batch Created</title><style>${sharedStyles()}</style></head>
-      <body>
-        ${nav(req)}
-        <h1>Invoice Batch Created</h1>
-        <div class="subtitle">${created.length} invoice${created.length === 1 ? "" : "s"} created · Batch ${escapeHtml(batchId)}</div>
-        <div class="panel">
-          <a href="/invoices">Back to Invoices</a>
-          <a href="/invoices/bulk">Create Another Batch</a>
-        </div>
-        <table>
-          <thead><tr><th>Invoice</th><th>Total</th><th>PDF</th></tr></thead>
-          <tbody>
-            ${created.map(row => `
-              <tr>
-                <td>${escapeHtml(row.invoiceNumber)}</td>
-                <td>${money(row.total)}</td>
-                <td><a href="/invoices/${row.id}/pdf" target="_blank">Open PDF</a></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </body>
-      </html>
-    `);
-  } catch (error) {
-    try { await client.query("ROLLBACK"); } catch (_) {}
-    console.error("Bulk create invoice error:", error);
-    res.status(500).send("Bulk create invoice error. Check Render logs.");
-  } finally {
-    client.release();
-  }
-});
-
-app.get("/invoices/:id/edit", async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
-    const invoice = result.rows[0];
-    if (!invoice) return res.status(404).send("Invoice not found");
-
-    const editableStages = ["Draft only", "Saved", "Awaiting manager approval"];
-    if (!editableStages.includes(invoice.invoice_stage || "Draft only")) {
-      return res.status(400).send("Only Draft, Saved or Awaiting manager approval invoices can be edited.");
-    }
-
-    const lineItems = Array.isArray(invoice.line_items) ? invoice.line_items : JSON.parse(invoice.line_items || "[]");
-    const auditRows = (await pool.query(`
-      SELECT * FROM invoice_audit_log WHERE invoice_id = $1 ORDER BY created_at DESC, id DESC LIMIT 30
-    `, [invoice.id])).rows;
-
-    function editLine(number) {
-      const item = lineItems[number - 1] || {};
-      return `
-        <div class="line-block">
-          <div class="line-grid">
-            <input name="line${number}_qty" value="${escapeHtml(item.qty || "")}" placeholder="Qty">
-            <input name="line${number}_unit_price" value="${escapeHtml(item.unitPrice ?? "")}" placeholder="Unit price">
-          </div>
-          <input class="description-input" name="line${number}_description" value="${escapeHtml(item.description || "")}" placeholder="Description appears on invoice">
-        </div>
-      `;
-    }
-
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Edit Invoice ${escapeHtml(invoice.invoice_number)}</title>
-        <style>
-          ${sharedStyles()}
-          textarea { min-height:90px; }
-          .line-block { margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid #374151; }
-          .line-grid { display:grid; grid-template-columns:100px 160px; gap:12px; margin-bottom:10px; }
-          .description-input { width:100%; box-sizing:border-box; }
-          .audit-row { padding:10px 0; border-bottom:1px solid #374151; }
-        </style>
-      </head>
-      <body>
-        ${nav(req)}
-        <h1>Edit Standalone Invoice</h1>
-        <div class="subtitle">${escapeHtml(invoice.invoice_number)} · ${escapeHtml(invoice.invoice_stage || "Draft only")}</div>
-
-        <form method="POST" action="/invoices/${invoice.id}/edit">
-          <div class="panel">
-            <h2>Invoice Details</h2>
-            <div class="grid-3">
-              <select name="company_key" required>
-                <option value="locksmiths" ${invoice.company_key === "locksmiths" ? "selected" : ""}>24H Locksmiths Ltd</option>
-                <option value="online" ${invoice.company_key === "online" ? "selected" : ""}>24H Online Services Ltd</option>
-              </select>
-              <select name="payment_method" required>
-                ${["Bank transfer","Cash","Card"].map(v => `<option ${v === invoice.payment_method ? "selected" : ""}>${v}</option>`).join("")}
-              </select>
-              <input name="invoice_number" value="${escapeHtml(invoice.invoice_number)}" required>
-            </div>
-            <br>
-            <div class="grid-3">
-              <input name="invoice_date" value="${escapeHtml(invoice.invoice_date || "")}" placeholder="Invoice date">
-              <input name="due_date" value="${escapeHtml(invoice.due_date || "")}" placeholder="Due date">
-              <select name="invoice_stage" required>${invoiceStageOptions(invoice.invoice_stage || "Draft only")}</select>
-            </div>
-            <br>
-            <div class="grid-2">
-              <input name="internal_reference" value="${escapeHtml(invoice.internal_reference || "")}" placeholder="Internal / customer reference">
-              <select name="paid_status">
-                <option ${invoice.paid_status === "Unpaid" ? "selected" : ""}>Unpaid</option>
-                <option ${invoice.paid_status === "Paid with thanks" ? "selected" : ""}>Paid with thanks</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="panel">
-            <h2>Customer</h2>
-            <div class="grid-2">
-              <input name="customer_name" value="${escapeHtml(invoice.customer_name || "")}" placeholder="Customer / invoice name" required>
-              <input name="customer_postcode" value="${escapeHtml(invoice.customer_postcode || "")}" placeholder="Postcode">
-            </div>
-            <br>
-            <textarea name="customer_address" placeholder="Invoice address">${escapeHtml(invoice.customer_address || "")}</textarea>
-            <br><br>
-            <input name="customer_email" value="${escapeHtml(invoice.customer_email || "")}" placeholder="Customer email">
-          </div>
-
-          <div class="panel">
-            <h2>Line Items</h2>
-            ${editLine(1)}${editLine(2)}${editLine(3)}${editLine(4)}${editLine(5)}
-          </div>
-
-          <div class="panel">
-            <h2>Notes</h2>
-            <textarea name="notes">${escapeHtml(invoice.notes || "")}</textarea>
-          </div>
-
-          <button type="submit">Save Invoice Changes</button>
-          <a class="button secondary" href="/invoices/${invoice.id}/pdf" target="_blank">Open PDF</a>
-          <a class="button secondary" href="/invoices">Cancel</a>
-        </form>
-
-        <div class="panel">
-          <h2>Invoice Audit Trail</h2>
-          ${auditRows.length ? auditRows.map(row => `
-            <div class="audit-row">
-              <strong>${escapeHtml(row.action_type)}</strong> · ${escapeHtml(formatDateTime(row.created_at))} · ${escapeHtml(row.changed_by || "Unknown")}<br>
-              <span class="muted">${escapeHtml(row.details || "")}</span>
-            </div>
-          `).join("") : `<div class="muted">No invoice audit entries yet.</div>`}
-        </div>
-      </body>
-      </html>
-    `);
-  } catch (error) {
-    console.error("Edit invoice page error:", error);
-    res.status(500).send("Edit invoice page error. Check Render logs.");
-  }
-});
-
-app.post("/invoices/:id/edit", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const existingResult = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [id]);
-    const existing = existingResult.rows[0];
-    if (!existing) return res.status(404).send("Invoice not found");
-
-    const editableStages = ["Draft only", "Saved", "Awaiting manager approval"];
-    if (!editableStages.includes(existing.invoice_stage || "Draft only")) {
-      return res.status(400).send("Only Draft, Saved or Awaiting manager approval invoices can be edited.");
-    }
-
-    const companyKey = String(req.body.company_key || "").trim();
-    const paymentMethod = String(req.body.payment_method || "").trim();
-    const invoiceNumber = String(req.body.invoice_number || "").trim();
-    const agentName = currentAgentName(req) || "Unknown";
-
-    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
-    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
-      return res.status(400).send(escapeHtml(paymentRuleMessage(companyKey)));
-    }
-    if (!invoiceNumber) return res.status(400).send("Invoice number is required.");
-
-    const duplicate = await pool.query(
-      `SELECT id FROM invoices WHERE LOWER(invoice_number) = LOWER($1) AND id <> $2 LIMIT 1`,
-      [invoiceNumber, id]
-    );
-    if (duplicate.rows.length) return res.status(400).send("That invoice number is already in use.");
-
-    const lineItems = [];
-    for (let i = 1; i <= 5; i += 1) {
-      const description = String(req.body[`line${i}_description`] || "").trim();
-      const qty = Number(req.body[`line${i}_qty`] || 0);
-      const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
-      if (description && qty > 0 && Number.isFinite(unitPrice)) lineItems.push({ description, qty, unitPrice });
-    }
-    if (!lineItems.length) return res.status(400).send("At least one invoice line is required.");
-
-    const subtotal = Math.round(lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0) * 100) / 100;
-    const vatAmount = Math.round(subtotal * UK_VAT_RATE * 100) / 100;
-    const total = Math.round((subtotal + vatAmount) * 100) / 100;
-
-    await pool.query(`
-      UPDATE invoices
-      SET invoice_number=$1, company_key=$2, payment_method=$3, invoice_stage=$4,
-          stage_updated_by=$5, stage_updated_at=NOW(), customer_name=$6,
-          customer_address=$7, customer_postcode=$8, site_same_as_invoice=TRUE,
-          site_address=$7, site_postcode=$8, customer_email=$9, invoice_date=$10,
-          paid_status=$11, line_items=$12, subtotal=$13, vat_amount=$14, total=$15,
-          notes=$16, internal_reference=$17, due_date=$18, invoice_type='standalone',
-          updated_at=NOW()
-      WHERE id=$19
-    `, [
-      invoiceNumber, companyKey, paymentMethod, req.body.invoice_stage || "Saved",
-      agentName, req.body.customer_name, req.body.customer_address,
-      compactPostcode(req.body.customer_postcode), req.body.customer_email,
-      req.body.invoice_date, req.body.paid_status || "Unpaid", JSON.stringify(lineItems),
-      subtotal.toFixed(2), vatAmount.toFixed(2), total.toFixed(2), req.body.notes,
-      String(req.body.internal_reference || "").trim(), String(req.body.due_date || "").trim(), id
-    ]);
-
-    await pool.query(`
-      INSERT INTO invoice_audit_log (invoice_id, action_type, details, changed_by, created_at)
-      VALUES ($1, 'edited', $2, $3, NOW())
-    `, [id, `Invoice updated · total ${money(existing.total)} → ${money(total)} · stage ${existing.invoice_stage || "Draft only"} → ${req.body.invoice_stage || "Saved"}`, agentName]);
-
-    res.redirect(`/invoices/${id}/pdf`);
-  } catch (error) {
-    console.error("Edit invoice error:", error);
-    res.status(500).send("Edit invoice error. Check Render logs.");
   }
 });
 
@@ -5931,8 +5532,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.fontSize(10).font("Helvetica")
       .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
       .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
-      .text(`Locksmith: ${pdfText(invoice.locksmith_name || "—")}`, 390, 120)
-      .text(`Due: ${pdfText(invoice.due_date || "—")}`, 390, 135);
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120);
 
     doc.moveTo(50, 165).lineTo(545, 165).stroke();
 
@@ -5956,8 +5556,7 @@ app.get("/invoices/:id/pdf", async (req, res) => {
 
     doc.font("Helvetica").fontSize(10)
       .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
-      .text(`Status: ${pdfText(invoice.paid_status)}`, 210, 342)
-      .text(`Ref: ${pdfText(invoice.internal_reference || "—")}`, 350, 342, { width: 175 });
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 250, 342);
 
     const tableTop = 390;
 
