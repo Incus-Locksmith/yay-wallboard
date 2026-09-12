@@ -4216,6 +4216,66 @@ function wallboardTodaySql() {
   `;
 }
 
+function wallboardNumericSeconds(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n)) : null;
+  }
+  const parts = raw.split(":").map(Number);
+  if (parts.every(Number.isFinite)) {
+    if (parts.length === 2) return Math.max(0, Math.round(parts[0] * 60 + parts[1]));
+    if (parts.length === 3) return Math.max(0, Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2]));
+  }
+  return null;
+}
+
+function wallboardAnswerSeconds(call) {
+  if (!call || String(call.call_type || "").toLowerCase() !== "inbound") return null;
+  if (!String(call.answered_by || "").trim()) return null;
+  const raw = call.raw_json && typeof call.raw_json === "object" ? call.raw_json : {};
+  const explicitCandidates = [
+    raw.ring_duration_seconds, raw.ring_duration, raw.ring_seconds,
+    raw.ringing_duration, raw.ringing_seconds, raw.wait_duration_seconds,
+    raw.wait_duration, raw.wait_seconds, raw.answer_delay_seconds,
+    raw.answer_delay, raw.time_to_answer, raw.time_to_answer_seconds,
+    raw.seconds_to_answer
+  ];
+  for (const candidate of explicitCandidates) {
+    const seconds = wallboardNumericSeconds(candidate);
+    if (seconds !== null) return seconds;
+  }
+  const answerStamp = raw.answered_at || raw.answer_time || raw.answered_time || raw.connected_at || raw.connect_time;
+  const startStamp = call.start_time || raw.start || raw.start_time;
+  if (answerStamp && startStamp) {
+    const startMs = new Date(startStamp).getTime();
+    const answerMs = new Date(answerStamp).getTime();
+    if (Number.isFinite(startMs) && Number.isFinite(answerMs) && answerMs >= startMs) {
+      return Math.max(0, Math.round((answerMs - startMs) / 1000));
+    }
+  }
+  if (call.start_time && call.end_time) {
+    const startMs = new Date(call.start_time).getTime();
+    const endMs = new Date(call.end_time).getTime();
+    const talkSeconds = Number(call.duration_seconds || 0);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs && Number.isFinite(talkSeconds)) {
+      const elapsedSeconds = Math.round((endMs - startMs) / 1000);
+      const derived = elapsedSeconds - Math.max(0, talkSeconds);
+      if (derived >= 0 && derived <= 600) return derived;
+    }
+  }
+  return null;
+}
+
+function wallboardApproxRings(answerSeconds) {
+  if (answerSeconds === null || answerSeconds === undefined || !Number.isFinite(Number(answerSeconds))) return null;
+  const seconds = Math.max(0, Number(answerSeconds));
+  return Math.max(1, Math.ceil((seconds + 0.01) / 6));
+}
+
 function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
   const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
@@ -4282,6 +4342,8 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
       name,
       answered: 0,
       totalDuration: 0,
+      totalAnswerSeconds: 0,
+      answerSpeedSamples: 0,
       lastCallTime: null,
       status: presence.state === "Available" ? "Available" : presence.state === "Offline" ? "Offline" : "Unknown",
       currentDuration: 0,
@@ -4296,6 +4358,11 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
     const agent = agentStats[ext];
     agent.answered += 1;
     agent.totalDuration += Number(call.duration_seconds || 0);
+    const answerSeconds = wallboardAnswerSeconds(call);
+    if (answerSeconds !== null) {
+      agent.totalAnswerSeconds += answerSeconds;
+      agent.answerSpeedSamples += 1;
+    }
     const callTime = call.start_time || call.received_at;
     if (!agent.lastCallTime || (callTime && new Date(callTime) > new Date(agent.lastCallTime))) {
       agent.lastCallTime = callTime;
@@ -4309,21 +4376,33 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
 
   // An active outbound call may not carry answered_by. If Yay puts the extension in raw_json,
   // retain the historic behaviour rather than guessing an agent here.
-  const agents = Object.values(agentStats).map(agent => ({
-    ...agent,
-    avgDuration: agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0
-  }));
+  const agents = Object.values(agentStats).map(agent => {
+    const avgAnswerSeconds = agent.answerSpeedSamples
+      ? Math.round(agent.totalAnswerSeconds / agent.answerSpeedSamples)
+      : null;
+    return {
+      ...agent,
+      avgDuration: agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0,
+      avgAnswerSeconds,
+      approxRings: wallboardApproxRings(avgAnswerSeconds)
+    };
+  });
 
   const recent = inboundCalls.slice(0, 12).map(call => {
     const ext = String(call.answered_by || "").trim();
     let status = "Missed";
     if (!call.end_time && !ext && callAgeSeconds(call) <= waitingMaxSeconds) status = "Waiting";
     else if (ext) status = call.end_time ? "Answered" : "On Call";
+    const answerSeconds = status === "Answered" || status === "On Call"
+      ? wallboardAnswerSeconds(call)
+      : null;
     return {
       id: call.id,
       time: call.start_time || call.received_at,
       caller: call.from_number || "Unknown",
       status,
+      answerSeconds,
+      approxRings: wallboardApproxRings(answerSeconds),
       duration: Number(call.duration_seconds || 0),
       agent: wallboardAgents[ext] || ext || "",
       extension: ext
@@ -4392,6 +4471,12 @@ app.get("/call-wallboard", async (req, res) => {
       return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
     }
 
+    function wbAnswerSpeed(seconds, rings) {
+      if (seconds === null || seconds === undefined) return "—";
+      const ringText = rings ? ` · ~${rings} ring${rings === 1 ? "" : "s"}` : "";
+      return `${Number(seconds)} sec${ringText}`;
+    }
+
     function wbAgentCards(agents) {
       return [...agents]
         .sort((a, b) => {
@@ -4410,6 +4495,7 @@ app.get("/call-wallboard", async (req, res) => {
             </div>
             <div class="agent-metrics">
               <div><span>Calls Today</span><strong>${agent.answered}</strong></div>
+              <div><span>Avg Answer</span><strong>${escapeHtml(wbAnswerSpeed(agent.avgAnswerSeconds, agent.approxRings))}</strong></div>
               <div><span>Avg Duration</span><strong>${wbSeconds(agent.avgDuration)}</strong></div>
               <div><span>Last Call</span><strong>${agent.lastCallTime ? escapeHtml(formatTimeOnly(agent.lastCallTime)) : "—"}</strong></div>
             </div>
@@ -4418,12 +4504,13 @@ app.get("/call-wallboard", async (req, res) => {
     }
 
     function wbRecentRows(recent) {
-      if (!recent.length) return `<tr><td colspan="5" class="empty-cell">No inbound calls yet today.</td></tr>`;
+      if (!recent.length) return `<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>`;
       return recent.map(call => `
         <tr>
           <td>${call.time ? escapeHtml(formatTimeOnly(call.time)) : "—"}</td>
           <td>${escapeHtml(call.caller)}</td>
           <td><span class="call-status ${call.status.toLowerCase().replace(/\s+/g, "-")}">${escapeHtml(call.status)}</span></td>
+          <td>${escapeHtml(wbAnswerSpeed(call.answerSeconds, call.approxRings))}</td>
           <td>${call.status === "Waiting" ? "—" : wbSeconds(call.duration)}</td>
           <td>${escapeHtml(call.agent || "—")}</td>
         </tr>
@@ -4518,9 +4605,9 @@ app.get("/call-wallboard", async (req, res) => {
           .agent-state{font-size:9px;font-weight:900;padding:4px 7px;border-radius:999px;background:rgba(33,223,119,.13);color:#80f3ae;white-space:nowrap}
           .on-call .agent-state{background:rgba(255,89,104,.13);color:#ff9aa4}
           .offline .agent-state{background:rgba(100,116,139,.14);color:#a8b3c2}
-          .agent-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:12px}
+          .agent-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}
           .agent-metrics div{border-left:1px solid rgba(148,163,184,.14);padding-left:7px}.agent-metrics div:first-child{border-left:0;padding-left:0}
-          .agent-metrics span{display:block;font-size:9px;color:#8fa6bc}.agent-metrics strong{display:block;margin-top:2px;font-size:14px}
+          .agent-metrics span{display:block;font-size:9px;color:#8fa6bc}.agent-metrics strong{display:block;margin-top:2px;font-size:13px;white-space:nowrap}
           .recent-wrap{overflow:auto;max-height:100%}
           table{width:100%;border-collapse:collapse;font-size:11px}
           th{color:#9eb4ca;text-align:left;font-weight:700;padding:8px 9px;background:rgba(255,255,255,.025);position:sticky;top:0}
@@ -4571,7 +4658,7 @@ app.get("/call-wallboard", async (req, res) => {
             </div>
             <div class="panel">
               <div class="panel-head"><div class="panel-title">Live Queue / Recent Calls</div><div class="panel-note">Latest inbound activity</div></div>
-              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Duration</th><th>Agent</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
+              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Answer Time</th><th>Duration</th><th>Agent</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
             </div>
           </section>
 
@@ -4601,6 +4688,10 @@ app.get("/call-wallboard", async (req, res) => {
           }
           function html(value){
             return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+          }
+          function answerSpeed(seconds,rings){
+            if(seconds===null || seconds===undefined) return "—";
+            return Number(seconds)+" sec"+(rings ? " · ~"+rings+" ring"+(rings===1?"":"s") : "");
           }
           function timeOnly(value){
             if(!value) return "—";
@@ -4632,6 +4723,7 @@ app.get("/call-wallboard", async (req, res) => {
                 '</div>'+
                 '<div class="agent-metrics">'+
                   '<div><span>Calls Today</span><strong>'+a.answered+'</strong></div>'+
+                  '<div><span>Avg Answer</span><strong>'+answerSpeed(a.avgAnswerSeconds,a.approxRings)+'</strong></div>'+
                   '<div><span>Avg Duration</span><strong>'+duration(a.avgDuration)+'</strong></div>'+
                   '<div><span>Last Call</span><strong>'+timeOnly(a.lastCallTime)+'</strong></div>'+
                 '</div>'+
@@ -4639,11 +4731,12 @@ app.get("/call-wallboard", async (req, res) => {
             ).join("");
           }
           function renderRecent(recent){
-            if(!recent.length) return '<tr><td colspan="5" class="empty-cell">No inbound calls yet today.</td></tr>';
+            if(!recent.length) return '<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>';
             return recent.map(c =>
               '<tr>'+
                 '<td>'+timeOnly(c.time)+'</td><td>'+html(c.caller)+'</td>'+
                 '<td><span class="call-status '+html(c.status.toLowerCase().replace(/\\s+/g,"-"))+'">'+html(c.status)+'</span></td>'+
+                '<td>'+answerSpeed(c.answerSeconds,c.approxRings)+'</td>'+
                 '<td>'+(c.status==="Waiting" ? "—" : duration(c.duration))+'</td><td>'+html(c.agent || "—")+'</td>'+
               '</tr>'
             ).join("");
