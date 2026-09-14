@@ -1,3 +1,4 @@
+// YDP Dispatch Board KPI period selector + collapsible KPI panel (v87)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -6156,6 +6157,8 @@ function campaignBadgeClass(type) {
 app.get("/campaigns", async (req, res) => {
   try {
     const search = (req.query.search || "").trim();
+    const requestedKpiPeriod = (req.query.kpi_period || "today").trim().toLowerCase();
+    const kpiPeriod = ["today", "week", "month"].includes(requestedKpiPeriod) ? requestedKpiPeriod : "today";
     const params = [];
     let where = "";
     if (search) {
@@ -7759,7 +7762,7 @@ app.get("/jobs", async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult, accountPendingMetricResult] = await Promise.all([
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult, accountPendingMetricResult, periodMetricsResult] = await Promise.all([
       pool.query(`
         SELECT j.*, t.name AS technician_name
         FROM jobs j
@@ -7820,7 +7823,44 @@ app.get("/jobs", async (req, res) => {
         WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
            OR (closed_at IS NOT NULL AND COALESCE(customer_paid, FALSE) = FALSE AND COALESCE(final_value, 0) > 0 AND COALESCE(status, '') <> 'fully_paid')
       `),
-      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE status = 'account_pending_review'`)
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE status = 'account_pending_review'`),
+      pool.query(`
+        WITH bounds AS (
+          SELECT CASE
+            WHEN $1 = 'week' THEN date_trunc('week', NOW())
+            WHEN $1 = 'month' THEN date_trunc('month', NOW())
+            ELSE date_trunc('day', NOW())
+          END AS period_start
+        )
+        SELECT
+          COUNT(*) FILTER (
+            WHERE j.created_at >= b.period_start
+          )::int AS jobs_created,
+          COUNT(*) FILTER (
+            WHERE j.closed_at IS NOT NULL
+              AND j.closed_at >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          )::int AS jobs_closed,
+          COUNT(*) FILTER (
+            WHERE j.status IN ('cancelled_before_arrival', 'cancelled_onsite')
+              AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+          )::int AS jobs_cancelled,
+          COALESCE(SUM(j.final_value) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          ), 0) AS income,
+          COALESCE(SUM(j.materials_cost) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          ), 0) AS materials,
+          COALESCE(AVG(j.final_value) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+              AND COALESCE(j.final_value, 0) > 0
+          ), 0) AS average_job_value
+        FROM jobs j
+        CROSS JOIN bounds b
+      `, [kpiPeriod])
     ]);
 
     const counts = Object.fromEntries(countsResult.rows.map(row => [row.status || "open", row.count]));
@@ -7832,7 +7872,7 @@ app.get("/jobs", async (req, res) => {
       { value: "active", label: `Active / scheduled jobs (${activeCount})` },
       { value: "all", label: "All orders" },
       { value: "closed_today", label: `Closed today (${closedToday})` },
-      { value: "cancelled", label: `Total cancelled (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
+      { value: "cancelled", label: `All cancelled jobs (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
       ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
     ];
 
@@ -7855,21 +7895,32 @@ app.get("/jobs", async (req, res) => {
       { value: "custom", label: "Custom date range" }
     ];
 
-    const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
     const openDisputesTotal = Number(disputesMetricResult.rows[0]?.count || 0);
     const paymentChaseTotal = Number(paymentChaseMetricResult.rows[0]?.count || 0);
     const accountPendingTotal = Number(accountPendingMetricResult.rows[0]?.count || 0);
+    const periodMetrics = periodMetricsResult.rows[0] || {};
 
+    const periodLabel = kpiPeriod === "week" ? "This week" : (kpiPeriod === "month" ? "This month" : "Today");
+    const money = value => `£${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    // These cards are live workload figures and do not change with the KPI period selector.
     const statusCards = [
       { label: "ACCOUNT JOBS - REVIEW", value: accountPendingTotal, className: accountPendingTotal ? "board-account-alert" : "board-blue", hrefStatus: "account_pending_review" },
       { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue", hrefStatus: "open" },
       { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green", hrefStatus: "assigned" },
       { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
-      { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed_today" },
-      { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" },
       { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" },
       { label: "Payment chase", value: paymentChaseTotal, className: "board-purple", href: "/payment-chasing" }
+    ];
+
+    const periodCards = [
+      { label: "Jobs created", value: Number(periodMetrics.jobs_created || 0), className: "board-blue" },
+      { label: "Closed", value: Number(periodMetrics.jobs_closed || 0), className: "board-green" },
+      { label: "Cancelled", value: Number(periodMetrics.jobs_cancelled || 0), className: "board-slate" },
+      { label: "Income", value: money(periodMetrics.income), className: "board-green" },
+      { label: "Materials", value: money(periodMetrics.materials), className: "board-amber" },
+      { label: "Avg job value", value: money(periodMetrics.average_job_value), className: "board-pink" }
     ];
 
     function technicianBadgeClass(status) {
@@ -7932,6 +7983,13 @@ app.get("/jobs", async (req, res) => {
       `;
     }).join("");
 
+    const periodCardHtml = periodCards.map(card => `
+      <div class="board-card period-card ${card.className}">
+        <div class="board-card-label">${escapeHtml(card.label)}</div>
+        <div class="board-card-number">${escapeHtml(String(card.value))}</div>
+      </div>
+    `).join("");
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -7955,17 +8013,59 @@ app.get("/jobs", async (req, res) => {
           .board-actions { display: flex; gap: 12px; align-items: center; flex: 0 0 auto; }
           .board-actions .primary-action { background: var(--brand-green-dark); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
+          .kpi-panel {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 20px;
+            padding: 16px 18px 18px;
+            margin: 22px 0 20px;
+            box-shadow: 0 10px 24px rgba(17,24,39,0.04);
+          }
+          .kpi-panel-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 14px;
+          }
+          .kpi-title-wrap { display:flex; align-items:center; gap:12px; min-width:0; }
+          .kpi-title { color:#111827; font-size:15px; font-weight:900; }
+          .kpi-subtitle { color:#667085; font-size:12px; margin-top:2px; }
+          .kpi-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+          .kpi-period-btn {
+            border:1px solid #d1d5db; background:#f8fafc; color:#475569;
+            padding:8px 12px; border-radius:999px; font-weight:900; font-size:12px; cursor:pointer;
+          }
+          .kpi-period-btn.is-active { background:#17212b; color:#fff; border-color:#17212b; }
+          .kpi-collapse-btn {
+            border:1px solid #d1d5db; background:#fff; color:#475569;
+            width:34px; height:34px; border-radius:10px; font-weight:900; cursor:pointer;
+          }
+          .kpi-panel.is-collapsed .kpi-panel-body { display:none; }
+          .kpi-panel.is-collapsed .kpi-panel-head { margin-bottom:0; }
+          .kpi-panel.is-collapsed .kpi-collapse-btn { transform:rotate(180deg); }
+          .kpi-section-label {
+            color:#667085; font-size:11px; font-weight:900; text-transform:uppercase;
+            letter-spacing:.06em; margin:12px 0 8px;
+          }
           .status-card-grid {
             display: grid;
-            grid-template-columns: repeat(8, minmax(135px, 1fr));
-            gap: 18px;
-            margin: 22px 0 20px;
+            grid-template-columns: repeat(7, minmax(135px, 1fr));
+            gap: 14px;
+            margin: 0;
           }
-          .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; min-height: 110px; padding: 20px 20px 16px 24px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
+          .period-card-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(145px, 1fr));
+            gap: 14px;
+            margin: 0;
+          }
+          .period-card { cursor:default; }
+          .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; min-height: 98px; padding: 16px 16px 14px 20px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
           .board-card:before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; }
           .board-card:after { content: ""; position: absolute; right: -28px; top: -34px; width: 110px; height: 110px; border-radius: 999px; opacity: 0.10; }
           .board-card-label { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; min-height: 34px; max-width: 160px; }
-          .board-card-number { color: #111827; font-size: 40px; font-weight: 900; margin-top: 12px; }
+          .board-card-number { color: #111827; font-size: 34px; font-weight: 900; margin-top: 9px; }
           .board-blue:before, .board-blue:after { background: #2563eb; }
           .board-green:before, .board-green:after { background: #16a34a; }
           .board-red:before, .board-red:after { background: #dc2626; }
@@ -8034,11 +8134,14 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
           .feed-dot.job-cancelled-onsite { background: #4b5563; }
           @media (max-width: 1500px) {
-            .status-card-grid { grid-template-columns: repeat(3, minmax(175px, 1fr)); }
+            .status-card-grid { grid-template-columns: repeat(4, minmax(150px, 1fr)); }
+            .period-card-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
             .board-content-grid { grid-template-columns: minmax(0, 1fr) 330px; }
           }
           @media (max-width: 1200px) {
-            .status-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .status-card-grid, .period-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .kpi-panel-head { align-items:flex-start; flex-direction:column; }
+            .kpi-controls { justify-content:flex-start; }
             .board-content-grid { grid-template-columns: 1fr; }
             .board-filters { grid-template-columns: 1fr; }
             .dispatch-table { display: block; overflow-x: auto; }
@@ -8059,9 +8162,53 @@ app.get("/jobs", async (req, res) => {
             </div>
           </div>
 
-          <section class="status-card-grid">
-            ${cardHtml}
+          <section class="kpi-panel" id="dispatch_kpi_panel">
+            <div class="kpi-panel-head">
+              <div class="kpi-title-wrap">
+                <div>
+                  <div class="kpi-title">Dispatch KPIs</div>
+                  <div class="kpi-subtitle">Live workload plus ${escapeHtml(periodLabel.toLowerCase())}'s performance.</div>
+                </div>
+              </div>
+              <div class="kpi-controls">
+                <button type="button" class="kpi-period-btn${kpiPeriod === "today" ? " is-active" : ""}" data-kpi-period="today">Today</button>
+                <button type="button" class="kpi-period-btn${kpiPeriod === "week" ? " is-active" : ""}" data-kpi-period="week">This Week</button>
+                <button type="button" class="kpi-period-btn${kpiPeriod === "month" ? " is-active" : ""}" data-kpi-period="month">This Month</button>
+                <button type="button" class="kpi-collapse-btn" id="kpi_collapse_btn" aria-label="Collapse KPI section" title="Collapse / expand KPIs">⌃</button>
+              </div>
+            </div>
+            <div class="kpi-panel-body">
+              <div class="kpi-section-label">Live workload</div>
+              <div class="status-card-grid">${cardHtml}</div>
+              <div class="kpi-section-label">${escapeHtml(periodLabel)} performance</div>
+              <div class="period-card-grid">${periodCardHtml}</div>
+            </div>
           </section>
+          <script>
+            (function () {
+              const panel = document.getElementById("dispatch_kpi_panel");
+              const collapseBtn = document.getElementById("kpi_collapse_btn");
+              const stored = window.localStorage ? localStorage.getItem("dispatchKpisCollapsed") : null;
+              if (panel && stored === "1") panel.classList.add("is-collapsed");
+
+              if (collapseBtn && panel) {
+                collapseBtn.addEventListener("click", function () {
+                  panel.classList.toggle("is-collapsed");
+                  if (window.localStorage) {
+                    localStorage.setItem("dispatchKpisCollapsed", panel.classList.contains("is-collapsed") ? "1" : "0");
+                  }
+                });
+              }
+
+              document.querySelectorAll("[data-kpi-period]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                  const url = new URL(window.location.href);
+                  url.searchParams.set("kpi_period", button.getAttribute("data-kpi-period"));
+                  window.location.href = url.toString();
+                });
+              });
+            })();
+          </script>
 
           ${accountPendingTotal > 0 ? `<div class="account-request-banner"><span>⚠ ${accountPendingTotal} NEW ACCOUNT JOB${accountPendingTotal === 1 ? "" : "S"} NEED${accountPendingTotal === 1 ? "S" : ""} REVIEW</span><a href="/jobs?status=account_pending_review">Review now</a></div>` : ""}
 
