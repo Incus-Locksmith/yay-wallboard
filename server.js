@@ -1,4 +1,4 @@
-// YDP Dispatch Board KPI period selector + collapsible KPI panel (v87)
+// YDP Dispatch Board KPI period selector + collapsible KPI panel (v88)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -6157,8 +6157,6 @@ function campaignBadgeClass(type) {
 app.get("/campaigns", async (req, res) => {
   try {
     const search = (req.query.search || "").trim();
-    const requestedKpiPeriod = (req.query.kpi_period || "today").trim().toLowerCase();
-    const kpiPeriod = ["today", "week", "month"].includes(requestedKpiPeriod) ? requestedKpiPeriod : "today";
     const params = [];
     let where = "";
     if (search) {
@@ -7695,6 +7693,8 @@ app.get("/jobs", async (req, res) => {
     const customDateFrom = (req.query.date_from || "").trim();
     const customDateTo = (req.query.date_to || "").trim();
     const search = (req.query.search || "").trim();
+    const requestedKpiPeriod = (req.query.kpi_period || "today").trim().toLowerCase();
+    const kpiPeriod = ["today", "week", "month"].includes(requestedKpiPeriod) ? requestedKpiPeriod : "today";
 
     const where = [];
     const params = [];
