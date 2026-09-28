@@ -1,4 +1,4 @@
-// YDP Technician job invoicing + Stripe links (v90)
+// YDP Customer final-price confirmation + signature (v91)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3107,6 +3107,42 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_amount NUMERIC(12,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_by TEXT;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_customer_confirmation_codes (
+      job_id INTEGER PRIMARY KEY,
+      code_hash TEXT NOT NULL,
+      sent_to TEXT NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      sent_at TIMESTAMP DEFAULT NOW(),
+      attempts INTEGER DEFAULT 0
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_customer_confirmations (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      technician_id INTEGER,
+      technician_name TEXT,
+      customer_name TEXT,
+      customer_phone TEXT,
+      agreed_net NUMERIC(12,2),
+      agreed_vat NUMERIC(12,2),
+      agreed_gross NUMERIC(12,2),
+      agreement_text TEXT,
+      signature_data TEXT,
+      verification_method TEXT,
+      verification_phone TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      confirmed_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_customer_confirmations_job_idx ON job_customer_confirmations (job_id);`);
+
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS imported_from TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_order_id TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_portal_url TEXT;`);
@@ -11231,6 +11267,50 @@ function renderTechnicianStripeLinks(rows = [], token, jobId) {
 }
 
 
+
+function maskMobileForCustomer(value) {
+  const clean = String(value || "").replace(/\s+/g, "");
+  if (clean.length <= 4) return clean || "customer mobile";
+  return `${"*".repeat(Math.max(0, clean.length - 4))}${clean.slice(-4)}`;
+}
+
+function techCloseDraftToken(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encoded}.${signValue(encoded)}`;
+}
+
+function readTechCloseDraftToken(token) {
+  try {
+    const raw = String(token || "");
+    if (!raw.includes(".")) return null;
+    const [encoded, signature] = raw.split(".");
+    const expected = signValue(encoded);
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (!payload || !payload.createdAt) return null;
+    if (Date.now() - Number(payload.createdAt) > 1000 * 60 * 30) return null;
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+function customerConfirmationCodeHash(jobId, code) {
+  return crypto
+    .createHash("sha256")
+    .update(`${authSecret()}|${Number(jobId)}|${String(code || "").trim()}`)
+    .digest("hex");
+}
+
+function makeCustomerConfirmationCode() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function clientIpAddress(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || String(req.socket?.remoteAddress || "");
+}
+
 function technicianInvoiceCompanyForJob(job) {
   const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
   if (job.account_job || job.account_template_id) return "locksmiths";
@@ -12471,7 +12551,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
           <h1>Close job</h1>
           <p class="job-sub"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> · ${escapeHtml(job.job_type || '')} · ${escapeHtml(job.customer_name || '')}</p>
           <p class="job-sub">${escapeHtml(techJobAddress(job) || '')}</p>
-          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close/customer-confirmation" onsubmit="return confirm('Continue to customer confirmation? The final amount will be locked for the customer to review.');">
             <p class="job-sub">Enter the NET value only. VAT is calculated automatically at 20%.</p>
             <div class="field-grid">
               <div><label>NET job value</label><input id="techNetValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : '')}" inputmode="decimal" placeholder="£ ex VAT" required></div>
@@ -12506,7 +12586,8 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <p class="job-sub">The office will file photos, invoices and proof in Dropbox after the job. Please send any job photos/evidence to the office in the usual way.</p>
             </div>
             <br>
-            <button class="button red" type="submit">Submit close job</button>
+            <button class="button red" type="submit">Continue to customer confirmation</button>
+            <p class="job-sub" style="margin-top:10px;">Next, hand the device to the customer. They will confirm the final amount, enter the SMS verification code sent to their phone, and sign.</p>
           </form>
           <script>
             function recalcTechCloseValues(){
@@ -12546,27 +12627,57 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
   }
 });
 
-app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
+app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
+
     const token = req.params.token;
+    const jobId = Number(req.params.id);
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
-    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const job = (await pool.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
 
     const body = req.body;
     const netValue = parseMoneyInput(body.net_value || body.final_value);
+    if (netValue === null || netValue < 0) {
+      return res.status(400).send('Please enter a valid NET job value.');
+    }
+
     const vatAmount = calculateVatFromNet(netValue);
     const finalValue = calculateGrossFromNet(netValue);
     const includesCard = closePaymentIncludesCard(body);
     const isAmex = includesCard && body.card_is_amex === 'true';
     const amexIdProvided = isAmex && body.amex_id_provided === 'true';
+
     if (isAmex && !amexIdProvided) {
       return res.status(400).send('AMEX payment selected. Please confirm that ID from the client has been provided.');
     }
-    const selectedStatus = closingJobStatuses.some(item => item.value === body.status) ? body.status : 'fully_paid';
-    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
-    const techCloseValues = {
+
+    const selectedStatus = closingJobStatuses.some(item => item.value === body.status)
+      ? body.status
+      : 'fully_paid';
+
+    const draft = {
+      jobId,
+      techId: tech.id,
+      techName: tech.name,
       net_value: netValue,
       vat_amount: vatAmount,
       final_value: finalValue,
@@ -12584,10 +12695,327 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       outcome: body.outcome || '',
       tech_notes: body.tech_notes || '',
       close_notes: body.close_notes || '',
-      status: selectedStatus
+      status: selectedStatus,
+      createdAt: Date.now()
     };
 
+    const customerPhone = cleanSmsNumber(job.customer_phone);
+    if (!customerPhone) {
+      return res.status(400).send('A customer mobile number is required for independent customer confirmation. Please ask the office to add/correct the customer mobile number before closing this job.');
+    }
+
+    const verificationCode = makeCustomerConfirmationCode();
+    const codeHash = customerConfirmationCodeHash(jobId, verificationCode);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
     await pool.query(`
+      INSERT INTO job_customer_confirmation_codes
+        (job_id, code_hash, sent_to, expires_at, sent_at, attempts)
+      VALUES ($1, $2, $3, $4, NOW(), 0)
+      ON CONFLICT (job_id)
+      DO UPDATE SET
+        code_hash = EXCLUDED.code_hash,
+        sent_to = EXCLUDED.sent_to,
+        expires_at = EXCLUDED.expires_at,
+        sent_at = NOW(),
+        attempts = 0
+    `, [jobId, codeHash, customerPhone, expiresAt]);
+
+    const verifyMessage =
+      `24H Locksmiths verification code: ${verificationCode}. ` +
+      `Use this code only when confirming the completed work and final amount of ${money(finalValue)} ` +
+      `for ${compactPostcode(job.postcode || '') || 'your job'}. Do not give this code to anyone before you are ready to confirm.`;
+
+    try {
+      await sendYaySms(
+        customerPhone,
+        verifyMessage,
+        `${job.job_number || jobNumber(job.id)} - customer confirmation code`
+      );
+    } catch (smsError) {
+      console.error('Customer confirmation SMS error:', smsError);
+      return res.status(500).send('The customer verification code could not be sent. Please check the customer mobile number or contact the office.');
+    }
+
+    const draftToken = techCloseDraftToken(draft);
+    const agreementText =
+      `I confirm that the work and final amount of ${money(finalValue)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    const bodyHtml = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>Customer confirmation</span></div>
+        <span class="pill">Job ${escapeHtml(job.job_number || jobNumber(job.id))}</span>
+      </div>
+
+      <div class="wrap">
+        <div class="card" style="max-width:760px;margin:0 auto;">
+          <h1>Customer confirmation</h1>
+          <p style="font-size:17px;"><strong>Please hand this device to the customer.</strong></p>
+          <p class="job-sub">The technician cannot complete the job until the customer confirms the final amount below.</p>
+
+          <div style="padding:16px;border:2px solid #111827;border-radius:16px;margin:18px 0;background:#fff;">
+            <div class="job-sub">Work</div>
+            <div style="font-size:18px;font-weight:800;">${escapeHtml(job.job_type || 'Locksmith services')}</div>
+            <div class="job-sub" style="margin-top:6px;">${escapeHtml(techJobAddress(job) || '')}</div>
+            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <div class="job-sub">Final amount</div>
+            <div style="font-size:34px;font-weight:900;">${money(finalValue)}</div>
+            <div class="job-sub">Includes VAT of ${money(vatAmount)} · NET ${money(netValue)}</div>
+          </div>
+
+          <form id="customerConfirmForm" method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">
+            <input type="hidden" name="close_draft_token" value="${escapeHtml(draftToken)}">
+            <input type="hidden" id="signatureData" name="signature_data" value="">
+
+            <div class="field-grid">
+              <div class="full">
+                <label>Customer name</label>
+                <input name="customer_signer_name" value="${escapeHtml(job.customer_name || '')}" placeholder="Customer name" required autocomplete="name">
+              </div>
+              <div class="full">
+                <label>Verification code</label>
+                <input name="verification_code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6-digit code" required>
+                <p class="job-sub">A 6-digit code has been sent to ${escapeHtml(maskMobileForCustomer(customerPhone))}. This confirms the customer has access to the mobile number held on the job.</p>
+              </div>
+            </div>
+
+            <div style="padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe3ec;margin:16px 0;">
+              <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                <input type="checkbox" name="customer_agreed" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                <span>${escapeHtml(agreementText)}</span>
+              </label>
+            </div>
+
+            <div>
+              <label>Customer signature</label>
+              <p class="job-sub">Please sign in the box using your finger or mouse.</p>
+              <canvas id="signaturePad" width="700" height="230" style="width:100%;height:230px;border:2px solid #111827;border-radius:14px;background:#fff;touch-action:none;"></canvas>
+              <div class="actions" style="margin-top:8px;">
+                <button class="button dark" type="button" id="clearSignature">Clear signature</button>
+              </div>
+            </div>
+
+            <div style="margin-top:20px;">
+              <button class="button red" type="submit" style="width:100%;justify-content:center;font-size:17px;">Confirm and complete job</button>
+            </div>
+          </form>
+
+          <p class="job-sub" style="margin-top:14px;">For your protection, the confirmation records the final amount, time, verification method and signature against this job.</p>
+        </div>
+      </div>
+
+      <script>
+        (function(){
+          const canvas = document.getElementById('signaturePad');
+          const ctx = canvas.getContext('2d');
+          const clearButton = document.getElementById('clearSignature');
+          const form = document.getElementById('customerConfirmForm');
+          const hidden = document.getElementById('signatureData');
+
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          let drawing = false;
+          let hasInk = false;
+
+          function point(event) {
+            const rect = canvas.getBoundingClientRect();
+            const source = event.touches && event.touches[0] ? event.touches[0] : event;
+            return {
+              x: (source.clientX - rect.left) * (canvas.width / rect.width),
+              y: (source.clientY - rect.top) * (canvas.height / rect.height)
+            };
+          }
+
+          function start(event) {
+            event.preventDefault();
+            drawing = true;
+            const p = point(event);
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+          }
+
+          function move(event) {
+            if (!drawing) return;
+            event.preventDefault();
+            const p = point(event);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            hasInk = true;
+          }
+
+          function stop(event) {
+            if (event) event.preventDefault();
+            drawing = false;
+          }
+
+          canvas.addEventListener('mousedown', start);
+          canvas.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', stop);
+          canvas.addEventListener('touchstart', start, { passive:false });
+          canvas.addEventListener('touchmove', move, { passive:false });
+          canvas.addEventListener('touchend', stop, { passive:false });
+
+          clearButton.addEventListener('click', function(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            hasInk = false;
+            hidden.value = '';
+          });
+
+          form.addEventListener('submit', function(event){
+            if (!hasInk) {
+              event.preventDefault();
+              alert('Please add the customer signature before confirming.');
+              return;
+            }
+            hidden.value = canvas.toDataURL('image/png');
+          });
+        })();
+      </script>
+    `;
+
+    res.send(technicianPortalShell('Customer confirmation', bodyHtml));
+  } catch (error) {
+    console.error('Customer confirmation page error:', error);
+    res.status(500).send(`Could not prepare customer confirmation: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const token = req.params.token;
+    const jobId = Number(req.params.id);
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+
+    const draft = readTechCloseDraftToken(req.body.close_draft_token);
+    if (!draft || Number(draft.jobId) !== jobId || Number(draft.techId) !== Number(tech.id)) {
+      return res.status(400).send('This customer confirmation has expired or is invalid. Please return to the job and start the close process again.');
+    }
+
+    if (req.body.customer_agreed !== 'true') {
+      return res.status(400).send('Customer agreement is required before the job can be completed.');
+    }
+
+    const signerName = String(req.body.customer_signer_name || '').trim();
+    if (!signerName) return res.status(400).send('Customer name is required.');
+
+    const signatureData = String(req.body.signature_data || '');
+    if (!signatureData.startsWith('data:image/png;base64,') || signatureData.length < 500) {
+      return res.status(400).send('Customer signature is required.');
+    }
+    if (signatureData.length > 500000) {
+      return res.status(400).send('Customer signature is too large. Please clear it and sign again.');
+    }
+
+    const code = String(req.body.verification_code || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).send('Please enter the 6-digit verification code sent to the customer.');
+    }
+
+    const codeRow = (await client.query(`
+      SELECT *
+      FROM job_customer_confirmation_codes
+      WHERE job_id = $1
+      FOR UPDATE
+    `, [jobId])).rows[0];
+
+    if (!codeRow) {
+      return res.status(400).send('No active customer verification code was found. Please start the close process again.');
+    }
+
+    if (new Date(codeRow.expires_at).getTime() < Date.now()) {
+      return res.status(400).send('The customer verification code has expired. Please return to the job and start the close process again.');
+    }
+
+    if (Number(codeRow.attempts || 0) >= 5) {
+      return res.status(400).send('Too many incorrect verification attempts. Please return to the job and request a new code.');
+    }
+
+    const suppliedHash = customerConfirmationCodeHash(jobId, code);
+    if (suppliedHash !== codeRow.code_hash) {
+      await client.query(`
+        UPDATE job_customer_confirmation_codes
+        SET attempts = COALESCE(attempts, 0) + 1
+        WHERE job_id = $1
+      `, [jobId]);
+      return res.status(400).send('The verification code is incorrect. Please check the SMS and try again.');
+    }
+
+    const oldJob = (await client.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+      FOR UPDATE
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!oldJob) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const agreementText =
+      `I confirm that the work and final amount of ${money(draft.final_value)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    await client.query('BEGIN');
+
+    const confirmation = (await client.query(`
+      INSERT INTO job_customer_confirmations (
+        job_id, technician_id, technician_name, customer_name, customer_phone,
+        agreed_net, agreed_vat, agreed_gross, agreement_text, signature_data,
+        verification_method, verification_phone, ip_address, user_agent, confirmed_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+      RETURNING id, confirmed_at
+    `, [
+      jobId,
+      tech.id,
+      tech.name,
+      signerName,
+      oldJob.customer_phone || '',
+      Number(draft.net_value || 0),
+      Number(draft.vat_amount || 0),
+      Number(draft.final_value || 0),
+      agreementText,
+      signatureData,
+      'SMS code + signature on technician device',
+      codeRow.sent_to,
+      clientIpAddress(req),
+      String(req.headers['user-agent'] || '').slice(0, 500)
+    ])).rows[0];
+
+    const techCloseValues = {
+      net_value: Number(draft.net_value || 0),
+      vat_amount: Number(draft.vat_amount || 0),
+      final_value: Number(draft.final_value || 0),
+      payment_method: draft.payment_method || '',
+      payment_method_1: draft.payment_method_1 || '',
+      payment_amount_1: draft.payment_amount_1,
+      payment_method_2: draft.payment_method_2 || '',
+      payment_amount_2: draft.payment_amount_2,
+      invoice_photos_confirmed: Boolean(draft.invoice_photos_confirmed),
+      card_is_amex: Boolean(draft.card_is_amex),
+      amex_id_provided: Boolean(draft.amex_id_provided),
+      customer_paid: Boolean(draft.customer_paid),
+      materials_used: draft.materials_used || '',
+      materials_cost: draft.materials_cost,
+      outcome: draft.outcome || '',
+      tech_notes: draft.tech_notes || '',
+      close_notes: draft.close_notes || '',
+      status: draft.status || 'fully_paid'
+    };
+
+    await client.query(`
       UPDATE jobs
       SET net_value = $1,
           vat_amount = $2,
@@ -12611,9 +13039,12 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
           closed_at = COALESCE(closed_at, NOW()),
           tech_updated_at = NOW(),
           tech_close_submitted_by = $19,
+          customer_price_confirmed = TRUE,
+          customer_price_confirmed_at = NOW(),
+          customer_price_confirmed_amount = $3,
+          customer_price_confirmed_by = $20,
           updated_at = NOW()
-      WHERE id = $20
-        AND (assigned_technician_id = $21 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($22)))
+      WHERE id = $21
     `, [
       techCloseValues.net_value,
       techCloseValues.vat_amount,
@@ -12634,14 +13065,13 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       techCloseValues.close_notes,
       techCloseValues.status,
       tech.name,
-      req.params.id,
-      tech.id,
-      tech.name
+      signerName,
+      jobId
     ]);
-    await logJobChanges(Number(req.params.id), oldJob, techCloseValues, `${tech.name} workspace`, "technician_close_submit");
-    await addJobEvidenceLink(Number(req.params.id), body, `${tech.name} workspace`, "technician_close_evidence_added");
 
-    await pool.query(`
+    await client.query(`DELETE FROM job_customer_confirmation_codes WHERE job_id = $1`, [jobId]);
+
+    await client.query(`
       UPDATE technicians
       SET status = CASE WHEN status = 'On job' THEN 'Available' ELSE status END,
           updated_by = $1,
@@ -12649,10 +13079,47 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       WHERE id = $2
     `, [`${tech.name} closed job`, tech.id]);
 
+    await client.query('COMMIT');
+
+    await logJobChanges(
+      jobId,
+      oldJob,
+      techCloseValues,
+      `${tech.name} workspace`,
+      "technician_close_submit"
+    );
+
+    await addJobAuditEntry(
+      jobId,
+      'customer_final_amount_confirmed',
+      'Customer confirmation',
+      '—',
+      `${signerName} confirmed ${money(techCloseValues.final_value)} by SMS code + signature`,
+      'Customer confirmation'
+    );
+
+    try {
+      const confirmationSms =
+        `24H Locksmiths confirmation: you confirmed the completed work and final amount of ` +
+        `${money(techCloseValues.final_value)} for ${compactPostcode(oldJob.postcode || '') || 'your job'}. ` +
+        `Confirmation reference ${confirmation.id}. Questions: ${smsOfficeTel()}`;
+
+      await sendYaySms(
+        codeRow.sent_to,
+        confirmationSms,
+        `${oldJob.job_number || jobNumber(oldJob.id)} - customer confirmation receipt`
+      );
+    } catch (smsReceiptError) {
+      console.error('Customer confirmation receipt SMS error:', smsReceiptError);
+    }
+
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
   } catch (error) {
-    console.error('Technician close submit error:', error);
-    res.status(500).send('Technician close submit error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('Technician customer-confirmed close error:', error);
+    res.status(500).send('Could not complete the job after customer confirmation. Check Render logs.');
+  } finally {
+    client.release();
   }
 });
 
