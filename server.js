@@ -1,4 +1,4 @@
-// YDP Customer final-price confirmation + signature (v91)
+// YDP Customer final-price confirmation + ID fallback (v92)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3111,6 +3111,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_amount NUMERIC(12,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_by TEXT;`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS job_customer_confirmation_codes (
       job_id INTEGER PRIMARY KEY,
@@ -3121,6 +3122,7 @@ async function initDb() {
       attempts INTEGER DEFAULT 0
     );
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS job_customer_confirmations (
       id SERIAL PRIMARY KEY,
@@ -3136,12 +3138,21 @@ async function initDb() {
       signature_data TEXT,
       verification_method TEXT,
       verification_phone TEXT,
+      verification_reason TEXT,
+      id_type TEXT,
+      id_last4 TEXT,
+      id_visually_checked BOOLEAN DEFAULT FALSE,
       ip_address TEXT,
       user_agent TEXT,
       confirmed_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
   await pool.query(`CREATE INDEX IF NOT EXISTS job_customer_confirmations_job_idx ON job_customer_confirmations (job_id);`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS verification_reason TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_type TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_last4 TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_visually_checked BOOLEAN DEFAULT FALSE;`);
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS imported_from TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_order_id TEXT;`);
@@ -11286,6 +11297,7 @@ function readTechCloseDraftToken(token) {
     const [encoded, signature] = raw.split(".");
     const expected = signValue(encoded);
     if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+
     const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     if (!payload || !payload.createdAt) return null;
     if (Date.now() - Number(payload.createdAt) > 1000 * 60 * 30) return null;
@@ -12586,8 +12598,21 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <p class="job-sub">The office will file photos, invoices and proof in Dropbox after the job. Please send any job photos/evidence to the office in the usual way.</p>
             </div>
             <br>
+            <div style="margin:16px 0;padding:14px;border:1px solid #dbe3ec;border-radius:14px;background:#f8fafc;">
+              <strong>Customer verification</strong>
+              <p class="job-sub" style="margin:6px 0 10px;">Use SMS verification whenever the customer has access to their phone. Use the fallback only when their phone is unavailable or cannot be used.</p>
+              <label style="display:block;margin:6px 0;">
+                <input type="radio" name="customer_verification_route" value="sms" checked>
+                Customer has their phone — send SMS verification code
+              </label>
+              <label style="display:block;margin:6px 0;">
+                <input type="radio" name="customer_verification_route" value="fallback">
+                Customer phone unavailable / no charge — use ID check + signature
+              </label>
+            </div>
+
             <button class="button red" type="submit">Continue to customer confirmation</button>
-            <p class="job-sub" style="margin-top:10px;">Next, hand the device to the customer. They will confirm the final amount, enter the SMS verification code sent to their phone, and sign.</p>
+            <p class="job-sub" style="margin-top:10px;">The next screen separates the technician step from the customer confirmation step.</p>
           </form>
           <script>
             function recalcTechCloseValues(){
@@ -12674,6 +12699,8 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
       ? body.status
       : 'fully_paid';
 
+    const verificationRoute = body.customer_verification_route === 'fallback' ? 'fallback' : 'sms';
+
     const draft = {
       jobId,
       techId: tech.id,
@@ -12696,12 +12723,83 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
       tech_notes: body.tech_notes || '',
       close_notes: body.close_notes || '',
       status: selectedStatus,
+      verification_route: verificationRoute,
       createdAt: Date.now()
     };
 
+    const draftToken = techCloseDraftToken(draft);
+
+    if (verificationRoute === 'fallback') {
+      const fallbackHtml = `
+        <div class="topbar">
+          <div class="brand"><span class="brand-badge">24H</span><span>Fallback verification</span></div>
+          <span class="pill">Technician step</span>
+        </div>
+
+        <div class="wrap">
+          <div class="card" style="max-width:760px;margin:0 auto;">
+            <h1>Customer phone unavailable</h1>
+            <p><strong>This is the fallback route.</strong> Use it only when the customer cannot receive or access the SMS code.</p>
+
+            <div style="padding:14px;border-radius:14px;background:#fff7ed;border:1px solid #fed7aa;margin:16px 0;">
+              <strong>Final amount: ${money(finalValue)}</strong><br>
+              <span class="job-sub">The amount is now locked for this confirmation.</span>
+            </div>
+
+            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close/customer-confirmation/fallback">
+              <input type="hidden" name="close_draft_token" value="${escapeHtml(draftToken)}">
+
+              <div class="field-grid">
+                <div>
+                  <label>Why SMS cannot be used</label>
+                  <select name="verification_reason" required>
+                    <option value="">Select reason</option>
+                    <option>Customer does not have phone with them</option>
+                    <option>Customer phone battery flat</option>
+                    <option>No mobile signal / SMS unavailable</option>
+                    <option>Customer cannot access SMS</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label>ID checked</label>
+                  <select name="id_type" required>
+                    <option value="">Select ID type</option>
+                    <option>Driving Licence</option>
+                    <option>Passport</option>
+                    <option>National identity card</option>
+                    <option>Other photo ID</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label>Last 4 characters of ID</label>
+                  <input name="id_last4" maxlength="4" minlength="2" placeholder="e.g. 1234" required autocomplete="off">
+                </div>
+
+                <div class="full">
+                  <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                    <input type="checkbox" name="id_visually_checked" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                    <span>I confirm I have physically seen the customer's photo ID and the person presenting it matches the customer in front of me.</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="actions" style="margin-top:18px;">
+                <button class="button red" type="submit">Continue — hand phone to customer</button>
+                <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">Cancel</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+      return res.send(technicianPortalShell('Fallback verification', fallbackHtml));
+    }
+
     const customerPhone = cleanSmsNumber(job.customer_phone);
     if (!customerPhone) {
-      return res.status(400).send('A customer mobile number is required for independent customer confirmation. Please ask the office to add/correct the customer mobile number before closing this job.');
+      return res.status(400).send('A customer mobile number is required for SMS verification. Please go back and choose the fallback route, or ask the office to correct the customer mobile number.');
     }
 
     const verificationCode = makeCustomerConfirmationCode();
@@ -12734,24 +12832,26 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
       );
     } catch (smsError) {
       console.error('Customer confirmation SMS error:', smsError);
-      return res.status(500).send('The customer verification code could not be sent. Please check the customer mobile number or contact the office.');
+      return res.status(500).send('The customer verification code could not be sent. Please go back and use the fallback route if the customer cannot receive SMS.');
     }
 
-    const draftToken = techCloseDraftToken(draft);
     const agreementText =
       `I confirm that the work and final amount of ${money(finalValue)} shown above have been explained to me and I am happy to proceed with payment.`;
 
     const bodyHtml = `
       <div class="topbar">
         <div class="brand"><span class="brand-badge">24H</span><span>Customer confirmation</span></div>
-        <span class="pill">Job ${escapeHtml(job.job_number || jobNumber(job.id))}</span>
+        <span class="pill">Customer step</span>
       </div>
 
       <div class="wrap">
         <div class="card" style="max-width:760px;margin:0 auto;">
-          <h1>Customer confirmation</h1>
-          <p style="font-size:17px;"><strong>Please hand this device to the customer.</strong></p>
-          <p class="job-sub">The technician cannot complete the job until the customer confirms the final amount below.</p>
+          <div style="padding:14px;border-radius:14px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:16px;text-align:center;">
+            <strong style="font-size:20px;">Please hand this device to the customer</strong>
+          </div>
+
+          <h1>Confirm completed work and final amount</h1>
+          <p class="job-sub">Please check the details below before signing.</p>
 
           <div style="padding:16px;border:2px solid #111827;border-radius:16px;margin:18px 0;background:#fff;">
             <div class="job-sub">Work</div>
@@ -12765,17 +12865,18 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
 
           <form id="customerConfirmForm" method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">
             <input type="hidden" name="close_draft_token" value="${escapeHtml(draftToken)}">
+            <input type="hidden" name="verification_method" value="sms">
             <input type="hidden" id="signatureData" name="signature_data" value="">
 
             <div class="field-grid">
               <div class="full">
-                <label>Customer name</label>
+                <label>Your name</label>
                 <input name="customer_signer_name" value="${escapeHtml(job.customer_name || '')}" placeholder="Customer name" required autocomplete="name">
               </div>
               <div class="full">
                 <label>Verification code</label>
                 <input name="verification_code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6-digit code" required>
-                <p class="job-sub">A 6-digit code has been sent to ${escapeHtml(maskMobileForCustomer(customerPhone))}. This confirms the customer has access to the mobile number held on the job.</p>
+                <p class="job-sub">A 6-digit code has been sent to ${escapeHtml(maskMobileForCustomer(customerPhone))}.</p>
               </div>
             </div>
 
@@ -12787,7 +12888,7 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
             </div>
 
             <div>
-              <label>Customer signature</label>
+              <label>Your signature</label>
               <p class="job-sub">Please sign in the box using your finger or mouse.</p>
               <canvas id="signaturePad" width="700" height="230" style="width:100%;height:230px;border:2px solid #111827;border-radius:14px;background:#fff;touch-action:none;"></canvas>
               <div class="actions" style="margin-top:8px;">
@@ -12799,8 +12900,6 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
               <button class="button red" type="submit" style="width:100%;justify-content:center;font-size:17px;">Confirm and complete job</button>
             </div>
           </form>
-
-          <p class="job-sub" style="margin-top:14px;">For your protection, the confirmation records the final amount, time, verification method and signature against this job.</p>
         </div>
       </div>
 
@@ -12866,7 +12965,7 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
           form.addEventListener('submit', function(event){
             if (!hasInk) {
               event.preventDefault();
-              alert('Please add the customer signature before confirming.');
+              alert('Please add your signature before confirming.');
               return;
             }
             hidden.value = canvas.toDataURL('image/png');
@@ -12879,6 +12978,199 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
   } catch (error) {
     console.error('Customer confirmation page error:', error);
     res.status(500).send(`Could not prepare customer confirmation: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/close/customer-confirmation/fallback', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const token = req.params.token;
+    const jobId = Number(req.params.id);
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+
+    const draft = readTechCloseDraftToken(req.body.close_draft_token);
+    if (!draft || Number(draft.jobId) !== jobId || Number(draft.techId) !== Number(tech.id) || draft.verification_route !== 'fallback') {
+      return res.status(400).send('This fallback confirmation has expired or is invalid. Please return to the job and start the close process again.');
+    }
+
+    const reason = String(req.body.verification_reason || '').trim();
+    const idType = String(req.body.id_type || '').trim();
+    const idLast4 = String(req.body.id_last4 || '').trim().replace(/\s+/g, '').slice(-4);
+    const idChecked = req.body.id_visually_checked === 'true';
+
+    if (!reason || !idType || idLast4.length < 2 || !idChecked) {
+      return res.status(400).send('Please complete the fallback verification details and confirm that the customer photo ID was physically checked.');
+    }
+
+    const job = (await pool.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const fallbackDraft = {
+      ...draft,
+      verification_reason: reason,
+      id_type: idType,
+      id_last4: idLast4,
+      id_visually_checked: true,
+      createdAt: Date.now()
+    };
+    const fallbackToken = techCloseDraftToken(fallbackDraft);
+
+    const agreementText =
+      `I confirm that the work and final amount of ${money(draft.final_value)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    const bodyHtml = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>Customer confirmation</span></div>
+        <span class="pill">Fallback verification</span>
+      </div>
+
+      <div class="wrap">
+        <div class="card" style="max-width:760px;margin:0 auto;">
+          <div style="padding:14px;border-radius:14px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:16px;text-align:center;">
+            <strong style="font-size:20px;">Please hand this device to the customer</strong>
+          </div>
+
+          <h1>Confirm completed work and final amount</h1>
+          <p class="job-sub">SMS verification is unavailable. Your signature will be recorded together with the technician's visual ID check.</p>
+
+          <div style="padding:16px;border:2px solid #111827;border-radius:16px;margin:18px 0;background:#fff;">
+            <div class="job-sub">Work</div>
+            <div style="font-size:18px;font-weight:800;">${escapeHtml(job.job_type || 'Locksmith services')}</div>
+            <div class="job-sub" style="margin-top:6px;">${escapeHtml(techJobAddress(job) || '')}</div>
+            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <div class="job-sub">Final amount</div>
+            <div style="font-size:34px;font-weight:900;">${money(draft.final_value)}</div>
+            <div class="job-sub">Includes VAT of ${money(draft.vat_amount)} · NET ${money(draft.net_value)}</div>
+          </div>
+
+          <form id="customerFallbackForm" method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">
+            <input type="hidden" name="close_draft_token" value="${escapeHtml(fallbackToken)}">
+            <input type="hidden" name="verification_method" value="fallback">
+            <input type="hidden" id="fallbackSignatureData" name="signature_data" value="">
+
+            <div class="field-grid">
+              <div class="full">
+                <label>Your name</label>
+                <input name="customer_signer_name" value="${escapeHtml(job.customer_name || '')}" placeholder="Customer name" required autocomplete="name">
+              </div>
+            </div>
+
+            <div style="padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe3ec;margin:16px 0;">
+              <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                <input type="checkbox" name="customer_agreed" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                <span>${escapeHtml(agreementText)}</span>
+              </label>
+            </div>
+
+            <div>
+              <label>Your signature</label>
+              <p class="job-sub">Please sign in the box using your finger or mouse.</p>
+              <canvas id="fallbackSignaturePad" width="700" height="230" style="width:100%;height:230px;border:2px solid #111827;border-radius:14px;background:#fff;touch-action:none;"></canvas>
+              <div class="actions" style="margin-top:8px;">
+                <button class="button dark" type="button" id="clearFallbackSignature">Clear signature</button>
+              </div>
+            </div>
+
+            <div style="margin-top:20px;">
+              <button class="button red" type="submit" style="width:100%;justify-content:center;font-size:17px;">Confirm and complete job</button>
+            </div>
+          </form>
+
+          <p class="job-sub" style="margin-top:14px;">Fallback verification is recorded separately so the office can see when SMS verification was not used.</p>
+        </div>
+      </div>
+
+      <script>
+        (function(){
+          const canvas = document.getElementById('fallbackSignaturePad');
+          const ctx = canvas.getContext('2d');
+          const clearButton = document.getElementById('clearFallbackSignature');
+          const form = document.getElementById('customerFallbackForm');
+          const hidden = document.getElementById('fallbackSignatureData');
+
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          let drawing = false;
+          let hasInk = false;
+
+          function point(event) {
+            const rect = canvas.getBoundingClientRect();
+            const source = event.touches && event.touches[0] ? event.touches[0] : event;
+            return {
+              x: (source.clientX - rect.left) * (canvas.width / rect.width),
+              y: (source.clientY - rect.top) * (canvas.height / rect.height)
+            };
+          }
+
+          function start(event) {
+            event.preventDefault();
+            drawing = true;
+            const p = point(event);
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+          }
+
+          function move(event) {
+            if (!drawing) return;
+            event.preventDefault();
+            const p = point(event);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            hasInk = true;
+          }
+
+          function stop(event) {
+            if (event) event.preventDefault();
+            drawing = false;
+          }
+
+          canvas.addEventListener('mousedown', start);
+          canvas.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', stop);
+          canvas.addEventListener('touchstart', start, { passive:false });
+          canvas.addEventListener('touchmove', move, { passive:false });
+          canvas.addEventListener('touchend', stop, { passive:false });
+
+          clearButton.addEventListener('click', function(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            hasInk = false;
+            hidden.value = '';
+          });
+
+          form.addEventListener('submit', function(event){
+            if (!hasInk) {
+              event.preventDefault();
+              alert('Please add your signature before confirming.');
+              return;
+            }
+            hidden.value = canvas.toDataURL('image/png');
+          });
+        })();
+      </script>
+    `;
+
+    res.send(technicianPortalShell('Customer fallback confirmation', bodyHtml));
+  } catch (error) {
+    console.error('Customer fallback confirmation error:', error);
+    res.status(500).send(`Could not prepare fallback customer confirmation: ${escapeHtml(error.message || String(error))}.`);
   }
 });
 
@@ -12915,38 +13207,62 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       return res.status(400).send('Customer signature is too large. Please clear it and sign again.');
     }
 
-    const code = String(req.body.verification_code || '').trim();
-    if (!/^\d{6}$/.test(code)) {
-      return res.status(400).send('Please enter the 6-digit verification code sent to the customer.');
-    }
+    const verificationMethod = req.body.verification_method === 'fallback' ? 'fallback' : 'sms';
+    let verificationPhone = '';
+    let verificationReason = '';
+    let idType = '';
+    let idLast4 = '';
+    let idVisuallyChecked = false;
 
-    const codeRow = (await client.query(`
-      SELECT *
-      FROM job_customer_confirmation_codes
-      WHERE job_id = $1
-      FOR UPDATE
-    `, [jobId])).rows[0];
+    if (verificationMethod === 'sms') {
+      const code = String(req.body.verification_code || '').trim();
+      if (!/^\d{6}$/.test(code)) {
+        return res.status(400).send('Please enter the 6-digit verification code sent to the customer.');
+      }
 
-    if (!codeRow) {
-      return res.status(400).send('No active customer verification code was found. Please start the close process again.');
-    }
-
-    if (new Date(codeRow.expires_at).getTime() < Date.now()) {
-      return res.status(400).send('The customer verification code has expired. Please return to the job and start the close process again.');
-    }
-
-    if (Number(codeRow.attempts || 0) >= 5) {
-      return res.status(400).send('Too many incorrect verification attempts. Please return to the job and request a new code.');
-    }
-
-    const suppliedHash = customerConfirmationCodeHash(jobId, code);
-    if (suppliedHash !== codeRow.code_hash) {
-      await client.query(`
-        UPDATE job_customer_confirmation_codes
-        SET attempts = COALESCE(attempts, 0) + 1
+      const codeRow = (await client.query(`
+        SELECT *
+        FROM job_customer_confirmation_codes
         WHERE job_id = $1
-      `, [jobId]);
-      return res.status(400).send('The verification code is incorrect. Please check the SMS and try again.');
+        FOR UPDATE
+      `, [jobId])).rows[0];
+
+      if (!codeRow) {
+        return res.status(400).send('No active customer verification code was found. Please start the close process again.');
+      }
+
+      if (new Date(codeRow.expires_at).getTime() < Date.now()) {
+        return res.status(400).send('The customer verification code has expired. Please return to the job and start the close process again.');
+      }
+
+      if (Number(codeRow.attempts || 0) >= 5) {
+        return res.status(400).send('Too many incorrect verification attempts. Please return to the job and request a new code.');
+      }
+
+      const suppliedHash = customerConfirmationCodeHash(jobId, code);
+      if (suppliedHash !== codeRow.code_hash) {
+        await client.query(`
+          UPDATE job_customer_confirmation_codes
+          SET attempts = COALESCE(attempts, 0) + 1
+          WHERE job_id = $1
+        `, [jobId]);
+        return res.status(400).send('The verification code is incorrect. Please check the SMS and try again.');
+      }
+
+      verificationPhone = codeRow.sent_to || '';
+    } else {
+      if (draft.verification_route !== 'fallback') {
+        return res.status(400).send('Fallback verification was not prepared correctly. Please return to the job and start again.');
+      }
+
+      verificationReason = String(draft.verification_reason || '').trim();
+      idType = String(draft.id_type || '').trim();
+      idLast4 = String(draft.id_last4 || '').trim().slice(-4);
+      idVisuallyChecked = draft.id_visually_checked === true;
+
+      if (!verificationReason || !idType || idLast4.length < 2 || !idVisuallyChecked) {
+        return res.status(400).send('Fallback ID verification details are incomplete. Please return to the job and start again.');
+      }
     }
 
     const oldJob = (await client.query(`
@@ -12969,13 +13285,18 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
 
     await client.query('BEGIN');
 
+    const verificationLabel = verificationMethod === 'sms'
+      ? 'SMS code + signature on technician device'
+      : 'Fallback: signature on technician device + photo ID visually checked';
+
     const confirmation = (await client.query(`
       INSERT INTO job_customer_confirmations (
         job_id, technician_id, technician_name, customer_name, customer_phone,
         agreed_net, agreed_vat, agreed_gross, agreement_text, signature_data,
-        verification_method, verification_phone, ip_address, user_agent, confirmed_at
+        verification_method, verification_phone, verification_reason, id_type,
+        id_last4, id_visually_checked, ip_address, user_agent, confirmed_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
       RETURNING id, confirmed_at
     `, [
       jobId,
@@ -12988,8 +13309,12 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       Number(draft.final_value || 0),
       agreementText,
       signatureData,
-      'SMS code + signature on technician device',
-      codeRow.sent_to,
+      verificationLabel,
+      verificationPhone,
+      verificationReason,
+      idType,
+      idLast4,
+      idVisuallyChecked,
       clientIpAddress(req),
       String(req.headers['user-agent'] || '').slice(0, 500)
     ])).rows[0];
@@ -13089,28 +13414,35 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       "technician_close_submit"
     );
 
+    const auditMessage = verificationMethod === 'sms'
+      ? `${signerName} confirmed ${money(techCloseValues.final_value)} by SMS code + signature`
+      : `${signerName} confirmed ${money(techCloseValues.final_value)} by fallback signature; ${idType} ending ${idLast4} visually checked by ${tech.name}`;
+
     await addJobAuditEntry(
       jobId,
       'customer_final_amount_confirmed',
       'Customer confirmation',
       '—',
-      `${signerName} confirmed ${money(techCloseValues.final_value)} by SMS code + signature`,
+      auditMessage,
       'Customer confirmation'
     );
 
-    try {
-      const confirmationSms =
-        `24H Locksmiths confirmation: you confirmed the completed work and final amount of ` +
-        `${money(techCloseValues.final_value)} for ${compactPostcode(oldJob.postcode || '') || 'your job'}. ` +
-        `Confirmation reference ${confirmation.id}. Questions: ${smsOfficeTel()}`;
+    const receiptTo = verificationPhone || cleanSmsNumber(oldJob.customer_phone);
+    if (receiptTo) {
+      try {
+        const confirmationSms =
+          `24H Locksmiths confirmation: you confirmed the completed work and final amount of ` +
+          `${money(techCloseValues.final_value)} for ${compactPostcode(oldJob.postcode || '') || 'your job'}. ` +
+          `Confirmation reference ${confirmation.id}. Questions: ${smsOfficeTel()}`;
 
-      await sendYaySms(
-        codeRow.sent_to,
-        confirmationSms,
-        `${oldJob.job_number || jobNumber(oldJob.id)} - customer confirmation receipt`
-      );
-    } catch (smsReceiptError) {
-      console.error('Customer confirmation receipt SMS error:', smsReceiptError);
+        await sendYaySms(
+          receiptTo,
+          confirmationSms,
+          `${oldJob.job_number || jobNumber(oldJob.id)} - customer confirmation receipt`
+        );
+      } catch (smsReceiptError) {
+        console.error('Customer confirmation receipt SMS error:', smsReceiptError);
+      }
     }
 
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
