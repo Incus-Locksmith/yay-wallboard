@@ -1,4 +1,4 @@
-// YDP Dispatch Board KPI period selector + technician Stripe links restored (v89)
+// YDP Technician job invoicing + Stripe links (v90)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -2909,6 +2909,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_phone TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by_technician_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS linked_job_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_source TEXT;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_linked_job_idx ON invoices (linked_job_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_created_by_tech_idx ON invoices (created_by_technician_id);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -11224,6 +11230,92 @@ function renderTechnicianStripeLinks(rows = [], token, jobId) {
   `;
 }
 
+
+function technicianInvoiceCompanyForJob(job) {
+  const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
+  if (job.account_job || job.account_template_id) return "locksmiths";
+  if (payment.includes("card")) return "online";
+  if (payment.includes("bank") || payment.includes("bacs")) return "locksmiths";
+  return "online";
+}
+
+function technicianInvoicePaymentForJob(job) {
+  const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
+  if (job.account_job || job.account_template_id) return "Bank transfer";
+  if (payment.includes("card")) return "Card";
+  if (payment.includes("bank") || payment.includes("bacs")) return "Bank transfer";
+  return "Cash";
+}
+
+function technicianInvoiceNetValue(job) {
+  const net = Number(job.net_value || 0);
+  if (Number.isFinite(net) && net > 0) return Math.round(net * 100) / 100;
+
+  const gross = Number(job.final_value || 0);
+  if (Number.isFinite(gross) && gross > 0) return Math.round((gross / 1.2) * 100) / 100;
+
+  return null;
+}
+
+function technicianInvoiceDescription(job) {
+  const bits = [];
+  if (job.job_type) bits.push(String(job.job_type).trim());
+  if (job.job_description) bits.push(String(job.job_description).trim());
+  return bits.filter(Boolean).join(" — ").slice(0, 240) || "Locksmith services";
+}
+
+function technicianInvoiceNumber(job) {
+  return String(job.job_number || `JOB-${job.id}`);
+}
+
+async function technicianJobForInvoice(token, jobId) {
+  const tech = await getTechnicianByToken(token);
+  if (!tech) return { tech: null, job: null };
+
+  const result = await pool.query(`
+    SELECT j.*
+    FROM jobs j
+    WHERE j.id = $1
+      AND (
+        j.assigned_technician_id = $2
+        OR j.assigned_technician_id IN (
+          SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+        )
+      )
+  `, [jobId, tech.id, tech.name]);
+
+  return { tech, job: result.rows[0] || null };
+}
+
+async function technicianInvoiceAddressForJob(job) {
+  if (job.account_template_id) {
+    const templateResult = await pool.query(`
+      SELECT id, template_name, customer_name, customer_address, customer_postcode
+      FROM invoice_templates
+      WHERE id = $1 AND active = TRUE
+    `, [job.account_template_id]);
+
+    const template = templateResult.rows[0];
+    if (template) {
+      return {
+        template,
+        customerName: template.customer_name || job.customer_name || "",
+        customerAddress: template.customer_address || "",
+        customerPostcode: compactPostcode(template.customer_postcode || ""),
+        siteSameAsInvoice: false
+      };
+    }
+  }
+
+  return {
+    template: null,
+    customerName: job.customer_name || "",
+    customerAddress: techJobAddress(job),
+    customerPostcode: compactPostcode(job.postcode || ""),
+    siteSameAsInvoice: true
+  };
+}
+
 function techJobAddress(job) {
   return [job.address_line_1, job.address_line_2, job.address_line_3, job.town, job.county, job.postcode]
     .filter(Boolean)
@@ -11612,6 +11704,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
           <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/onsite">
             <button class="button red" type="submit">On site</button>
           </form>
+          <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/invoice/new">Create invoice</a>
           <a class="button red" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
         </div>
       </div>
@@ -11653,6 +11746,501 @@ app.get('/tech-workspace/:token', async (req, res) => {
   }
 });
 
+
+
+app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.send(technicianLoginPage(token, tech));
+    }
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const existingInvoice = (await pool.query(`
+      SELECT id, invoice_number, total, invoice_stage, created_at
+      FROM invoices
+      WHERE linked_job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `, [jobId])).rows[0];
+
+    if (existingInvoice) {
+      const body = `
+        <div class="topbar">
+          <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+          <div class="live">Invoice already created</div>
+        </div>
+        <div class="wrap">
+          ${technicianWorkspaceTabs(token, 'jobs')}
+          <div class="card">
+            <h1>Invoice already exists</h1>
+            <p>An invoice is already linked to <strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong>.</p>
+            <p><strong>Invoice:</strong> ${escapeHtml(existingInvoice.invoice_number)}<br>
+            <strong>Total:</strong> ${money(existingInvoice.total)}<br>
+            <strong>Stage:</strong> ${escapeHtml(existingInvoice.invoice_stage || 'Draft only')}</p>
+            <div class="actions">
+              <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/${existingInvoice.id}/pdf" target="_blank">Open invoice PDF</a>
+              <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Back to job</a>
+            </div>
+          </div>
+        </div>
+      `;
+      return res.send(technicianPortalShell('Invoice already exists', body));
+    }
+
+    const invoiceAddress = await technicianInvoiceAddressForJob(job);
+    const defaultCompany = technicianInvoiceCompanyForJob(job);
+    const defaultPayment = technicianInvoicePaymentForJob(job);
+    const defaultNet = technicianInvoiceNetValue(job);
+    const invoiceDate = new Date().toLocaleDateString('en-GB', {
+      timeZone: 'Europe/London',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    const templateNotice = invoiceAddress.template
+      ? `<div style="padding:12px;border-radius:12px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:14px;">
+           <strong>Account invoice template:</strong> ${escapeHtml(invoiceAddress.template.template_name)}<br>
+           <span class="job-sub">The invoice address below has been taken from the account template saved on the job. The job address remains the site address.</span>
+         </div>`
+      : `<div style="padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #dbe3ec;margin-bottom:14px;">
+           <strong>Private / normal customer invoice</strong><br>
+           <span class="job-sub">The customer and site address have been taken directly from the job.</span>
+         </div>`;
+
+    const cashNotice = defaultPayment === 'Cash'
+      ? `<div style="padding:12px;border-radius:12px;background:#fff7ed;border:1px solid #fed7aa;margin-bottom:14px;">
+           <strong>Cash payment:</strong> cash is valid for either company, so please confirm the company before creating the invoice.
+         </div>`
+      : '';
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">Create job invoice</div>
+      </div>
+
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <h1>Create invoice</h1>
+        <p class="job-sub">Job ${escapeHtml(job.job_number || jobNumber(job.id))} · ${escapeHtml(job.postcode || '')}</p>
+
+        ${templateNotice}
+        ${cashNotice}
+
+        <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/create" onsubmit="return confirm('Create this invoice now?');">
+          <div class="card">
+            <h2>Invoice details picked up from the job</h2>
+            <div class="field-grid">
+              <div><label>Invoice / job number</label><input value="${escapeHtml(technicianInvoiceNumber(job))}" readonly></div>
+              <div><label>Invoice date</label><input value="${escapeHtml(invoiceDate)}" readonly></div>
+              <div><label>Locksmith</label><input value="${escapeHtml(tech.name)}" readonly></div>
+              <div><label>Customer</label><input value="${escapeHtml(invoiceAddress.customerName)}" readonly></div>
+              <div class="full"><label>Invoice address</label><textarea readonly>${escapeHtml(invoiceAddress.customerAddress)}</textarea></div>
+              <div><label>Invoice postcode</label><input value="${escapeHtml(invoiceAddress.customerPostcode)}" readonly></div>
+              <div class="full"><label>Site address</label><textarea readonly>${escapeHtml(techJobAddress(job))}</textarea></div>
+              <div><label>Site postcode</label><input value="${escapeHtml(compactPostcode(job.postcode || ''))}" readonly></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Company and payment</h2>
+            <div class="field-grid">
+              <div>
+                <label>Invoice company</label>
+                <select name="company_key" required>
+                  <option value="online" ${defaultCompany === 'online' ? 'selected' : ''}>24H Online Services Ltd</option>
+                  <option value="locksmiths" ${defaultCompany === 'locksmiths' ? 'selected' : ''}>24H Locksmiths Ltd</option>
+                </select>
+              </div>
+              <div>
+                <label>Payment method</label>
+                <select name="payment_method" required>
+                  <option value="Card" ${defaultPayment === 'Card' ? 'selected' : ''}>Card</option>
+                  <option value="Bank transfer" ${defaultPayment === 'Bank transfer' ? 'selected' : ''}>Bank transfer</option>
+                  <option value="Cash" ${defaultPayment === 'Cash' ? 'selected' : ''}>Cash</option>
+                </select>
+              </div>
+              <div>
+                <label>Paid status</label>
+                <select name="paid_status">
+                  <option ${job.customer_paid ? '' : 'selected'}>Unpaid</option>
+                  <option ${job.customer_paid ? 'selected' : ''}>Paid with thanks</option>
+                </select>
+              </div>
+            </div>
+            <p class="job-sub" style="margin-top:10px;">
+              Card invoices use 24H Online Services Ltd. Bank transfer/account invoices use 24H Locksmiths Ltd. Cash can use either, so confirm the company above.
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>Invoice line</h2>
+            <div class="field-grid">
+              <div class="full"><label>Description</label><input name="line1_description" value="${escapeHtml(technicianInvoiceDescription(job))}" required></div>
+              <div><label>Qty</label><input name="line1_qty" value="1" inputmode="numeric" required></div>
+              <div><label>Net unit price</label><input name="line1_unit_price" inputmode="decimal" value="${defaultNet !== null ? defaultNet.toFixed(2) : ''}" placeholder="Enter net amount" required></div>
+              <div class="full"><label>Optional second line</label><input name="line2_description" placeholder="Additional labour / parts / other"></div>
+              <div><label>Qty</label><input name="line2_qty" inputmode="numeric" placeholder="1"></div>
+              <div><label>Net unit price</label><input name="line2_unit_price" inputmode="decimal" placeholder="0.00"></div>
+              <div class="full"><label>Notes</label><textarea name="notes">6 months warranty on parts fitted</textarea></div>
+            </div>
+            <p class="job-sub" style="margin-top:10px;">VAT is added automatically at 20%. The first line has been prefilled from the job and can be adjusted before creation.</p>
+          </div>
+
+          <div class="actions">
+            <button class="button green" type="submit">Create invoice</button>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Cancel</a>
+          </div>
+        </form>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Create invoice', body));
+  } catch (error) {
+    console.error('Technician job invoice page error:', error);
+    res.status(500).send('Could not prepare technician invoice. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/invoice/create', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const duplicate = (await pool.query(`
+      SELECT id, invoice_number
+      FROM invoices
+      WHERE linked_job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `, [jobId])).rows[0];
+
+    if (duplicate) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}/job/${jobId}/invoice/${duplicate.id}/pdf`);
+    }
+
+    const companyKey = String(req.body.company_key || '').trim();
+    const paymentMethod = String(req.body.payment_method || '').trim();
+
+    if (!companies[companyKey]) return res.status(400).send('Invalid company selected.');
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(`${escapeHtml(paymentRuleMessage(companyKey))} Please go back and correct the company/payment combination.`);
+    }
+
+    const invoiceAddress = await technicianInvoiceAddressForJob(job);
+
+    const lineItems = [];
+    for (let i = 1; i <= 2; i += 1) {
+      const description = String(req.body[`line${i}_description`] || '').trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = parseMoneyInput(req.body[`line${i}_unit_price`]);
+      if (description && qty > 0 && unitPrice !== null) {
+        lineItems.push({ description, qty, unitPrice });
+      }
+    }
+    if (!lineItems.length) return res.status(400).send('At least one invoice line is required.');
+
+    const subtotal = lineItems.reduce((sum, item) => sum + (item.qty * item.unitPrice), 0);
+    const vatAmount = subtotal * 0.20;
+    const total = subtotal + vatAmount;
+
+    const invoiceDate = new Date().toLocaleDateString('en-GB', {
+      timeZone: 'Europe/London',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    const createdBy = `${tech.name} workspace`;
+    const siteAddress = techJobAddress(job);
+    const sitePostcode = compactPostcode(job.postcode || '');
+
+    const insert = await pool.query(`
+      INSERT INTO invoices (
+        invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
+        stage_updated_by, stage_updated_at, customer_name, customer_address,
+        customer_postcode, customer_phone, site_same_as_invoice, site_address, site_postcode,
+        customer_email, invoice_date, locksmith_name, paid_status, line_items,
+        subtotal, vat_amount, total, notes, created_by_technician_id, linked_job_id,
+        invoice_source, created_at, updated_at
+      )
+      VALUES (
+        $1,$2,$3,$4,'Draft only',
+        $4,NOW(),$5,$6,
+        $7,$8,$9,$10,$11,
+        $12,$13,$14,$15,$16,
+        $17,$18,$19,$20,$21,$22,
+        'technician_job',NOW(),NOW()
+      )
+      RETURNING id, invoice_number, total
+    `, [
+      technicianInvoiceNumber(job),
+      companyKey,
+      paymentMethod,
+      createdBy,
+      invoiceAddress.customerName,
+      invoiceAddress.customerAddress,
+      invoiceAddress.customerPostcode,
+      job.customer_phone || '',
+      invoiceAddress.siteSameAsInvoice,
+      siteAddress,
+      sitePostcode,
+      job.customer_email || '',
+      invoiceDate,
+      tech.name,
+      req.body.paid_status || (job.customer_paid ? 'Paid with thanks' : 'Unpaid'),
+      JSON.stringify(lineItems),
+      subtotal.toFixed(2),
+      vatAmount.toFixed(2),
+      total.toFixed(2),
+      String(req.body.notes || '').trim(),
+      tech.id,
+      jobId
+    ]);
+
+    const invoice = insert.rows[0];
+
+    await addJobAuditEntry(
+      jobId,
+      'technician_invoice_created',
+      'Invoice',
+      '—',
+      `${invoice.invoice_number} · ${money(invoice.total)} · ${companyKey}`,
+      createdBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/job/${jobId}/invoice/${invoice.id}`);
+  } catch (error) {
+    console.error('Technician job invoice create error:', error);
+    res.status(500).send(`Could not create technician invoice: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.get('/tech-workspace/:token/job/:id/invoice/:invoiceId', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+  const invoiceId = Number(req.params.invoiceId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const invoice = (await pool.query(`
+      SELECT *
+      FROM invoices
+      WHERE id = $1 AND linked_job_id = $2
+    `, [invoiceId, jobId])).rows[0];
+
+    if (!invoice) return res.status(404).send('Invoice not found for this job.');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">Invoice created</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <div class="card">
+          <h1>Invoice created</h1>
+          <p><strong>${escapeHtml(invoice.invoice_number)}</strong> is now linked to this job.</p>
+          <p>
+            Customer: ${escapeHtml(invoice.customer_name || '')}<br>
+            Total inc VAT: <strong>${money(invoice.total)}</strong><br>
+            Company: ${escapeHtml((companies[invoice.company_key] || {}).name || invoice.company_key)}<br>
+            Payment: ${escapeHtml(invoice.payment_method || '')}<br>
+            Stage: ${escapeHtml(invoice.invoice_stage || 'Draft only')}
+          </p>
+          <div class="actions">
+            <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/${invoiceId}/pdf" target="_blank">Open invoice PDF</a>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Back to job</a>
+          </div>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Invoice created', body));
+  } catch (error) {
+    console.error('Technician invoice view error:', error);
+    res.status(500).send('Could not open technician invoice. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/job/:id/invoice/:invoiceId/pdf', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+  const invoiceId = Number(req.params.invoiceId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const invoice = (await pool.query(`
+      SELECT *
+      FROM invoices
+      WHERE id = $1 AND linked_job_id = $2
+    `, [invoiceId, jobId])).rows[0];
+
+    if (!invoice) return res.status(404).send('Invoice not found for this job.');
+
+    const company = companies[invoice.company_key] || companies.online;
+    const lineItems = Array.isArray(invoice.line_items)
+      ? invoice.line_items
+      : JSON.parse(invoice.line_items || '[]');
+
+    const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
+    const siteAddress = siteSameAsInvoice ? invoice.customer_address : invoice.site_address;
+    const sitePostcode = siteSameAsInvoice ? invoice.customer_postcode : invoice.site_postcode;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="invoice-${invoice.invoice_number}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+
+    const logoPath = path.join(__dirname, company.logo);
+    try {
+      doc.image(logoPath, 50, 22, { width: 160 });
+    } catch (error) {
+      console.error('Logo load error:', error);
+      doc.fontSize(20).font('Helvetica-Bold').text(company.displayName, 50, 48);
+    }
+
+    doc.fontSize(9).font('Helvetica')
+      .text(company.address1, 50, 102)
+      .text(company.address2, 50, 115)
+      .text(company.postcode, 50, 128)
+      .text(`Tel: ${company.tel}`, 50, 141);
+
+    doc.fontSize(20).font('Helvetica-Bold').text('INVOICE', 390, 55);
+    doc.fontSize(10).font('Helvetica')
+      .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
+      .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120);
+
+    doc.moveTo(50, 165).lineTo(545, 165).stroke();
+
+    doc.roundedRect(50, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Invoice Address', 65, 197);
+    doc.font('Helvetica').fontSize(9.5)
+      .text(pdfText(invoice.customer_name), 65, 217, { width: 190 })
+      .text(pdfText(invoice.customer_address), 65, 233, { width: 190, height: 40 })
+      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, { width: 190 });
+
+    doc.roundedRect(305, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Site Address', 320, 197);
+    doc.font('Helvetica').fontSize(9.5)
+      .text(siteSameAsInvoice ? 'Same as invoice address' : pdfText(siteAddress), 320, 217, { width: 190, height: 56 })
+      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, { width: 190 });
+
+    doc.roundedRect(50, 310, 495, 52, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Invoice Details', 65, 322);
+    doc.font('Helvetica').fontSize(10)
+      .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 250, 342);
+
+    const tableTop = 390;
+    doc.font('Helvetica-Bold').fontSize(10);
+    doc.text('Qty', 55, tableTop);
+    doc.text('Description', 105, tableTop);
+    doc.text('Unit Price', 400, tableTop);
+    doc.text('Total', 480, tableTop);
+    doc.moveTo(50, tableTop + 16).lineTo(545, tableTop + 16).stroke();
+
+    let y = tableTop + 32;
+    doc.font('Helvetica').fontSize(10);
+    lineItems.forEach(item => {
+      const description = pdfText(item.description);
+      const lineTotal = Number(item.qty || 0) * Number(item.unitPrice || 0);
+      doc.text(String(item.qty), 60, y);
+      doc.text(description, 105, y, { width: 255 });
+      doc.text(money(item.unitPrice), 400, y);
+      doc.text(money(lineTotal), 480, y);
+      const extraHeight = description.length > 55 ? 14 : 0;
+      y += 22 + extraHeight;
+    });
+
+    doc.moveTo(50, y + 4).lineTo(545, y + 4).stroke();
+    const totalsY = y + 18;
+    doc.font('Helvetica').fontSize(10);
+    doc.text('Subtotal', 380, totalsY);
+    doc.text(money(invoice.subtotal), 480, totalsY);
+    doc.text('VAT', 380, totalsY + 18);
+    doc.text(money(invoice.vat_amount), 480, totalsY + 18);
+    doc.font('Helvetica-Bold');
+    doc.text('TOTAL', 380, totalsY + 38);
+    doc.text(money(invoice.total), 480, totalsY + 38);
+
+    const paymentBoxY = totalsY + 78;
+    doc.roundedRect(50, paymentBoxY, 260, 105, 8).stroke();
+    doc.font('Helvetica-Bold').fontSize(10).text('Payment Details', 70, paymentBoxY + 15);
+
+    if (invoice.payment_method === 'Bank transfer') {
+      doc.font('Helvetica').fontSize(10)
+        .text('Please pay via BACS transfer to:', 70, paymentBoxY + 34);
+      doc.font('Helvetica-Bold').text(company.name, 70, paymentBoxY + 55, { width: 220 });
+      doc.font('Helvetica')
+        .text(`Sort code: ${company.sortCode}`, 70, paymentBoxY + 73)
+        .text(`Account: ${company.account}`, 70, paymentBoxY + 88);
+    } else if (invoice.payment_method === 'Card') {
+      doc.font('Helvetica').fontSize(10)
+        .text('Payment method: Card', 70, paymentBoxY + 34)
+        .text('Please use the card payment link provided separately.', 70, paymentBoxY + 55, { width: 210 });
+    } else {
+      doc.font('Helvetica').fontSize(10)
+        .text('Payment method: Cash', 70, paymentBoxY + 34)
+        .text('Cash payment to be collected/confirmed by the office.', 70, paymentBoxY + 55, { width: 210 });
+    }
+
+    doc.roundedRect(330, paymentBoxY, 215, 105, 8).stroke();
+    doc.font('Helvetica-Bold').fontSize(10).text('Notes', 350, paymentBoxY + 15);
+    doc.font('Helvetica').fontSize(9.5).text(
+      pdfText(invoice.notes || '6 months warranty on parts fitted'),
+      350,
+      paymentBoxY + 35,
+      { width: 175, height: 55 }
+    );
+
+    doc.font('Helvetica-Bold').fontSize(10).text(company.name, 50, 718, { align: 'center', width: 495 });
+    doc.font('Helvetica').fontSize(9)
+      .text(company.footer, 50, 733, { align: 'center', width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, { align: 'center', width: 495 });
+    doc.moveTo(50, 768).lineTo(545, 768).stroke();
+    doc.fontSize(9).font('Helvetica-Oblique').text('Thank you for using our services', 50, 780, {
+      align: 'center',
+      width: 495
+    });
+
+    doc.end();
+  } catch (error) {
+    console.error('Technician invoice PDF error:', error);
+    res.status(500).send('Could not generate technician invoice PDF. Check Render logs.');
+  }
+});
 
 app.post('/tech-workspace/:token/job/:id/stripe-payment-links', async (req, res) => {
   const token = req.params.token;
