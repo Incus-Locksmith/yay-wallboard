@@ -6,7 +6,6 @@ const path = require("path");
 const crypto = require("crypto");
 
 const app = express();
-app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -1374,142 +1373,6 @@ function renderSmsHistory(rows = []) {
   `;
 }
 
-
-function stripeSecretKey() {
-  return String(process.env.STRIPE_SECRET_KEY || "").trim();
-}
-
-function stripeModeLabel() {
-  const configured = String(process.env.STRIPE_MODE || "").trim().toLowerCase();
-  if (configured) return configured;
-  const key = stripeSecretKey();
-  if (key.startsWith("sk_live_")) return "live";
-  if (key.startsWith("sk_test_")) return "test";
-  return "not configured";
-}
-
-function stripeConfigured() {
-  return stripeSecretKey().startsWith("sk_live_") || stripeSecretKey().startsWith("sk_test_");
-}
-
-function renderStripeConfigNotice() {
-  if (stripeConfigured()) {
-    return `<p class="muted-note">Stripe is connected in <strong>${escapeHtml(stripeModeLabel())}</strong> mode. Links are created as Stripe-hosted checkout payment links.</p>`;
-  }
-  return `
-    <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45;">
-      <strong>Stripe is not connected yet.</strong><br>
-      Add STRIPE_SECRET_KEY in Render. Use sk_test_ first for testing, or sk_live_ for live payments.
-    </div>
-  `;
-}
-
-function stripeAmountToPence(value) {
-  const amount = Number(String(value || "").replace(/[^0-9.]/g, ""));
-  if (!Number.isFinite(amount) || amount <= 0) return 0;
-  return Math.round(amount * 100);
-}
-
-function absoluteAppUrl(req, pathValue) {
-  const envUrl = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
-  if (envUrl) return `${envUrl}${pathValue}`;
-  const proto = req.protocol || "https";
-  const host = req.get("host");
-  return `${proto}://${host}${pathValue}`;
-}
-
-function stripePaymentSmsMessage(job, linkRow) {
-  const ref = job.job_number || (job.old_order_id ? `OLD-${job.old_order_id}` : jobNumber(job.id));
-  const name = job.customer_name || "there";
-  const amountText = linkRow && linkRow.amount ? ` for ${money(linkRow.amount)}` : "";
-  return `Hi ${name}, please use this secure payment link${amountText} for your locksmith job ${ref}: ${linkRow.stripe_payment_link_url}. 24H Locksmiths: ${smsOfficeTel()}. Please do not reply to this SMS.`;
-}
-
-function renderStripePaymentLinks(rows = [], job = {}) {
-  if (!rows.length) return `<p class="muted-note">No Stripe payment links created for this job yet.</p>`;
-  return `
-    <div class="activity-list">
-      ${rows.map(row => {
-        const link = row.stripe_payment_link_url || "";
-        const smsDisabled = !job.customer_phone || !smsProviderConfigured() ? "disabled" : "";
-        return `
-          <div class="activity-item">
-            <span class="activity-dot"></span>
-            <div>
-              <div class="activity-label">Stripe link · ${escapeHtml(row.status || "created")} · ${money(row.amount || 0)}</div>
-              <div class="activity-value">
-                ${escapeHtml(row.reason || "Payment request")}<br>
-                <span class="muted">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")}</span>
-                ${row.sms_sent_at ? `<br><span class="muted">SMS sent ${escapeHtml(formatDateTime(row.sms_sent_at))} by ${escapeHtml(row.sms_sent_by || "Unknown")}</span>` : ""}
-                <div class="page-actions" style="margin-top:10px; justify-content:flex-start;">
-                  <a class="action-button dark" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Open link</a>
-                  <button class="action-button" type="button" onclick="copyText('${escapeHtml(link)}')">Copy link</button>
-                  <form method="POST" action="/jobs/${job.id}/stripe-payment-links/${row.id}/send-sms" onsubmit="return confirm('Send this Stripe payment link by SMS?');" style="display:inline;">
-                    <button type="submit" ${smsDisabled}>Send SMS</button>
-                  </form>
-                </div>
-                ${!job.customer_phone ? `<br><span class="muted">Add a customer phone number before sending by SMS.</span>` : ""}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
-async function createStripeCheckoutPaymentLink(req, job, amountPence, reason) {
-  if (!stripeConfigured()) throw new Error("STRIPE_SECRET_KEY is missing or invalid.");
-  const key = stripeSecretKey();
-  const ref = job.job_number || (job.old_order_id ? `OLD-${job.old_order_id}` : jobNumber(job.id));
-  const postcode = compactPostcode(job.postcode || "");
-  const amountPounds = (amountPence / 100).toFixed(2);
-  const description = reason || `Payment for locksmith job ${ref}${postcode ? ` (${postcode})` : ""}`;
-  const body = new URLSearchParams();
-  body.append("mode", "payment");
-  body.append("success_url", absoluteAppUrl(req, `/jobs/${job.id}/edit?stripe=success`));
-  body.append("cancel_url", absoluteAppUrl(req, `/jobs/${job.id}/edit?stripe=cancelled`));
-  body.append("client_reference_id", ref);
-  body.append("payment_method_types[0]", "card");
-  body.append("line_items[0][quantity]", "1");
-  body.append("line_items[0][price_data][currency]", "gbp");
-  body.append("line_items[0][price_data][unit_amount]", String(amountPence));
-  body.append("line_items[0][price_data][product_data][name]", `Locksmith services ${postcode || ref}`);
-  body.append("line_items[0][price_data][product_data][description]", description.slice(0, 900));
-  body.append("metadata[job_id]", String(job.id));
-  body.append("metadata[job_number]", String(job.job_number || ""));
-  body.append("metadata[old_order_id]", String(job.old_order_id || ""));
-  body.append("metadata[postcode]", String(postcode || ""));
-  body.append("metadata[portal]", "yay-wallboard");
-  body.append("payment_intent_data[metadata][job_id]", String(job.id));
-  body.append("payment_intent_data[metadata][job_number]", String(job.job_number || ""));
-  body.append("payment_intent_data[metadata][old_order_id]", String(job.old_order_id || ""));
-  body.append("payment_intent_data[metadata][postcode]", String(postcode || ""));
-
-  const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body
-  });
-  const text = await response.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  if (!response.ok) {
-    const message = data && data.error && data.error.message ? data.error.message : text;
-    throw new Error(`Stripe API failed ${response.status}: ${message}`);
-  }
-  if (!data.url || !data.id) throw new Error(`Stripe returned an unexpected response: ${text}`);
-  return {
-    sessionId: data.id,
-    url: data.url,
-    raw: data,
-    amount: amountPounds
-  };
-}
-
 function normaliseYaySmsRecipient(value) {
   let phone = cleanSmsNumber(value).replace(/[^0-9+]/g, "");
   if (phone.startsWith("00")) phone = "+" + phone.slice(2);
@@ -2384,6 +2247,7 @@ function invoiceRows(invoices) {
         </td>
         <td>
           <div class="actions">
+            <a href="/invoices/${invoice.id}/edit">Edit</a>
             <a href="/invoices/${invoice.id}/pdf" target="_blank">PDF</a>
             <a class="delete-link" href="/invoices/${invoice.id}/delete">Delete</a>
           </div>
@@ -2854,38 +2718,6 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
   await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_sms_log_job_idx ON job_sms_log (job_id, created_at DESC);`);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS job_stripe_payment_links (
-      id SERIAL PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      amount NUMERIC(10,2) NOT NULL,
-      currency TEXT DEFAULT 'gbp',
-      reason TEXT,
-      stripe_session_id TEXT,
-      stripe_payment_link_url TEXT,
-      status TEXT DEFAULT 'created',
-      created_by TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      sms_sent_at TIMESTAMP,
-      sms_sent_by TEXT,
-      provider_response JSONB
-    );
-  `);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS amount NUMERIC(10,2) NOT NULL DEFAULT 0;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'gbp';`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS reason TEXT;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS stripe_session_id TEXT;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'created';`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS created_by TEXT;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS sms_sent_at TIMESTAMP;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS sms_sent_by TEXT;`);
-  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS provider_response JSONB;`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS job_stripe_payment_links_job_idx ON job_stripe_payment_links (job_id, created_at DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS job_stripe_payment_links_session_idx ON job_stripe_payment_links (stripe_session_id);`);
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_by TEXT;`);
@@ -4695,6 +4527,290 @@ app.post("/invoices/create", async (req, res) => {
   } catch (error) {
     console.error("Create invoice error:", error);
     res.status(500).send("Create invoice error. Check Render logs.");
+  }
+});
+
+
+app.get("/invoices/:id/edit", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
+    const invoice = result.rows[0];
+    if (!invoice) return res.status(404).send("Invoice not found");
+
+    const itemResult = await pool.query(`
+      SELECT *
+      FROM invoice_items
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, description ASC
+    `);
+
+    const lineItems = Array.isArray(invoice.line_items)
+      ? invoice.line_items
+      : JSON.parse(invoice.line_items || "[]");
+
+    const itemOptions = itemResult.rows.map(item => {
+      return `<option value="${item.id}" data-description="${escapeHtml(item.description)}" data-price="${Number(item.default_price || 0).toFixed(2)}">${escapeHtml(item.description)} — ${money(item.default_price)}</option>`;
+    }).join("");
+
+    const option = (value, selected) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`;
+    const companyOption = (key, label) => `<option value="${escapeHtml(key)}" ${key === invoice.company_key ? "selected" : ""}>${escapeHtml(label)}</option>`;
+
+    function lineBlock(number) {
+      const item = lineItems[number - 1] || {};
+      return `
+        <div class="line-block">
+          <div class="line-grid">
+            <select name="line${number}_item_id" onchange="fillInvoiceLine(${number}, this)">
+              <option value="">Choose invoice line</option>
+              ${itemOptions}
+            </select>
+            <input name="line${number}_qty" value="${escapeHtml(item.qty || "")}" placeholder="Qty">
+            <input name="line${number}_unit_price" value="${escapeHtml(item.unitPrice || "")}" placeholder="Unit price">
+          </div>
+          <input class="description-input" name="line${number}_description" value="${escapeHtml(item.description || "")}" placeholder="Description appears on invoice">
+        </div>
+      `;
+    }
+
+    const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Edit Invoice ${escapeHtml(invoice.invoice_number)}</title>
+        <style>
+          ${sharedStyles()}
+          textarea { min-height: 90px; }
+          .line-block { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid #374151; }
+          .line-grid { display: grid; grid-template-columns: 1fr 90px 140px; gap: 12px; margin-bottom: 10px; }
+          .description-input { width: 100%; box-sizing: border-box; }
+          .notice { background: #1f2937; border-left: 5px solid #f59e0b; border-radius: 10px; padding: 18px; margin-bottom: 25px; color: #d1d5db; }
+          #site-fields { margin-top: 18px; }
+          .button-row { display: flex; gap: 12px; align-items: center; margin-top: 18px; }
+        </style>
+        <script>
+          function toggleSiteAddress() {
+            const checkbox = document.getElementById("site_same_as_invoice");
+            const siteFields = document.getElementById("site-fields");
+            siteFields.style.display = checkbox.checked ? "none" : "block";
+          }
+
+          function fillInvoiceLine(number, select) {
+            const selected = select.options[select.selectedIndex];
+            const description = selected.getAttribute("data-description") || "";
+            const price = selected.getAttribute("data-price") || "";
+
+            const descriptionInput = document.querySelector("[name='line" + number + "_description']");
+            const priceInput = document.querySelector("[name='line" + number + "_unit_price']");
+            const qtyInput = document.querySelector("[name='line" + number + "_qty']");
+
+            if (descriptionInput && description) descriptionInput.value = description;
+            if (priceInput && price) priceInput.value = price;
+            if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+          }
+
+          window.addEventListener("DOMContentLoaded", toggleSiteAddress);
+        </script>
+      </head>
+      <body>
+        ${nav(req)}
+        <h1>Edit Invoice ${escapeHtml(invoice.invoice_number)}</h1>
+        <div class="subtitle">Update draft, approved or unsent invoice details. Regenerate the PDF after saving.</div>
+
+        <div class="notice">
+          <strong>Important:</strong> Editing changes the invoice record and regenerated PDF. If the invoice has already been emailed to a customer, use this carefully.
+        </div>
+
+        <form method="POST" action="/invoices/${invoice.id}/edit">
+          <div class="panel">
+            <h2>Invoice Details</h2>
+            <div class="grid-3">
+              <select name="company_key" required>
+                ${companyOption("locksmiths", "24H Locksmiths Ltd")}
+                ${companyOption("online", "24H Online Services Ltd")}
+              </select>
+              <select name="payment_method" required>
+                ${option("Bank transfer", invoice.payment_method)}
+                ${option("Cash", invoice.payment_method)}
+                ${option("Card", invoice.payment_method)}
+              </select>
+              <input name="invoice_number" value="${escapeHtml(invoice.invoice_number)}" placeholder="Invoice / Job No." required>
+            </div>
+            <br>
+            <div class="grid-3">
+              <input name="invoice_date" value="${escapeHtml(invoice.invoice_date || "")}" placeholder="Date">
+              <input value="Originally created by ${escapeHtml(invoice.dispatcher_name || "Unknown")}" disabled>
+              <select name="invoice_stage" required>${invoiceStageOptions(invoice.invoice_stage || "Draft only")}</select>
+            </div>
+            <br>
+            <div class="grid-3">
+              <input name="locksmith_name" value="${escapeHtml(invoice.locksmith_name || "")}" placeholder="Locksmith name">
+              <select name="paid_status">
+                ${option("Unpaid", invoice.paid_status)}
+                ${option("Paid with thanks", invoice.paid_status)}
+              </select>
+              <input name="customer_email" value="${escapeHtml(invoice.customer_email || "")}" placeholder="Customer email">
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Invoice Address</h2>
+            <div class="grid-2">
+              <input name="customer_name" value="${escapeHtml(invoice.customer_name || "")}" placeholder="Customer / invoice name" required>
+              <input name="customer_postcode" value="${escapeHtml(invoice.customer_postcode || "")}" placeholder="Invoice postcode">
+            </div>
+            <br>
+            <textarea name="customer_address" placeholder="Invoice address">${escapeHtml(invoice.customer_address || "")}</textarea>
+
+            <label class="checkbox-row">
+              <input id="site_same_as_invoice" name="site_same_as_invoice" type="checkbox" value="yes" ${siteSameAsInvoice ? "checked" : ""} onchange="toggleSiteAddress()">
+              Site address same as invoice address
+            </label>
+
+            <div id="site-fields">
+              <h2>Site Address</h2>
+              <div class="grid-2">
+                <input name="site_postcode" value="${escapeHtml(invoice.site_postcode || "")}" placeholder="Site postcode">
+                <input name="site_address_line" value="" placeholder="Quick site address line">
+              </div>
+              <br>
+              <textarea name="site_address" placeholder="Full site address">${escapeHtml(invoice.site_address || "")}</textarea>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Line Items</h2>
+            <div class="help">Existing lines are pre-filled. Use the dropdown only if you want to replace a line.</div>
+            <br>
+            ${lineBlock(1)}
+            ${lineBlock(2)}
+            ${lineBlock(3)}
+            ${lineBlock(4)}
+            ${lineBlock(5)}
+            <a href="/invoice-items">Edit invoice dropdown lines</a>
+          </div>
+
+          <div class="panel">
+            <h2>Notes</h2>
+            <textarea name="notes" placeholder="Invoice notes">${escapeHtml(invoice.notes || "")}</textarea>
+          </div>
+
+          <div class="button-row">
+            <button type="submit">Save invoice changes</button>
+            <a href="/invoices/${invoice.id}/pdf" target="_blank">Open PDF</a>
+            <a href="/invoices">Back to invoices</a>
+          </div>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Edit invoice page error:", error);
+    res.status(500).send("Edit invoice page error. Check Render logs.");
+  }
+});
+
+app.post("/invoices/:id/edit", async (req, res) => {
+  try {
+    const companyKey = req.body.company_key;
+    const paymentMethod = req.body.payment_method;
+    const agentName = currentAgentName(req);
+
+    if (!companies[companyKey]) return res.status(400).send("Invalid company selected.");
+
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(`
+        <html>
+          <body style="font-family: Arial; padding: 40px;">
+            <h1>Payment method not allowed</h1>
+            <p>${escapeHtml(paymentRuleMessage(companyKey))}</p>
+            <p>You selected: <strong>${escapeHtml(paymentMethod)}</strong></p>
+            <p><a href="/invoices/${req.params.id}/edit">Go back and edit invoice again</a></p>
+          </body>
+        </html>
+      `);
+    }
+
+    const siteSameAsInvoice = req.body.site_same_as_invoice === "yes";
+
+    const finalSiteAddress = siteSameAsInvoice
+      ? req.body.customer_address
+      : (req.body.site_address || req.body.site_address_line || "");
+
+    const finalSitePostcode = siteSameAsInvoice
+      ? compactPostcode(req.body.customer_postcode)
+      : compactPostcode(req.body.site_postcode);
+
+    const lineItems = [];
+
+    for (let i = 1; i <= 5; i += 1) {
+      const description = (req.body[`line${i}_description`] || "").trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
+
+      if (description && qty > 0) {
+        lineItems.push({ description, qty, unitPrice });
+      }
+    }
+
+    const subtotal = lineItems.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+    const vatAmount = subtotal * 0.2;
+    const total = subtotal + vatAmount;
+
+    await pool.query(`
+      UPDATE invoices
+      SET invoice_number = $1,
+          company_key = $2,
+          payment_method = $3,
+          invoice_stage = $4,
+          stage_updated_by = $5,
+          stage_updated_at = NOW(),
+          customer_name = $6,
+          customer_address = $7,
+          customer_postcode = $8,
+          site_same_as_invoice = $9,
+          site_address = $10,
+          site_postcode = $11,
+          customer_email = $12,
+          invoice_date = $13,
+          locksmith_name = $14,
+          paid_status = $15,
+          line_items = $16,
+          subtotal = $17,
+          vat_amount = $18,
+          total = $19,
+          notes = $20,
+          updated_at = NOW()
+      WHERE id = $21
+    `, [
+      req.body.invoice_number,
+      companyKey,
+      paymentMethod,
+      req.body.invoice_stage || "Draft only",
+      agentName,
+      req.body.customer_name,
+      req.body.customer_address,
+      compactPostcode(req.body.customer_postcode),
+      siteSameAsInvoice,
+      finalSiteAddress,
+      finalSitePostcode,
+      req.body.customer_email,
+      req.body.invoice_date,
+      req.body.locksmith_name,
+      req.body.paid_status,
+      JSON.stringify(lineItems),
+      subtotal.toFixed(2),
+      vatAmount.toFixed(2),
+      total.toFixed(2),
+      req.body.notes,
+      req.params.id
+    ]);
+
+    res.redirect(`/invoices/${req.params.id}/edit?saved=1`);
+  } catch (error) {
+    console.error("Edit invoice save error:", error);
+    res.status(500).send("Edit invoice save error. Check Render logs.");
   }
 });
 
@@ -6991,7 +7107,6 @@ app.post("/jobs/:id/delete", async (req, res) => {
     ]);
 
     await client.query(`DELETE FROM job_sms_log WHERE job_id = $1`, [jobId]);
-    await client.query(`DELETE FROM job_stripe_payment_links WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_evidence_links WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_payment_chases WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_audit_log WHERE job_id = $1`, [jobId]);
@@ -7746,19 +7861,6 @@ app.get("/jobs/:id/summary", async (req, res) => {
             document.execCommand("copy");
             alert("Technician summary copied.");
           }
-          function copyText(value) {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(value).then(() => alert("Copied."));
-              return;
-            }
-            const temp = document.createElement("textarea");
-            temp.value = value;
-            document.body.appendChild(temp);
-            temp.select();
-            document.execCommand("copy");
-            document.body.removeChild(temp);
-            alert("Copied.");
-          }
         </script>
       </body>
       </html>
@@ -7811,13 +7913,6 @@ app.get("/jobs/:id/edit", async (req, res) => {
       WHERE job_id = $1
       ORDER BY created_at DESC, id DESC
       LIMIT 30
-    `, [id])).rows;
-
-    const stripePaymentLinks = (await pool.query(`
-      SELECT * FROM job_stripe_payment_links
-      WHERE job_id = $1
-      ORDER BY created_at DESC, id DESC
-      LIMIT 20
     `, [id])).rows;
 
     const isImportedJob = Boolean(job.is_imported);
@@ -8064,21 +8159,6 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 ${renderSmsHistory(smsRows)}
               </div>
 
-
-              <div class="control-card" id="stripe-card">
-                <h2>Stripe payment links</h2>
-                ${renderStripeConfigNotice()}
-                <form method="POST" action="/jobs/${job.id}/stripe-payment-link" class="quick-form" onsubmit="return confirm('Create a live Stripe payment link for this amount?');">
-                  <label>Amount to request</label>
-                  <div class="money-wrap"><div class="money-prefix">£</div><input name="stripe_amount" inputmode="decimal" value="${escapeHtml(Number(job.final_value || job.quoted_price || job.starting_price || 0).toFixed(2))}" placeholder="e.g. 150.00" required></div>
-                  <label>Payment note</label>
-                  <input name="stripe_reason" value="${escapeHtml(`Payment for locksmith job ${job.job_number || (job.old_order_id ? `OLD-${job.old_order_id}` : jobNumber(job.id))}${job.postcode ? ` - ${compactPostcode(job.postcode)}` : ''}`)}" placeholder="Payment reason shown inside Stripe">
-                  <button type="submit" ${stripeConfigured() ? "" : "disabled"}>Create Stripe link</button>
-                  <p class="muted-note">This creates a Stripe-hosted card payment page and stores the link against this job.</p>
-                </form>
-                ${renderStripePaymentLinks(stripePaymentLinks, job)}
-              </div>
-
               <div class="control-card">
                 <h2>Payment chase</h2>
                 <p class="muted-note">Use this when a job is partially or fully unpaid. Log the chase, outcome and next follow-up date.</p>
@@ -8136,19 +8216,6 @@ app.get("/jobs/:id/edit", async (req, res) => {
             box.select();
             document.execCommand("copy");
             alert("Technician summary copied.");
-          }
-          function copyText(value) {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(value).then(() => alert("Copied."));
-              return;
-            }
-            const temp = document.createElement("textarea");
-            temp.value = value;
-            document.body.appendChild(temp);
-            temp.select();
-            document.execCommand("copy");
-            document.body.removeChild(temp);
-            alert("Copied.");
           }
 
           const smsTemplateSelect = document.getElementById("sms_template");
@@ -8264,74 +8331,6 @@ app.post("/jobs/:id/evidence", async (req, res) => {
   }
 });
 
-
-
-app.post("/jobs/:id/stripe-payment-link", async (req, res) => {
-  const id = Number(req.params.id);
-  try {
-    const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
-    if (!jobResult.rows.length) return res.status(404).send("Job not found");
-    const job = jobResult.rows[0];
-    const amountPence = stripeAmountToPence(req.body.stripe_amount);
-    const reason = String(req.body.stripe_reason || "").trim();
-    if (!amountPence) return res.status(400).send("Enter a valid Stripe amount greater than zero.");
-
-    const stripeResult = await createStripeCheckoutPaymentLink(req, job, amountPence, reason);
-    const amountPounds = Number(stripeResult.amount || (amountPence / 100).toFixed(2));
-    const insertResult = await pool.query(`
-      INSERT INTO job_stripe_payment_links (
-        job_id, amount, currency, reason, stripe_session_id, stripe_payment_link_url, status, created_by, created_at, provider_response
-      ) VALUES ($1, $2, 'gbp', $3, $4, $5, 'created', $6, NOW(), $7)
-      RETURNING id
-    `, [id, amountPounds, reason || `Payment for job ${job.job_number || jobNumber(job.id)}`, stripeResult.sessionId, stripeResult.url, currentAgentName(req) || "Unknown", JSON.stringify(stripeResult.raw || {})]);
-
-    await addJobAuditEntry(id, "stripe_link_created", "Stripe payment link", "—", `${money(amountPounds)} link created`, currentAgentName(req) || "Unknown");
-    res.redirect(`/jobs/${id}/edit#stripe-card`);
-  } catch (error) {
-    console.error("Create Stripe payment link error:", error);
-    res.status(500).send(`Could not create Stripe payment link: ${escapeHtml(error.message)}`);
-  }
-});
-
-app.post("/jobs/:id/stripe-payment-links/:linkId/send-sms", async (req, res) => {
-  const id = Number(req.params.id);
-  const linkId = Number(req.params.linkId);
-  try {
-    const jobResult = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
-    if (!jobResult.rows.length) return res.status(404).send("Job not found");
-    const job = jobResult.rows[0];
-    const linkResult = await pool.query(`SELECT * FROM job_stripe_payment_links WHERE id = $1 AND job_id = $2`, [linkId, id]);
-    if (!linkResult.rows.length) return res.status(404).send("Stripe payment link not found");
-    const linkRow = linkResult.rows[0];
-    const to = cleanSmsNumber(job.customer_phone);
-    if (!to) return res.status(400).send("Customer phone number is missing.");
-    const message = stripePaymentSmsMessage(job, linkRow);
-
-    let status = "sent";
-    let providerResponse = "";
-    try {
-      const sendResult = await sendYaySms(to, message, `${job.job_number || jobNumber(job.id)} - Stripe payment link`);
-      status = sendResult.status;
-      providerResponse = sendResult.providerResponse;
-    } catch (sendError) {
-      status = "failed";
-      providerResponse = sendError.message;
-      console.error("Stripe payment SMS send error:", sendError);
-    }
-
-    await pool.query(`
-      INSERT INTO job_sms_log (job_id, sent_to, sms_type, template_name, message_body, status, provider, provider_response, sent_by, created_at)
-      VALUES ($1, $2, 'stripe_payment_link', 'Stripe payment link', $3, $4, 'yay', $5, $6, NOW())
-    `, [id, to, message, status, providerResponse, currentAgentName(req) || "Unknown"]);
-
-    await pool.query(`UPDATE job_stripe_payment_links SET sms_sent_at = NOW(), sms_sent_by = $1 WHERE id = $2`, [currentAgentName(req) || "Unknown", linkId]);
-    await addJobAuditEntry(id, "stripe_link_sms_sent", "Stripe payment SMS", "—", `${money(linkRow.amount || 0)} link SMS to ${to}: ${status}`, currentAgentName(req) || "Unknown");
-    res.redirect(`/jobs/${id}/edit#stripe-card`);
-  } catch (error) {
-    console.error("Send Stripe payment link SMS error:", error);
-    res.status(500).send("Could not send Stripe payment link SMS. Check Render logs.");
-  }
-});
 
 app.post("/jobs/:id/send-sms", async (req, res) => {
   const id = Number(req.params.id);
