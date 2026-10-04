@@ -1,3 +1,4 @@
+// YDP Unified master: advanced wallboard + invoice editing + technician flows (v93)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -23,7 +24,10 @@ const agents = {
   "1005": "Christian",
   "1008": "Daniel",
   "1010": "Dawn",
+  "1019": "Elias",
+  "1018": "Emina",
   "1004": "Erika",
+  "1020": "Fritz",
   "1009": "Hemen",
   "1015": "Louay",
   "1007": "Michele",
@@ -230,13 +234,86 @@ function setSessionCookie(res, agentName) {
   );
 }
 
+function hashClientPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const derived = crypto.scryptSync(String(password || ""), salt, 64).toString("hex");
+  return `${salt}:${derived}`;
+}
+
+function verifyClientPassword(password, stored) {
+  try {
+    const [salt, expectedHex] = String(stored || "").split(":");
+    if (!salt || !expectedHex) return false;
+    const actual = crypto.scryptSync(String(password || ""), salt, 64);
+    const expected = Buffer.from(expectedHex, "hex");
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch (_) {
+    return false;
+  }
+}
+
+function makeClientSessionCookie(userId, clientId) {
+  const payload = Buffer.from(JSON.stringify({ userId, clientId, createdAt: Date.now() })).toString("base64url");
+  return `${payload}.${signValue(payload)}`;
+}
+
+function readClientSession(req) {
+  const raw = parseCookies(req).account_client_session;
+  if (!raw || !raw.includes(".")) return null;
+  const [payload, signature] = raw.split(".");
+  const expected = signValue(payload);
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!decoded.userId || !decoded.clientId || !decoded.createdAt) return null;
+    if (Date.now() - decoded.createdAt > 1000 * 60 * 60 * 24 * 7) return null;
+    return decoded;
+  } catch (_) {
+    return null;
+  }
+}
+
+function setClientSessionCookie(res, userId, clientId) {
+  const value = makeClientSessionCookie(userId, clientId);
+  res.setHeader(
+    "Set-Cookie",
+    `account_client_session=${encodeURIComponent(value)}; HttpOnly; SameSite=Lax; Secure; Path=/client; Max-Age=${60 * 60 * 24 * 7}`
+  );
+}
+
+function clearClientSessionCookie(res) {
+  res.setHeader("Set-Cookie", "account_client_session=; HttpOnly; SameSite=Lax; Secure; Path=/client; Max-Age=0");
+}
+
+async function requireClientLogin(req, res, next) {
+  const session = readClientSession(req);
+  if (!session) return res.redirect("/client-login");
+  try {
+    const result = await pool.query(`
+      SELECT u.id AS user_id, u.display_name, u.email, u.account_client_id,
+             c.company_name, c.account_code, c.booking_mode, c.active AS client_active
+      FROM account_client_users u
+      JOIN account_clients c ON c.id = u.account_client_id
+      WHERE u.id = $1 AND c.id = $2 AND u.active = TRUE AND c.active = TRUE
+    `, [session.userId, session.clientId]);
+    if (!result.rows.length) {
+      clearClientSessionCookie(res);
+      return res.redirect("/client-login?error=inactive");
+    }
+    req.accountClient = result.rows[0];
+    next();
+  } catch (error) {
+    console.error("Client session validation error:", error);
+    res.status(500).send("Client portal login error.");
+  }
+}
+
 function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "dashboard_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0");
 }
 
 function requireLogin(req, res, next) {
-  const openPaths = ["/login", "/logout", "/webhook/yay"];
-  if (openPaths.includes(req.path) || req.path.startsWith("/tech-checkin/") || req.path === "/tech-workspace" || req.path.startsWith("/tech-workspace/")) return next();
+  const openPaths = ["/login", "/logout", "/webhook/yay", "/client-login", "/client-logout"];
+  if (openPaths.includes(req.path) || req.path.startsWith("/client/") || req.path === "/client" || req.path.startsWith("/tech-checkin/") || req.path === "/tech-workspace" || req.path.startsWith("/tech-workspace/")) return next();
 
   const session = readSession(req);
   if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
@@ -587,6 +664,7 @@ function quoteAddressPlain(quote) {
 }
 
 const jobStatuses = [
+  { value: "account_pending_review", label: "Account job - review required" },
   { value: "open", label: "Job awaiting to be assigned" },
   { value: "assigned", label: "Assigned" },
   { value: "closed", label: "Closed" },
@@ -644,7 +722,7 @@ const legacyJobStatusLabels = {
   fully_paid_private: "Fully paid (private)"
 };
 
-const activeJobStatuses = ["open", "assigned", "scheduled"];
+const activeJobStatuses = ["account_pending_review", "open", "assigned", "scheduled"];
 
 const jobTypes = [
   "BAILIFF (COURT ORDERED)",
@@ -1401,6 +1479,232 @@ async function yayApiRequest(method, path, body = null) {
   return { text: providerText, json: parsed, status: response.status };
 }
 
+
+const yaySipLiveCache = {
+  users: { expiresAt: 0, rows: [] },
+  statuses: { expiresAt: 0, rows: [] },
+  availability: new Map()
+};
+
+function yayArrayFromResponse(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const candidates = [
+    payload.result,
+    payload.results,
+    payload.data,
+    payload.users,
+    payload.user_status,
+    payload.statuses
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+    if (candidate && typeof candidate === "object") {
+      if (Array.isArray(candidate.data)) return candidate.data;
+      if (Array.isArray(candidate.results)) return candidate.results;
+      if (Array.isArray(candidate.users)) return candidate.users;
+    }
+  }
+  return [];
+}
+
+function yayObjectFromResponse(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  if (payload.result && !Array.isArray(payload.result) && typeof payload.result === "object") return payload.result;
+  if (payload.data && !Array.isArray(payload.data) && typeof payload.data === "object") return payload.data;
+  return payload;
+}
+
+function yaySipExtension(row) {
+  return String(
+    row?.extension ??
+    row?.extension_number ??
+    row?.sip_extension ??
+    row?.user_extension ??
+    row?.number ??
+    ""
+  ).trim();
+}
+
+function yaySipUuid(row) {
+  return String(
+    row?.uuid ??
+    row?.user_uuid ??
+    row?.sip_user_uuid ??
+    row?.id ??
+    ""
+  ).trim();
+}
+
+function yayStatusUuid(row) {
+  return String(
+    row?.uuid ??
+    row?.user_uuid ??
+    row?.sip_user_uuid ??
+    row?.id ??
+    ""
+  ).trim();
+}
+
+function yayStatusExtension(row) {
+  return String(
+    row?.extension ??
+    row?.extension_number ??
+    row?.sip_extension ??
+    row?.user_extension ??
+    ""
+  ).trim();
+}
+
+function yayTruthy(value) {
+  if (value === true || value === 1) return true;
+  const v = String(value ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "on", "available", "registered", "online", "active", "ready"].includes(v);
+}
+
+function yayFalsy(value) {
+  if (value === false || value === 0) return true;
+  const v = String(value ?? "").trim().toLowerCase();
+  return ["0", "false", "no", "off", "unavailable", "unregistered", "offline", "inactive", "not_registered"].includes(v);
+}
+
+function yayRegisteredFromStatus(row) {
+  if (!row || typeof row !== "object") return null;
+  const direct = [
+    row.registered,
+    row.is_registered,
+    row.online,
+    row.is_online,
+    row.connected,
+    row.is_connected,
+    row.registration_status,
+    row.status
+  ];
+  for (const value of direct) {
+    if (yayTruthy(value)) return true;
+    if (yayFalsy(value)) return false;
+  }
+  const registrations = row.registrations ?? row.registration_count ?? row.registered_devices;
+  if (registrations !== undefined && registrations !== null && registrations !== "") {
+    const n = Number(registrations);
+    if (Number.isFinite(n)) return n > 0;
+  }
+  return null;
+}
+
+function yayQueueAvailableFromPayload(payload) {
+  const row = yayObjectFromResponse(payload);
+  const values = [
+    row.available,
+    row.availability,
+    row.queue_available,
+    row.available_in_queues,
+    row.is_available,
+    row.is_available_in_queues,
+    row.enabled
+  ];
+  for (const value of values) {
+    if (yayTruthy(value)) return true;
+    if (yayFalsy(value)) return false;
+    if (value && typeof value === "object") {
+      for (const nested of [value.available, value.enabled, value.status]) {
+        if (yayTruthy(nested)) return true;
+        if (yayFalsy(nested)) return false;
+      }
+    }
+  }
+  return null;
+}
+
+async function getYaySipUsersCached() {
+  const now = Date.now();
+  if (yaySipLiveCache.users.expiresAt > now) return yaySipLiveCache.users.rows;
+  const result = await yayApiRequest("GET", "/voip/user");
+  const rows = yayArrayFromResponse(result.json);
+  yaySipLiveCache.users = { rows, expiresAt: now + 10 * 60 * 1000 };
+  return rows;
+}
+
+async function getYaySipStatusesCached() {
+  const now = Date.now();
+  if (yaySipLiveCache.statuses.expiresAt > now) return yaySipLiveCache.statuses.rows;
+  const result = await yayApiRequest("GET", "/voip/user-status");
+  const rows = yayArrayFromResponse(result.json);
+  yaySipLiveCache.statuses = { rows, expiresAt: now + 20 * 1000 };
+  return rows;
+}
+
+async function getYayQueueAvailabilityCached(uuid) {
+  if (!uuid) return null;
+  const now = Date.now();
+  const cached = yaySipLiveCache.availability.get(uuid);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const result = await yayApiRequest("GET", `/voip/user/${encodeURIComponent(uuid)}/availability`);
+  const value = yayQueueAvailableFromPayload(result.json);
+  yaySipLiveCache.availability.set(uuid, { value, expiresAt: now + 60 * 1000 });
+  return value;
+}
+
+async function getYayWallboardPresence(wallboardAgents = {}) {
+  const fallback = {};
+  Object.keys(wallboardAgents).forEach(ext => {
+    fallback[ext] = { extension: ext, registered: null, queueAvailable: null, state: "Unknown" };
+  });
+  if (!yayAuthConfigured()) return fallback;
+
+  try {
+    const [users, statuses] = await Promise.all([
+      getYaySipUsersCached(),
+      getYaySipStatusesCached()
+    ]);
+
+    const userByExt = new Map();
+    users.forEach(row => {
+      const ext = yaySipExtension(row);
+      if (ext) userByExt.set(ext, row);
+    });
+
+    const statusByUuid = new Map();
+    const statusByExt = new Map();
+    statuses.forEach(row => {
+      const uuid = yayStatusUuid(row);
+      const ext = yayStatusExtension(row);
+      if (uuid) statusByUuid.set(uuid, row);
+      if (ext) statusByExt.set(ext, row);
+    });
+
+    const entries = await Promise.all(Object.keys(wallboardAgents).map(async ext => {
+      const user = userByExt.get(String(ext));
+      const uuid = yaySipUuid(user);
+      const statusRow = (uuid && statusByUuid.get(uuid)) || statusByExt.get(String(ext)) || user || null;
+      const registered = yayRegisteredFromStatus(statusRow);
+
+      let queueAvailable = null;
+      if (uuid) {
+        try {
+          queueAvailable = await getYayQueueAvailabilityCached(uuid);
+        } catch (availabilityError) {
+          console.warn(`Yay availability lookup failed for extension ${ext}:`, availabilityError.message);
+        }
+      }
+
+      let state = "Unknown";
+      if (registered === false || queueAvailable === false) state = "Offline";
+      else if (registered === true && queueAvailable === true) state = "Available";
+      else if (registered === true && queueAvailable === null) state = "Available";
+      else if (registered === null && queueAvailable === true) state = "Available";
+
+      return [String(ext), { extension: String(ext), uuid, registered, queueAvailable, state }];
+    }));
+
+    return Object.fromEntries(entries);
+  } catch (error) {
+    console.warn("Yay SIP presence refresh failed:", error.message);
+    return fallback;
+  }
+}
+
 function yayFutureSendOn(minutesAhead = 2) {
   // Yay rejects send_on if it is too close to their current server time.
   // Use a safe future time, rounded to whole seconds with no milliseconds.
@@ -1440,6 +1744,168 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
       note: "Created with is_draft=false so Yay queues the campaign directly.",
       created: created.json || created.text
     }).slice(0, 1600)
+  };
+}
+
+
+function stripeMode() {
+  return String(process.env.STRIPE_MODE || "").trim().toLowerCase() || "not_set";
+}
+
+function stripeSecretKey() {
+  return String(process.env.STRIPE_SECRET_KEY || "").trim();
+}
+
+function stripeConfigured() {
+  const key = stripeSecretKey();
+  const mode = stripeMode();
+  if (!key) return false;
+  if (mode === "live") return key.startsWith("sk_live_");
+  if (mode === "test") return key.startsWith("sk_test_");
+  return key.startsWith("sk_live_") || key.startsWith("sk_test_");
+}
+
+function stripeConfigurationMessage() {
+  const key = stripeSecretKey();
+  const mode = stripeMode();
+  if (!key) return "STRIPE_SECRET_KEY is missing in Render.";
+  if (mode === "live" && !key.startsWith("sk_live_")) return "STRIPE_MODE is live but STRIPE_SECRET_KEY is not a live key.";
+  if (mode === "test" && !key.startsWith("sk_test_")) return "STRIPE_MODE is test but STRIPE_SECRET_KEY is not a test key.";
+  if (!["live", "test"].includes(mode)) return "STRIPE_MODE should be set to live or test.";
+  return "";
+}
+
+function stripeOutstandingAmount(job = {}) {
+  const finalValue = Number(job.final_value || 0);
+  if (!(finalValue > 0)) return null;
+  const payment1Present = job.payment_amount_1 !== null && job.payment_amount_1 !== undefined && String(job.payment_amount_1) !== "";
+  const payment2Present = job.payment_amount_2 !== null && job.payment_amount_2 !== undefined && String(job.payment_amount_2) !== "";
+  if (!payment1Present && !payment2Present) return finalValue;
+  const paid = Number(job.payment_amount_1 || 0) + Number(job.payment_amount_2 || 0);
+  return Math.max(0, Math.round((finalValue - paid) * 100) / 100);
+}
+
+function stripePaymentTitle(job = {}) {
+  const postcode = compactPostcode(job.postcode || "");
+  return postcode ? `Locksmith services (${postcode})` : "Locksmith services";
+}
+
+function stripePaymentDescription(job = {}) {
+  const ref = job.job_number || job.old_order_id || jobNumber(job.id);
+  const postcode = compactPostcode(job.postcode || "");
+  return `Payment for job ${ref}${postcode ? ` / ${postcode}` : ""}`;
+}
+
+function renderStripeConfigNotice() {
+  const mode = stripeMode();
+  const problem = stripeConfigurationMessage();
+  if (problem) {
+    return `
+      <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45;">
+        <strong>Stripe is not ready.</strong><br>${escapeHtml(problem)}
+      </div>
+    `;
+  }
+  if (mode === "live") {
+    return `
+      <div style="margin:10px 0 14px; padding:12px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45;">
+        <strong>LIVE Stripe mode.</strong> Creating a link creates a real live payment page. For the first test, manually enter <strong>£1.00</strong>.
+      </div>
+    `;
+  }
+  return `<p class="muted-note">Stripe is connected in TEST mode.</p>`;
+}
+
+function renderStripePaymentLinkHistory(rows = []) {
+  if (!rows.length) return `<p class="muted-note">No Stripe payment links created for this job yet.</p>`;
+  return `
+    <div class="activity-list">
+      ${rows.map(row => `
+        <div class="activity-item">
+          <span class="activity-dot"></span>
+          <div style="min-width:0; width:100%;">
+            <div class="activity-label">${money(row.amount || 0)} · ${escapeHtml(String(row.currency || "GBP").toUpperCase())}</div>
+            <div class="activity-value">
+              ${escapeHtml(row.description || "Stripe payment link")}<br>
+              <span class="muted">Created ${escapeHtml(formatDateTime(row.created_at))} by ${escapeHtml(row.created_by || "Unknown")}</span>
+              ${Number(row.send_count || 0) > 0 ? `<br><span class="muted">Payment SMS attempted ${Number(row.send_count || 0)} time(s)${row.last_sent_at ? ` · last ${escapeHtml(formatDateTime(row.last_sent_at))}` : ""}</span>` : ""}
+            </div>
+            <div class="page-actions" style="margin-top:9px;">
+              <a class="action-button" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open link</a>
+              <button class="copy-mini" type="button" onclick="copyStripeLink(${JSON.stringify(String(row.payment_url || ""))})">Copy link</button>
+              <form method="POST" action="/jobs/${Number(row.job_id)}/stripe-payment-links/${Number(row.id)}/send-sms" style="display:inline; margin:0;" onsubmit="return confirm('Send this Stripe payment link by SMS?');">
+                <button type="submit">Send payment SMS</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function createStripePaymentLink(job, amountPounds, createdBy) {
+  if (!stripeConfigured()) {
+    throw new Error(stripeConfigurationMessage() || "Stripe is not configured correctly.");
+  }
+
+  const amount = Number(amountPounds);
+  if (!Number.isFinite(amount) || amount < 0.50) {
+    throw new Error("Stripe payment link amount must be at least £0.50.");
+  }
+  if (amount > 100000) {
+    throw new Error("Stripe payment link amount is unusually high and was blocked.");
+  }
+
+  const amountPence = Math.round(amount * 100);
+  const title = stripePaymentTitle(job);
+  const description = stripePaymentDescription(job);
+  const jobRef = String(job.job_number || job.old_order_id || jobNumber(job.id));
+  const postcode = compactPostcode(job.postcode || "");
+
+  const body = new URLSearchParams();
+  body.set("line_items[0][price_data][currency]", "gbp");
+  body.set("line_items[0][price_data][unit_amount]", String(amountPence));
+  body.set("line_items[0][price_data][product_data][name]", title);
+  body.set("line_items[0][price_data][product_data][description]", description);
+  body.set("line_items[0][quantity]", "1");
+  body.set("metadata[job_id]", String(job.id));
+  body.set("metadata[job_reference]", jobRef.slice(0, 500));
+  if (postcode) body.set("metadata[postcode]", postcode.slice(0, 500));
+  body.set("metadata[created_by]", String(createdBy || "Unknown").slice(0, 500));
+  body.set("metadata[source]", "YDP Job Control Panel");
+
+  const response = await fetch("https://api.stripe.com/v1/payment_links", {
+    method: "POST",
+    headers: {
+      "Authorization": `Basic ${Buffer.from(`${stripeSecretKey()}:`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+      "User-Agent": "YourDispatchPartnerPortal/1.0"
+    },
+    body: body.toString()
+  });
+
+  const responseText = await response.text();
+  let parsed = null;
+  try { parsed = responseText ? JSON.parse(responseText) : null; } catch (_) {}
+
+  if (!response.ok) {
+    const providerMessage = parsed?.error?.message || responseText || `HTTP ${response.status}`;
+    throw new Error(`Stripe API failed: ${providerMessage}`);
+  }
+
+  if (!parsed?.id || !parsed?.url) {
+    throw new Error("Stripe created a response but did not return a payment link ID and URL.");
+  }
+
+  return {
+    stripePaymentLinkId: parsed.id,
+    url: parsed.url,
+    amount: amountPence / 100,
+    currency: "gbp",
+    description,
+    rawStatus: parsed.active === false ? "inactive" : "active"
   };
 }
 
@@ -2160,6 +2626,7 @@ function nav(req) {
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
         <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
+        <a class="side-link${active("/account-clients")}" href="/account-clients"><span class="side-dot dot-blue"></span><span>Account Clients</span></a>
         <a class="side-link${active("/campaigns")}" href="/campaigns"><span class="side-dot dot-amber"></span><span>Campaigns</span></a>
         <a class="side-link${active("/dispatch")}" href="/dispatch"><span class="side-dot dot-amber"></span><span>Live map</span></a>
 
@@ -2385,6 +2852,7 @@ async function initDb() {
   `);
 
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal';`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS is_subcontractor BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
@@ -2442,6 +2910,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_same_as_invoice BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_address TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_postcode TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_phone TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by_technician_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS linked_job_id INTEGER;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_source TEXT;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_linked_job_idx ON invoices (linked_job_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS invoices_created_by_tech_idx ON invoices (created_by_technician_id);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -2476,7 +2950,50 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
   await pool.query(`ALTER TABLE invoice_templates ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_clients (
+      id SERIAL PRIMARY KEY,
+      company_name TEXT NOT NULL,
+      account_code TEXT,
+      booking_mode TEXT DEFAULT 'approval',
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE account_clients ADD COLUMN IF NOT EXISTS account_code TEXT;`);
+  await pool.query(`ALTER TABLE account_clients ADD COLUMN IF NOT EXISTS booking_mode TEXT DEFAULT 'approval';`);
+  await pool.query(`ALTER TABLE account_clients ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS account_clients_account_code_unique ON account_clients (LOWER(account_code)) WHERE account_code IS NOT NULL AND TRIM(account_code) <> '';`);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_client_users (
+      id SERIAL PRIMARY KEY,
+      account_client_id INTEGER NOT NULL,
+      display_name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE account_client_users ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS account_client_users_email_unique ON account_client_users (LOWER(email));`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS account_client_users_client_idx ON account_client_users (account_client_id);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS account_client_activity (
+      id SERIAL PRIMARY KEY,
+      account_client_id INTEGER,
+      account_client_user_id INTEGER,
+      job_id INTEGER,
+      activity_type TEXT,
+      detail TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS account_client_activity_client_idx ON account_client_activity (account_client_id, created_at DESC);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS jobs (
@@ -2558,6 +3075,12 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expected_payment_method TEXT DEFAULT 'Unknown';`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_job BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_template_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_client_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_client_user_id INTEGER;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS client_reference TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS client_submitted_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_reviewed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_reviewed_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_technician_id INTEGER;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP;`);
@@ -2585,6 +3108,53 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed BOOLEAN DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_amount NUMERIC(12,2);`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_by TEXT;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_customer_confirmation_codes (
+      job_id INTEGER PRIMARY KEY,
+      code_hash TEXT NOT NULL,
+      sent_to TEXT NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      sent_at TIMESTAMP DEFAULT NOW(),
+      attempts INTEGER DEFAULT 0
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_customer_confirmations (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      technician_id INTEGER,
+      technician_name TEXT,
+      customer_name TEXT,
+      customer_phone TEXT,
+      agreed_net NUMERIC(12,2),
+      agreed_vat NUMERIC(12,2),
+      agreed_gross NUMERIC(12,2),
+      agreement_text TEXT,
+      signature_data TEXT,
+      verification_method TEXT,
+      verification_phone TEXT,
+      verification_reason TEXT,
+      id_type TEXT,
+      id_last4 TEXT,
+      id_visually_checked BOOLEAN DEFAULT FALSE,
+      ip_address TEXT,
+      user_agent TEXT,
+      confirmed_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_customer_confirmations_job_idx ON job_customer_confirmations (job_id);`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS verification_reason TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_type TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_last4 TEXT;`);
+  await pool.query(`ALTER TABLE job_customer_confirmations ADD COLUMN IF NOT EXISTS id_visually_checked BOOLEAN DEFAULT FALSE;`);
+
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS imported_from TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_order_id TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS old_portal_url TEXT;`);
@@ -2718,6 +3288,40 @@ async function initDb() {
   await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS sent_by TEXT;`);
   await pool.query(`ALTER TABLE job_sms_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`CREATE INDEX IF NOT EXISTS job_sms_log_job_idx ON job_sms_log (job_id, created_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_stripe_payment_links (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      stripe_payment_link_id TEXT NOT NULL,
+      payment_url TEXT NOT NULL,
+      amount NUMERIC(10,2) NOT NULL,
+      currency TEXT DEFAULT 'gbp',
+      description TEXT,
+      stripe_status TEXT DEFAULT 'active',
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      send_count INTEGER DEFAULT 0,
+      last_sent_to TEXT,
+      last_sent_by TEXT,
+      last_sent_at TIMESTAMP
+    );
+  `);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS job_id INTEGER;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS payment_url TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS amount NUMERIC(10,2);`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'gbp';`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS description TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS stripe_status TEXT DEFAULT 'active';`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS created_by TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS send_count INTEGER DEFAULT 0;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS last_sent_to TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS last_sent_by TEXT;`);
+  await pool.query(`ALTER TABLE job_stripe_payment_links ADD COLUMN IF NOT EXISTS last_sent_at TIMESTAMP;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS job_stripe_payment_links_job_idx ON job_stripe_payment_links (job_id, created_at DESC);`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS job_stripe_payment_links_stripe_id_unique ON job_stripe_payment_links (stripe_payment_link_id) WHERE stripe_payment_link_id IS NOT NULL;`);
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payment_chase_closed_by TEXT;`);
@@ -3004,6 +3608,310 @@ app.post("/login", async (req, res) => {
 app.get("/logout", (req, res) => {
   clearSessionCookie(res);
   res.redirect("/login");
+});
+
+app.get("/client-login", (req, res) => {
+  const error = req.query.error;
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Account Client Login</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        ${sharedStyles()}
+        body { margin:0; min-height:100vh; display:grid; place-items:center; background:#f3f6f8; padding:20px; }
+        .client-login-card { width:min(460px, 100%); background:white; border-radius:24px; padding:30px; box-shadow:0 20px 50px rgba(17,24,39,.12); }
+        .client-login-card img { max-width:210px; display:block; margin:0 auto 22px; }
+        .client-login-card input { width:100%; margin-bottom:14px; }
+        .client-login-card button { width:100%; margin-top:8px; }
+        .client-error { background:#fff1f2; color:#9f1239; border:1px solid #fecdd3; padding:12px; border-radius:12px; margin-bottom:15px; }
+      </style>
+    </head>
+    <body>
+      <div class="client-login-card">
+        <img src="/brand-logo.png" alt="Your Dispatch Partner">
+        <h1 style="font-size:28px;">Account Client Portal</h1>
+        <p class="subtitle">Book and track jobs on your account.</p>
+        ${error ? `<div class="client-error">We could not log you in. Please check your email and password.</div>` : ""}
+        <form method="POST" action="/client-login">
+          <label>Email</label>
+          <input type="email" name="email" required autocomplete="username">
+          <label>Password</label>
+          <input type="password" name="password" required autocomplete="current-password">
+          <button type="submit">Log in</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.post("/client-login", async (req, res) => {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    const result = await pool.query(`
+      SELECT u.*, c.active AS client_active
+      FROM account_client_users u
+      JOIN account_clients c ON c.id = u.account_client_id
+      WHERE LOWER(u.email) = $1
+      LIMIT 1
+    `, [email]);
+    const user = result.rows[0];
+    if (!user || !user.active || !user.client_active || !verifyClientPassword(password, user.password_hash)) {
+      return res.redirect("/client-login?error=1");
+    }
+    setClientSessionCookie(res, user.id, user.account_client_id);
+    await pool.query(`
+      INSERT INTO account_client_activity (account_client_id, account_client_user_id, activity_type, detail)
+      VALUES ($1,$2,'login',$3)
+    `, [user.account_client_id, user.id, `Portal login: ${user.display_name}`]);
+    res.redirect("/client");
+  } catch (error) {
+    console.error("Client login error:", error);
+    res.redirect("/client-login?error=1");
+  }
+});
+
+app.get("/client-logout", (req, res) => {
+  clearClientSessionCookie(res);
+  res.redirect("/client-login");
+});
+
+app.get("/client", requireClientLogin, async (req, res) => {
+  const client = req.accountClient;
+  const jobs = (await pool.query(`
+    SELECT id, job_number, client_reference, customer_name, postcode, job_type, status, created_at, scheduled_at
+    FROM jobs
+    WHERE account_client_id = $1
+    ORDER BY created_at DESC
+    LIMIT 100
+  `, [client.account_client_id])).rows;
+
+  const rows = jobs.map(job => `
+    <tr>
+      <td><strong>${escapeHtml(job.client_reference || job.job_number || jobNumber(job.id))}</strong></td>
+      <td>${escapeHtml(job.postcode || "—")}</td>
+      <td>${escapeHtml(job.job_type || "—")}</td>
+      <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+      <td>${escapeHtml(formatDateTime(job.created_at))}</td>
+      <td><a class="action-button" href="/client/jobs/${job.id}">View</a></td>
+    </tr>
+  `).join("");
+
+  res.send(`
+    <!DOCTYPE html><html><head><title>${escapeHtml(client.company_name)} Client Portal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      ${sharedStyles()}
+      body { background:#f3f6f8; padding:24px; }
+      .client-shell { max-width:1200px; margin:0 auto; }
+      .client-top { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:24px; }
+      .client-actions { display:flex; gap:10px; flex-wrap:wrap; }
+      .client-panel { background:white; border-radius:22px; padding:22px; box-shadow:0 12px 30px rgba(17,24,39,.06); }
+      table { margin:0; }
+    </style></head><body>
+      <div class="client-shell">
+        <div class="client-top">
+          <div><h1>${escapeHtml(client.company_name)}</h1><div class="subtitle">Welcome ${escapeHtml(client.display_name)} · Account Client Portal</div></div>
+          <div class="client-actions"><a class="action-button green" href="/client/jobs/new">Book a new job</a><a class="action-button dark" href="/client-logout">Log out</a></div>
+        </div>
+        <div class="client-panel">
+          <h2>Your jobs</h2>
+          <table><thead><tr><th>Your reference</th><th>Postcode</th><th>Job</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="6">No jobs submitted yet.</td></tr>`}</tbody></table>
+        </div>
+      </div>
+    </body></html>
+  `);
+});
+
+app.get("/client/jobs/new", requireClientLogin, (req, res) => {
+  const client = req.accountClient;
+  res.send(`
+    <!DOCTYPE html><html><head><title>Book a job</title><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      ${sharedStyles()}
+      body { background:#f3f6f8; padding:24px; }
+      .client-shell { max-width:900px; margin:0 auto; }
+      .client-panel { background:white; border-radius:22px; padding:26px; box-shadow:0 12px 30px rgba(17,24,39,.06); }
+      .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+      .wide { grid-column:1/-1; }
+      input,select,textarea { width:100%; }
+      textarea { min-height:130px; }
+      @media(max-width:760px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}}
+    </style></head><body>
+      <div class="client-shell">
+        <div class="client-panel">
+          <h1>Book a new job</h1>
+          <div class="subtitle">${escapeHtml(client.company_name)} · ${client.booking_mode === "direct" ? "Your job will enter the live dispatch queue." : "Your request will be sent instantly to the dispatch team for review."}</div>
+          <form method="POST" action="/client/jobs/create">
+            <div class="form-grid">
+              <div><label>Your reference / PO</label><input name="client_reference" required></div>
+              <div><label>Job type</label><select name="job_type" required><option value="">Select</option>${jobTypes.map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join("")}</select></div>
+              <div><label>Tenant / customer name</label><input name="customer_name" required></div>
+              <div><label>Telephone</label><input name="customer_phone" required></div>
+              <div><label>Email</label><input type="email" name="customer_email"></div>
+              <div><label>Postcode</label><input name="postcode" required></div>
+              <div class="wide"><label>Address line 1</label><input name="address_line_1" required></div>
+              <div><label>Address line 2</label><input name="address_line_2"></div>
+              <div><label>Town / city</label><input name="town"></div>
+              <div><label>Preferred date</label><input type="date" name="preferred_date"></div>
+              <div><label>Preferred time</label><input type="time" name="preferred_time"></div>
+              <div class="wide"><label>Problem / work required</label><textarea name="job_description" required></textarea></div>
+              <div class="wide"><label>Access arrangements / special instructions</label><textarea name="access_notes"></textarea></div>
+            </div>
+            <div class="page-actions" style="margin-top:20px;">
+              <a class="action-button dark" href="/client">Cancel</a>
+              <button type="submit">Submit job</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </body></html>
+  `);
+});
+
+app.post("/client/jobs/create", requireClientLogin, async (req, res) => {
+  try {
+    const client = req.accountClient;
+    const b = req.body;
+    const scheduledAt = b.preferred_date && b.preferred_time ? `${b.preferred_date} ${b.preferred_time}` : null;
+    const status = client.booking_mode === "direct" ? "open" : "account_pending_review";
+    const notes = [b.access_notes ? `Client access / special instructions: ${b.access_notes}` : "", `Submitted through Account Client Portal by ${client.display_name}`].filter(Boolean).join("\\n");
+
+    const result = await pool.query(`
+      INSERT INTO jobs (
+        customer_name, customer_phone, customer_email, address_line_1, address_line_2, town, postcode,
+        job_type, job_description, urgency, source_campaign, account_job, account_client_id, account_client_user_id,
+        client_reference, client_submitted_at, eta, scheduled_at, dispatcher_name, dispatcher_notes, status, created_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,'Normal',$10,TRUE,$11,$12,$13,NOW(),$14,$15,$16,$17,$18,NOW(),NOW()
+      ) RETURNING id
+    `, [
+      b.customer_name, compactPhone(b.customer_phone), b.customer_email, b.address_line_1, b.address_line_2, b.town, compactPostcode(b.postcode),
+      b.job_type, b.job_description, client.account_code || client.company_name, client.account_client_id, client.user_id,
+      b.client_reference, scheduledAt ? "Scheduled" : "To confirm", scheduledAt,
+      `Account Portal · ${client.display_name}`, notes, status
+    ]);
+    const id = result.rows[0].id;
+    await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2`, [jobNumber(id), id]);
+    await addJobAuditEntry(id, "account_client_job_submitted", "status", "—", jobStatusLabel(status), `${client.display_name} · ${client.company_name}`);
+    await pool.query(`
+      INSERT INTO account_client_activity (account_client_id, account_client_user_id, job_id, activity_type, detail)
+      VALUES ($1,$2,$3,'job_submitted',$4)
+    `, [client.account_client_id, client.user_id, id, `${b.client_reference || jobNumber(id)} · ${compactPostcode(b.postcode)}`]);
+    res.redirect(`/client/jobs/${id}?submitted=1`);
+  } catch (error) {
+    console.error("Client create job error:", error);
+    res.status(500).send(`Could not submit job: ${escapeHtml(error.message)}`);
+  }
+});
+
+app.get("/client/jobs/:id", requireClientLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const client = req.accountClient;
+  const result = await pool.query(`
+    SELECT id, job_number, client_reference, customer_name, customer_phone, customer_email,
+           address_line_1, address_line_2, town, postcode, job_type, job_description,
+           eta, scheduled_at, status, created_at, updated_at, closed_at
+    FROM jobs WHERE id = $1 AND account_client_id = $2
+  `, [id, client.account_client_id]);
+  if (!result.rows.length) return res.status(404).send("Job not found.");
+  const job = result.rows[0];
+  res.send(`
+    <!DOCTYPE html><html><head><title>${escapeHtml(job.job_number || jobNumber(job.id))}</title><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>${sharedStyles()} body{background:#f3f6f8;padding:24px}.client-shell{max-width:900px;margin:0 auto}.client-panel{background:white;border-radius:22px;padding:26px;box-shadow:0 12px 30px rgba(17,24,39,.06)}.detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.detail{background:#f8fafc;border-radius:14px;padding:14px}.wide{grid-column:1/-1}@media(max-width:700px){.detail-grid{grid-template-columns:1fr}.wide{grid-column:auto}}</style>
+    </head><body><div class="client-shell"><div class="page-actions"><a class="action-button dark" href="/client">Back to jobs</a></div><div class="client-panel">
+      ${req.query.submitted ? `<div style="background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;border-radius:14px;padding:14px;margin-bottom:18px;"><strong>Job submitted.</strong> ${job.status === "account_pending_review" ? "The dispatch team has been alerted and will review it." : "It is now in the live dispatch queue."}</div>` : ""}
+      <h1>${escapeHtml(job.client_reference || job.job_number || jobNumber(job.id))}</h1>
+      <p><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></p>
+      <div class="detail-grid">
+        <div class="detail"><strong>Portal job</strong><div>${escapeHtml(job.job_number || jobNumber(job.id))}</div></div>
+        <div class="detail"><strong>Submitted</strong><div>${escapeHtml(formatDateTime(job.created_at))}</div></div>
+        <div class="detail"><strong>Customer</strong><div>${escapeHtml(job.customer_name || "—")}</div></div>
+        <div class="detail"><strong>Telephone</strong><div>${escapeHtml(job.customer_phone || "—")}</div></div>
+        <div class="detail wide"><strong>Address</strong><div>${escapeHtml([job.address_line_1, job.address_line_2, job.town, job.postcode].filter(Boolean).join(", "))}</div></div>
+        <div class="detail"><strong>Job type</strong><div>${escapeHtml(job.job_type || "—")}</div></div>
+        <div class="detail"><strong>ETA / appointment</strong><div>${escapeHtml(job.scheduled_at ? formatDateTime(job.scheduled_at) : (job.eta || "To confirm"))}</div></div>
+        <div class="detail wide"><strong>Work required</strong><div>${escapeHtml(job.job_description || "—")}</div></div>
+      </div>
+    </div></div></body></html>
+  `);
+});
+
+app.get("/account-clients", async (req, res) => {
+  try {
+    const clients = (await pool.query(`
+      SELECT c.*, COUNT(u.id)::int AS user_count
+      FROM account_clients c
+      LEFT JOIN account_client_users u ON u.account_client_id = c.id AND u.active = TRUE
+      GROUP BY c.id
+      ORDER BY c.company_name
+    `)).rows;
+    const rows = clients.map(c => `
+      <tr>
+        <td><strong>${escapeHtml(c.company_name)}</strong></td>
+        <td>${escapeHtml(c.account_code || "—")}</td>
+        <td>${c.booking_mode === "direct" ? "Direct booking" : "Approval required"}</td>
+        <td>${c.user_count}</td>
+        <td>${c.active ? "Active" : "Inactive"}</td>
+      </tr>
+    `).join("");
+    res.send(`
+      <!DOCTYPE html><html><head><title>Account Clients</title><style>${sharedStyles()}.account-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(360px,.8fr);gap:22px;align-items:start}.panel{background:white;border-radius:20px;padding:22px;border:1px solid #e5e7eb}.form-grid{display:grid;gap:12px}.form-grid input,.form-grid select{width:100%}@media(max-width:1000px){.account-grid{grid-template-columns:1fr}}</style></head>
+      <body>${nav(req)}<h1>Account Clients</h1><div class="subtitle">Create secure commercial client access for direct job submission.</div>
+      <div class="account-grid"><div class="panel"><h2>Clients</h2><table><thead><tr><th>Company</th><th>Account code</th><th>Booking mode</th><th>Users</th><th>Status</th></tr></thead><tbody>${rows || `<tr><td colspan="5">No account clients yet.</td></tr>`}</tbody></table></div>
+      <div class="panel"><h2>Create client access</h2><form method="POST" action="/account-clients/create" class="form-grid">
+        <label>Company name</label><input name="company_name" required>
+        <label>Account / campaign code</label><input name="account_code" placeholder="e.g. SAVILLS" required>
+        <label>Booking mode</label><select name="booking_mode"><option value="approval" selected>Approval required - recommended</option><option value="direct">Direct booking</option></select>
+        <hr style="border:none;border-top:1px solid #e5e7eb;width:100%;">
+        <label>First user's name</label><input name="display_name" required>
+        <label>Login email</label><input type="email" name="email" required>
+        <label>Temporary password</label><input type="password" name="password" minlength="8" required>
+        <button type="submit">Create account client</button>
+      </form></div></div></body></html>
+    `);
+  } catch (error) {
+    console.error("Account clients page error:", error);
+    res.status(500).send(`Account clients error: ${escapeHtml(error.message)}`);
+  }
+});
+
+app.post("/account-clients/create", async (req, res) => {
+  const db = await pool.connect();
+  try {
+    const company = String(req.body.company_name || "").trim();
+    const code = String(req.body.account_code || "").trim().toUpperCase();
+    const mode = req.body.booking_mode === "direct" ? "direct" : "approval";
+    const displayName = String(req.body.display_name || "").trim();
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    if (!company || !code || !displayName || !email || password.length < 8) {
+      return res.status(400).send("Please complete every field. Password must be at least 8 characters.");
+    }
+
+    await db.query("BEGIN");
+    const clientResult = await db.query(`
+      INSERT INTO account_clients (company_name, account_code, booking_mode, active, created_at, updated_at)
+      VALUES ($1,$2,$3,TRUE,NOW(),NOW()) RETURNING id
+    `, [company, code, mode]);
+    const clientId = clientResult.rows[0].id;
+    await db.query(`
+      INSERT INTO account_client_users (account_client_id, display_name, email, password_hash, active, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,TRUE,NOW(),NOW())
+    `, [clientId, displayName, email, hashClientPassword(password)]);
+    await db.query("COMMIT");
+    res.redirect("/account-clients");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    console.error("Create account client error:", error);
+    res.status(500).send(`Could not create account client: ${escapeHtml(error.message)}`);
+  } finally {
+    db.release();
+  }
 });
 
 app.get("/start-shift", async (req, res) => {
@@ -3354,113 +4262,586 @@ app.get("/start-shift", async (req, res) => {
 });
 app.get("/", (req, res) => res.redirect("/start-shift"));
 
+function wallboardTodaySql() {
+  return `
+    SELECT *
+    FROM calls
+    WHERE start_time >= DATE_TRUNC('day', NOW())
+    ORDER BY start_time DESC
+  `;
+}
+
+function wallboardNumericSeconds(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n)) : null;
+  }
+  const parts = raw.split(":").map(Number);
+  if (parts.every(Number.isFinite)) {
+    if (parts.length === 2) return Math.max(0, Math.round(parts[0] * 60 + parts[1]));
+    if (parts.length === 3) return Math.max(0, Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2]));
+  }
+  return null;
+}
+
+function wallboardAnswerSeconds(call) {
+  if (!call || String(call.call_type || "").toLowerCase() !== "inbound") return null;
+  if (!String(call.answered_by || "").trim()) return null;
+  const raw = call.raw_json && typeof call.raw_json === "object" ? call.raw_json : {};
+  const explicitCandidates = [
+    raw.ring_duration_seconds, raw.ring_duration, raw.ring_seconds,
+    raw.ringing_duration, raw.ringing_seconds, raw.wait_duration_seconds,
+    raw.wait_duration, raw.wait_seconds, raw.answer_delay_seconds,
+    raw.answer_delay, raw.time_to_answer, raw.time_to_answer_seconds,
+    raw.seconds_to_answer
+  ];
+  for (const candidate of explicitCandidates) {
+    const seconds = wallboardNumericSeconds(candidate);
+    if (seconds !== null) return seconds;
+  }
+  const answerStamp = raw.answered_at || raw.answer_time || raw.answered_time || raw.connected_at || raw.connect_time;
+  const startStamp = call.start_time || raw.start || raw.start_time;
+  if (answerStamp && startStamp) {
+    const startMs = new Date(startStamp).getTime();
+    const answerMs = new Date(answerStamp).getTime();
+    if (Number.isFinite(startMs) && Number.isFinite(answerMs) && answerMs >= startMs) {
+      return Math.max(0, Math.round((answerMs - startMs) / 1000));
+    }
+  }
+  if (call.start_time && call.end_time) {
+    const startMs = new Date(call.start_time).getTime();
+    const endMs = new Date(call.end_time).getTime();
+    const talkSeconds = Number(call.duration_seconds || 0);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs && Number.isFinite(talkSeconds)) {
+      const elapsedSeconds = Math.round((endMs - startMs) / 1000);
+      const derived = elapsedSeconds - Math.max(0, talkSeconds);
+      if (derived >= 0 && derived <= 600) return derived;
+    }
+  }
+  return null;
+}
+
+function wallboardApproxRings(answerSeconds) {
+  if (answerSeconds === null || answerSeconds === undefined || !Number.isFinite(Number(answerSeconds))) return null;
+  const seconds = Math.max(0, Number(answerSeconds));
+  return Math.max(1, Math.ceil((seconds + 0.01) / 6));
+}
+
+function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
+  const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
+  const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
+  const now = Date.now();
+
+  // Yay occasionally leaves a call record without an end_time if the final webhook event
+  // is not received. Without a guard, that record looks "waiting" forever.
+  // An unanswered call is only considered live/waiting for this many seconds.
+  // Default: 10 minutes. Can be changed in Render with WALLBOARD_WAITING_MAX_SECONDS.
+  const waitingMaxSecondsRaw = Number(process.env.WALLBOARD_WAITING_MAX_SECONDS || 600);
+  const waitingMaxSeconds = Number.isFinite(waitingMaxSecondsRaw) && waitingMaxSecondsRaw >= 60
+    ? waitingMaxSecondsRaw
+    : 600;
+
+  function callAgeSeconds(call) {
+    const started = call.start_time || call.received_at || call.updated_at;
+    if (!started) return Number.POSITIVE_INFINITY;
+    const stamp = new Date(started).getTime();
+    if (!Number.isFinite(stamp)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, Math.floor((now - stamp) / 1000));
+  }
+
+  const answeredCalls = inboundCalls.filter(call => String(call.answered_by || "").trim());
+
+  const waitingCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && !call.end_time && callAgeSeconds(call) <= waitingMaxSeconds;
+  });
+
+  const staleUnansweredCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && !call.end_time && callAgeSeconds(call) > waitingMaxSeconds;
+  });
+
+  const missedCalls = inboundCalls.filter(call => {
+    const answeredBy = String(call.answered_by || "").trim();
+    return !answeredBy && Boolean(call.end_time);
+  }).concat(staleUnansweredCalls);
+
+  const inProgressCalls = calls.filter(call => {
+    if (call.end_time) return false;
+    const answeredBy = String(call.answered_by || "").trim();
+    if (!answeredBy) return callAgeSeconds(call) <= waitingMaxSeconds;
+    return true;
+  });
+
+  const totalTalkSeconds = answeredCalls.reduce((sum, call) => sum + Number(call.duration_seconds || 0), 0);
+  const avgTalkSeconds = answeredCalls.length ? Math.round(totalTalkSeconds / answeredCalls.length) : 0;
+  const answerRate = inboundCalls.length ? Math.round((answeredCalls.length / inboundCalls.length) * 100) : 0;
+  const missedRate = inboundCalls.length ? Math.round((missedCalls.length / inboundCalls.length) * 100) : 0;
+
+  const waitingWithSeconds = waitingCalls.map(call => {
+    const started = call.start_time || call.received_at;
+    const seconds = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
+    return { ...call, wait_seconds: seconds };
+  }).sort((a, b) => b.wait_seconds - a.wait_seconds);
+  const longestWaitSeconds = waitingWithSeconds[0]?.wait_seconds || 0;
+
+  const agentStats = {};
+  Object.entries(wallboardAgents).forEach(([ext, name]) => {
+    const presence = yayPresence[String(ext)] || {};
+    agentStats[ext] = {
+      ext,
+      name,
+      answered: 0,
+      totalDuration: 0,
+      totalAnswerSeconds: 0,
+      answerSpeedSamples: 0,
+      lastCallTime: null,
+      status: presence.state === "Available" ? "Available" : presence.state === "Offline" ? "Offline" : "Unknown",
+      currentDuration: 0,
+      registered: presence.registered ?? null,
+      queueAvailable: presence.queueAvailable ?? null
+    };
+  });
+
+  answeredCalls.forEach(call => {
+    const ext = String(call.answered_by || "").trim();
+    if (!agentStats[ext]) return;
+    const agent = agentStats[ext];
+    agent.answered += 1;
+    agent.totalDuration += Number(call.duration_seconds || 0);
+    const answerSeconds = wallboardAnswerSeconds(call);
+    if (answerSeconds !== null) {
+      agent.totalAnswerSeconds += answerSeconds;
+      agent.answerSpeedSamples += 1;
+    }
+    const callTime = call.start_time || call.received_at;
+    if (!agent.lastCallTime || (callTime && new Date(callTime) > new Date(agent.lastCallTime))) {
+      agent.lastCallTime = callTime;
+    }
+    if (!call.end_time) {
+      agent.status = "On Call";
+      const started = call.start_time || call.received_at;
+      agent.currentDuration = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
+    }
+  });
+
+  // An active outbound call may not carry answered_by. If Yay puts the extension in raw_json,
+  // retain the historic behaviour rather than guessing an agent here.
+  const agents = Object.values(agentStats).map(agent => {
+    const avgAnswerSeconds = agent.answerSpeedSamples
+      ? Math.round(agent.totalAnswerSeconds / agent.answerSpeedSamples)
+      : null;
+    return {
+      ...agent,
+      avgDuration: agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0,
+      avgAnswerSeconds,
+      approxRings: wallboardApproxRings(avgAnswerSeconds)
+    };
+  });
+
+  const recent = inboundCalls.slice(0, 12).map(call => {
+    const ext = String(call.answered_by || "").trim();
+    let status = "Missed";
+    if (!call.end_time && !ext && callAgeSeconds(call) <= waitingMaxSeconds) status = "Waiting";
+    else if (ext) status = call.end_time ? "Answered" : "On Call";
+    const answerSeconds = status === "Answered" || status === "On Call"
+      ? wallboardAnswerSeconds(call)
+      : null;
+    return {
+      id: call.id,
+      time: call.start_time || call.received_at,
+      caller: call.from_number || "Unknown",
+      status,
+      answerSeconds,
+      approxRings: wallboardApproxRings(answerSeconds),
+      duration: Number(call.duration_seconds || 0),
+      agent: wallboardAgents[ext] || ext || "",
+      extension: ext
+    };
+  });
+
+  return {
+    totals: {
+      callsToday: inboundCalls.length,
+      answered: answeredCalls.length,
+      missed: missedCalls.length,
+      waiting: waitingCalls.length,
+      inProgress: inProgressCalls.length,
+      answerRate,
+      missedRate,
+      avgTalkSeconds,
+      outbound: outboundCalls.length,
+      longestWaitSeconds,
+      waitingMaxSeconds
+    },
+    waitingCalls: waitingWithSeconds.slice(0, 10).map(call => ({
+      id: call.id,
+      caller: call.from_number || "Unknown",
+      start_time: call.start_time || call.received_at,
+      wait_seconds: call.wait_seconds
+    })),
+    agents,
+    recent
+  };
+}
+
+app.get("/api/call-wallboard/live", async (req, res) => {
+  try {
+    const [callsResult, latestResult, wallboardAgents] = await Promise.all([
+      pool.query(wallboardTodaySql()),
+      pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
+      getWallboardAgents()
+    ]);
+    const yayPresence = await getYayWallboardPresence(wallboardAgents);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents, yayPresence);
+    snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
+    snapshot.generatedAt = new Date().toISOString();
+    res.setHeader("Cache-Control", "no-store");
+    res.json(snapshot);
+  } catch (error) {
+    console.error("Wallboard live API error:", error);
+    res.status(500).json({ error: "Wallboard data unavailable" });
+  }
+});
+
 app.get("/call-wallboard", async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT *
-      FROM calls
-      WHERE start_time >= NOW() - INTERVAL '24 hours'
-      ORDER BY start_time DESC
-    `);
+    const [callsResult, latestResult, wallboardAgents] = await Promise.all([
+      pool.query(wallboardTodaySql()),
+      pool.query(`SELECT MAX(received_at) AS last_received FROM calls`),
+      getWallboardAgents()
+    ]);
+    const yayPresence = await getYayWallboardPresence(wallboardAgents);
+    const snapshot = wallboardSnapshotFromCalls(callsResult.rows, wallboardAgents, yayPresence);
+    snapshot.lastReceived = latestResult.rows[0]?.last_received || null;
 
-    const latestResult = await pool.query(`SELECT MAX(received_at) AS last_received FROM calls`);
-    const recentCalls = result.rows;
+    function wbSeconds(seconds) {
+      const total = Math.max(0, Number(seconds || 0));
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
 
-    // Only inbound calls should count towards answered/missed call reporting.
-    // This stops outgoing/internal calls with no answered_by value being treated as missed customer calls.
-    const inboundCalls = recentCalls.filter(call => (call.call_type || "").toLowerCase() === "inbound");
-    const answeredCalls = inboundCalls.filter(call => call.answered_by);
-    const missedCalls = inboundCalls.filter(call => !call.answered_by);
-    const reportableCalls = inboundCalls;
+    function wbAnswerSpeed(seconds, rings) {
+      if (seconds === null || seconds === undefined) return "—";
+      const ringText = rings ? ` · ~${rings} ring${rings === 1 ? "" : "s"}` : "";
+      return `${Number(seconds)} sec${ringText}`;
+    }
 
-    const missedRate = reportableCalls.length ? Math.round((missedCalls.length / reportableCalls.length) * 100) : 0;
+    function wbAgentCards(agents) {
+      return [...agents]
+        .sort((a, b) => {
+          if (a.status === "On Call" && b.status !== "On Call") return -1;
+          if (b.status === "On Call" && a.status !== "On Call") return 1;
+          return b.answered - a.answered || a.name.localeCompare(b.name);
+        })
+        .map(agent => `
+          <article class="agent-card ${agent.status === "On Call" ? "on-call" : agent.status === "Available" ? "ready" : "offline"}">
+            <div class="agent-head">
+              <div class="agent-name-wrap">
+                <span class="agent-dot"></span>
+                <div><strong>${escapeHtml(agent.name)}</strong><span class="agent-ext">${escapeHtml(agent.ext)}</span></div>
+              </div>
+              <span class="agent-state">${agent.status === "On Call" ? `On Call · ${wbSeconds(agent.currentDuration)}` : escapeHtml(agent.status)}</span>
+            </div>
+            <div class="agent-metrics">
+              <div><span>Calls Today</span><strong>${agent.answered}</strong></div>
+              <div><span>Avg Answer</span><strong>${escapeHtml(wbAnswerSpeed(agent.avgAnswerSeconds, agent.approxRings))}</strong></div>
+              <div><span>Avg Duration</span><strong>${wbSeconds(agent.avgDuration)}</strong></div>
+              <div><span>Last Call</span><strong>${agent.lastCallTime ? escapeHtml(formatTimeOnly(agent.lastCallTime)) : "—"}</strong></div>
+            </div>
+          </article>
+        `).join("");
+    }
 
-    let missedRateClass = "good";
-    if (reportableCalls.length === 0) missedRateClass = "neutral";
-    else if (missedRate >= 20) missedRateClass = "bad";
-    else if (missedRate >= 10) missedRateClass = "soon";
+    function wbRecentRows(recent) {
+      if (!recent.length) return `<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>`;
+      return recent.map(call => `
+        <tr>
+          <td>${call.time ? escapeHtml(formatTimeOnly(call.time)) : "—"}</td>
+          <td>${escapeHtml(call.caller)}</td>
+          <td><span class="call-status ${call.status.toLowerCase().replace(/\s+/g, "-")}">${escapeHtml(call.status)}</span></td>
+          <td>${escapeHtml(wbAnswerSpeed(call.answerSeconds, call.approxRings))}</td>
+          <td>${call.status === "Waiting" ? "—" : wbSeconds(call.duration)}</td>
+          <td>${escapeHtml(call.agent || "—")}</td>
+        </tr>
+      `).join("");
+    }
 
-    const lastReceived = latestResult.rows[0].last_received;
-    const lastUpdatedText = lastReceived ? `Last call received: ${formatDateTimeWithSeconds(lastReceived)}` : "No calls received yet";
-    const pageUpdatedText = `Page refreshed: ${formatDateTimeWithSeconds(new Date())}`;
+    function wbLeaderboard(agents) {
+      const ranked = [...agents].sort((a, b) => b.answered - a.answered || a.name.localeCompare(b.name)).slice(0, 5);
+      const max = Math.max(1, ...ranked.map(a => a.answered));
+      return ranked.map((agent, index) => `
+        <div class="leader-row">
+          <span class="rank">${index + 1}</span>
+          <span class="leader-name">${escapeHtml(agent.name)} <small>(${escapeHtml(agent.ext)})</small></span>
+          <span class="leader-track"><i style="width:${Math.max(4, Math.round(agent.answered / max * 100))}%"></i></span>
+          <strong>${agent.answered}</strong>
+        </div>
+      `).join("");
+    }
 
-    const wallboardAgents = await getWallboardAgents();
-    const agentStats = {};
-    Object.entries(wallboardAgents).forEach(([ext, name]) => {
-      agentStats[ext] = { ext, name, answered: 0, totalDuration: 0, lastCallTime: null, status: "No active call" };
-    });
-
-    answeredCalls.forEach(call => {
-      const ext = String(call.answered_by || "").trim();
-      if (!wallboardAgents[ext]) return;
-      agentStats[ext].answered += 1;
-      agentStats[ext].totalDuration += Number(call.duration_seconds || 0);
-      const callTime = call.start_time || call.received_at;
-      if (!agentStats[ext].lastCallTime || new Date(callTime) > new Date(agentStats[ext].lastCallTime)) {
-        agentStats[ext].lastCallTime = callTime;
-      }
-      if (!call.end_time) agentStats[ext].status = "Engaged";
-    });
-
-    const agentRows = Object.values(agentStats)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map(agent => {
-        const avgDuration = agent.answered ? Math.round(agent.totalDuration / agent.answered) : 0;
-        const statusClass = agent.status === "Engaged" ? "engaged" : "inactive";
-        return `
-          <tr>
-            <td>${escapeHtml(agent.name)}</td>
-            <td>${agent.answered}</td>
-            <td>${formatSeconds(avgDuration)}</td>
-            <td>${formatTimeOnly(agent.lastCallTime)}</td>
-            <td><span class="status ${statusClass}">${agent.status}</span></td>
-          </tr>
-        `;
-      }).join("");
+    const availableAgents = snapshot.agents.filter(a => a.status === "Available").length;
+    const totalAgents = snapshot.agents.length;
+    const alertOn = snapshot.totals.waiting > 0;
+    const alertText = snapshot.totals.waiting === 1
+      ? `1 caller waiting${snapshot.totals.longestWaitSeconds ? ` · ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : ""}`
+      : `${snapshot.totals.waiting} callers waiting${snapshot.totals.longestWaitSeconds ? ` · longest ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : ""}`;
 
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Call wallboard</title>
-        <meta http-equiv="refresh" content="5">
+        <title>Live Call Wallboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          ${sharedStyles()}
-          .updated { color: #6b7280; font-size: 16px; margin-bottom: 30px; font-weight: 600; }
-          .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }
-          .card { background: #1f2937; border-radius: 14px; padding: 25px; border: 2px solid transparent; box-shadow: 0 14px 30px rgba(17, 24, 39, 0.12); }
-          .card.good { border-color: #16a34a; }
-          .card.soon { border-color: #f59e0b; }
-          .card.bad { border-color: #dc2626; }
-          .card.neutral { border-color: #94a3b8; }
-          .label { color: #e5e7eb; font-size: 16px; font-weight: 700; }
-          .value { color: #ffffff; font-size: 42px; font-weight: bold; margin-top: 10px; }
-          .value.good { color: #22c55e; }
-          .value.soon { color: #fbbf24; }
-          .value.bad { color: #ef4444; }
-          .value.neutral { color: white; }
-          .card-link { color: inherit; text-decoration: none; display: block; }
-          .card-link:hover { text-decoration: none; transform: translateY(-1px); }
-          .card-link .card { cursor: pointer; }
+          :root {
+            --navy:#06192e;
+            --navy-2:#08243f;
+            --panel:#0a223b;
+            --panel-2:#0d2a48;
+            --line:rgba(148,163,184,.18);
+            --text:#f8fafc;
+            --muted:#9fb2c8;
+            --green:#21df77;
+            --red:#ff5968;
+            --amber:#ffc447;
+            --blue:#66b8ff;
+          }
+          *{box-sizing:border-box}
+          html,body{margin:0;min-height:100%;background:#031424;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+          body{min-height:100vh;background:
+            radial-gradient(circle at 16% 0%,rgba(16,83,145,.22),transparent 31%),
+            radial-gradient(circle at 85% 15%,rgba(16,110,95,.12),transparent 28%),
+            linear-gradient(145deg,#03111f,#06192e 52%,#03111f);}
+          .wallboard{min-height:100vh;padding:18px 20px 20px;display:grid;grid-template-rows:auto auto auto 1fr auto;gap:12px}
+          .topbar{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(380px,1.5fr) auto;align-items:center;gap:18px}
+          .brand{display:flex;align-items:center;gap:13px;min-width:0}
+          .brand img{width:54px;height:54px;object-fit:contain}
+          .brand-title{font-size:20px;font-weight:900;line-height:1.05}
+          .brand-sub{font-size:9px;letter-spacing:.28em;color:#b8c8d8;margin-top:5px;text-transform:uppercase}
+          .title-wrap{border-left:1px solid rgba(148,163,184,.32);padding-left:24px}
+          h1{font-size:clamp(30px,3vw,48px);margin:0;letter-spacing:-.035em}
+          .subtitle{margin-top:3px;font-size:15px;color:#9dc0e4}
+          .clock{text-align:right}
+          .clock .date{font-size:13px;color:#b8c8d8}
+          .clock .time{font-size:31px;font-weight:900;line-height:1.1;margin-top:3px}
+          .live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);margin-left:8px}
+          .portal-link{position:fixed;right:16px;bottom:14px;z-index:20;background:rgba(4,19,34,.82);color:#a9c1da;border:1px solid rgba(148,163,184,.2);padding:8px 11px;border-radius:10px;text-decoration:none;font-size:11px;opacity:.45;transition:.2s}
+          .portal-link:hover{opacity:1;color:white}
+          .kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+          .kpi{background:linear-gradient(180deg,rgba(12,39,66,.96),rgba(7,29,50,.96));border:1px solid var(--line);border-radius:15px;padding:13px 15px;min-width:0;box-shadow:0 12px 30px rgba(0,0,0,.16)}
+          .kpi-label{color:#c1d0df;font-size:13px;font-weight:800}
+          .kpi-value{font-size:clamp(28px,3vw,45px);line-height:1;font-weight:950;margin-top:7px;letter-spacing:-.04em}
+          .kpi-foot{font-size:11px;color:#91a8bd;margin-top:6px}
+          .green .kpi-value{color:var(--green)} .red .kpi-value{color:#ff6b78}.amber .kpi-value{color:var(--amber)}.blue .kpi-value{color:#8dcaff}
+          .alertbar{border-radius:14px;padding:11px 18px;display:flex;justify-content:space-between;align-items:center;gap:20px;background:rgba(8,35,59,.95);border:1px solid var(--line);min-height:55px}
+          .alertbar.hot{background:linear-gradient(90deg,rgba(114,8,27,.92),rgba(66,8,24,.92));border-color:#ff4155;box-shadow:0 0 22px rgba(255,50,70,.24);animation:alertPulse 1.4s infinite}
+          @keyframes alertPulse{0%,100%{box-shadow:0 0 12px rgba(255,50,70,.15)}50%{box-shadow:0 0 30px rgba(255,50,70,.4)}}
+          .alert-main{display:flex;align-items:center;gap:13px;font-size:clamp(18px,2vw,28px);font-weight:900}.alert-icon{font-size:27px}
+          .alert-meta{font-size:12px;color:#c8d8e7;text-align:right}.hot .alert-meta{color:#ffd1d6}
+          .main-grid{display:grid;grid-template-columns:minmax(0,2.25fr) minmax(330px,.95fr);gap:10px;min-height:0}
+          .panel{background:linear-gradient(180deg,rgba(8,31,53,.96),rgba(5,25,44,.96));border:1px solid var(--line);border-radius:15px;min-height:0;overflow:hidden}
+          .panel-head{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line)}
+          .panel-title{font-size:16px;font-weight:900}.panel-note{font-size:10px;color:#8fa8c0}
+          .agent-grid{padding:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;align-content:start}
+          .agent-card{border:1px solid rgba(32,219,119,.38);background:linear-gradient(145deg,rgba(6,53,54,.45),rgba(8,31,53,.8));border-radius:13px;padding:11px;min-width:0}
+          .agent-card.on-call{border-color:rgba(255,89,104,.55);background:linear-gradient(145deg,rgba(90,20,38,.34),rgba(8,31,53,.84))}
+          .agent-card.offline{border-color:rgba(148,163,184,.22);background:linear-gradient(145deg,rgba(30,41,59,.40),rgba(8,31,53,.70));opacity:.72}
+          .agent-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+          .agent-name-wrap{display:flex;gap:7px;align-items:center;min-width:0}.agent-name-wrap strong{font-size:14px}.agent-ext{font-size:10px;color:#90a8bf;margin-left:5px}
+          .agent-dot{width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(33,223,119,.7);flex:0 0 auto}
+          .on-call .agent-dot{background:var(--red);box-shadow:0 0 9px rgba(255,89,104,.7)}
+          .offline .agent-dot{background:#64748b;box-shadow:none}
+          .agent-state{font-size:9px;font-weight:900;padding:4px 7px;border-radius:999px;background:rgba(33,223,119,.13);color:#80f3ae;white-space:nowrap}
+          .on-call .agent-state{background:rgba(255,89,104,.13);color:#ff9aa4}
+          .offline .agent-state{background:rgba(100,116,139,.14);color:#a8b3c2}
+          .agent-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}
+          .agent-metrics div{border-left:1px solid rgba(148,163,184,.14);padding-left:7px}.agent-metrics div:first-child{border-left:0;padding-left:0}
+          .agent-metrics span{display:block;font-size:9px;color:#8fa6bc}.agent-metrics strong{display:block;margin-top:2px;font-size:13px;white-space:nowrap}
+          .recent-wrap{overflow:auto;max-height:100%}
+          table{width:100%;border-collapse:collapse;font-size:11px}
+          th{color:#9eb4ca;text-align:left;font-weight:700;padding:8px 9px;background:rgba(255,255,255,.025);position:sticky;top:0}
+          td{padding:8px 9px;border-top:1px solid rgba(148,163,184,.1);white-space:nowrap}
+          .call-status{font-weight:900}.answered{color:var(--green)}.missed{color:var(--red)}.waiting,.on-call{color:var(--amber)}
+          .empty-cell{text-align:center;color:#8fa8c0;padding:30px}
+          .bottom-grid{display:grid;grid-template-columns:minmax(300px,.95fr) minmax(480px,1.35fr);gap:10px}
+          .leader-list{padding:10px 13px}.leader-row{display:grid;grid-template-columns:24px minmax(110px,.9fr) minmax(110px,1.6fr) 35px;gap:8px;align-items:center;margin:8px 0;font-size:11px}
+          .rank{width:22px;height:22px;border-radius:6px;background:#183858;display:grid;place-items:center;font-weight:900}.leader-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.leader-name small{color:#839bb2}
+          .leader-track{height:8px;background:#16334e;border-radius:999px;overflow:hidden}.leader-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#20da78,#5ef0a0)}
+          .health-grid{padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.health{background:rgba(255,255,255,.025);border:1px solid rgba(148,163,184,.13);border-radius:11px;padding:10px}.health span{display:block;color:#8fa8c0;font-size:9px}.health strong{display:block;font-size:22px;margin-top:5px}.health small{display:block;margin-top:4px;color:#9fb2c8;font-size:9px}
+          @media(max-width:1200px){.agent-grid{grid-template-columns:repeat(3,1fr)}.kpis{grid-template-columns:repeat(3,1fr)}}
+          @media(max-width:900px){.wallboard{display:block}.topbar,.main-grid,.bottom-grid{grid-template-columns:1fr}.topbar,.kpis,.main-grid,.bottom-grid{margin-bottom:12px}.agent-grid{grid-template-columns:repeat(2,1fr)}.kpis{grid-template-columns:repeat(2,1fr)}.clock{text-align:left}.title-wrap{border-left:0;padding-left:0}.panel{margin-bottom:10px}}
         </style>
       </head>
       <body>
-        ${nav(req)}
-        <h1>Call wallboard</h1>
-        <div class="subtitle">Rolling last 24 hours · Auto-refreshes every 5 seconds</div>
-        <div class="updated">${lastUpdatedText} · ${pageUpdatedText}</div>
-        <div class="cards">
-          <div class="card"><div class="label">Total Calls</div><div class="value">${reportableCalls.length}</div></div>
-          <div class="card"><div class="label">Answered</div><div class="value">${answeredCalls.length}</div></div>
-          <div class="card"><div class="label">Missed</div><div class="value">${missedCalls.length}</div></div>
-          <a class="card-link" href="/call-wallboard/missed-calls"><div class="card ${missedRateClass}"><div class="label">Miss Rate · click for details</div><div class="value ${missedRateClass}">${missedRate}%</div></div></a>
-        </div>
-        <table>
-          <thead>
-            <tr><th>Agent</th><th>Answered</th><th>Avg Duration</th><th>Last Call</th><th>Status</th></tr>
-          </thead>
-          <tbody>${agentRows}</tbody>
-        </table>
+        <main class="wallboard">
+          <header class="topbar">
+            <div class="brand">
+              <img src="/brand-logo.png" alt="">
+              <div><div class="brand-title">Your Dispatch<br>Partner</div><div class="brand-sub">24H Locksmiths</div></div>
+            </div>
+            <div class="title-wrap">
+              <h1>Live Call Wallboard</h1>
+              <div class="subtitle">Yay-powered call overview · today's live operation</div>
+            </div>
+            <div class="clock"><div class="date" id="wbDate"></div><div class="time"><span id="wbTime"></span><span class="live-dot"></span></div></div>
+          </header>
+
+          <section class="kpis">
+            <div class="kpi blue"><div class="kpi-label">Calls Today</div><div class="kpi-value" data-kpi="callsToday">${snapshot.totals.callsToday}</div><div class="kpi-foot">Inbound calls</div></div>
+            <div class="kpi green"><div class="kpi-label">Answered</div><div class="kpi-value" data-kpi="answered">${snapshot.totals.answered}</div><div class="kpi-foot"><span data-kpi="answerRate">${snapshot.totals.answerRate}</span>% answer rate</div></div>
+            <div class="kpi red"><div class="kpi-label">Missed</div><div class="kpi-value" data-kpi="missed">${snapshot.totals.missed}</div><div class="kpi-foot"><span data-kpi="missedRate">${snapshot.totals.missedRate}</span>% of inbound</div></div>
+            <div class="kpi amber"><div class="kpi-label">Waiting Now</div><div class="kpi-value" data-kpi="waiting">${snapshot.totals.waiting}</div><div class="kpi-foot">Live unconnected calls</div></div>
+            <div class="kpi blue"><div class="kpi-label">Avg Talk Time</div><div class="kpi-value" data-kpi="avgTalk">${wbSeconds(snapshot.totals.avgTalkSeconds)}</div><div class="kpi-foot">Answered inbound calls</div></div>
+            <div class="kpi green"><div class="kpi-label">Agents Available</div><div class="kpi-value"><span data-kpi="availableAgents">${availableAgents}</span>/<span data-kpi="totalAgents">${totalAgents}</span></div><div class="kpi-foot">Registered + queue available</div></div>
+          </section>
+
+          <section class="alertbar ${alertOn ? "hot" : ""}" id="waitingAlert">
+            <div class="alert-main"><span class="alert-icon">${alertOn ? "⚠" : "✓"}</span><span id="waitingAlertText">${alertOn ? escapeHtml(alertText) : "No callers currently waiting"}</span></div>
+            <div class="alert-meta"><strong id="longestWaitLabel">${alertOn ? `Longest wait ${wbSeconds(snapshot.totals.longestWaitSeconds)}` : "Queue clear"}</strong><br><span id="lastDataText">${snapshot.lastReceived ? `Latest Yay event ${escapeHtml(formatTimeOnly(snapshot.lastReceived))}` : "Waiting for Yay call data"}</span></div>
+          </section>
+
+          <section class="main-grid">
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Team Status</div><div class="panel-note"><span id="agentCount">${totalAgents}</span> mapped agents · green = available · red = on call · grey = offline</div></div>
+              <div class="agent-grid" id="agentGrid">${wbAgentCards(snapshot.agents)}</div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Live Queue / Recent Calls</div><div class="panel-note">Latest inbound activity</div></div>
+              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Answer Time</th><th>Duration</th><th>Agent</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
+            </div>
+          </section>
+
+          <section class="bottom-grid">
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">🏆 Leaderboard Today</div><div class="panel-note">Answered calls</div></div>
+              <div class="leader-list" id="leaderboard">${wbLeaderboard(snapshot.agents)}</div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><div class="panel-title">Queue Health</div><div class="panel-note">Live system status</div></div>
+              <div class="health-grid">
+                <div class="health"><span>Miss Rate</span><strong><span data-kpi="missedRate2">${snapshot.totals.missedRate}</span>%</strong><small>Today's inbound calls</small></div>
+                <div class="health"><span>Longest Wait</span><strong data-kpi="longestWait">${wbSeconds(snapshot.totals.longestWaitSeconds)}</strong><small>Current queue</small></div>
+                <div class="health"><span>Calls In Progress</span><strong data-kpi="inProgress">${snapshot.totals.inProgress}</strong><small>Inbound + outbound</small></div>
+                <div class="health"><span>Answer Rate</span><strong><span data-kpi="answerRate2">${snapshot.totals.answerRate}</span>%</strong><small>Answered inbound</small></div>
+              </div>
+            </div>
+          </section>
+        </main>
+        <a class="portal-link" href="/jobs">Back to Portal</a>
+
+        <script>
+          function pad2(n){ return String(n).padStart(2,"0"); }
+          function duration(seconds){
+            seconds = Math.max(0, Number(seconds || 0));
+            return pad2(Math.floor(seconds/60)) + ":" + pad2(seconds%60);
+          }
+          function html(value){
+            return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+          }
+          function answerSpeed(seconds,rings){
+            if(seconds===null || seconds===undefined) return "—";
+            return Number(seconds)+" sec"+(rings ? " · ~"+rings+" ring"+(rings===1?"":"s") : "");
+          }
+          function timeOnly(value){
+            if(!value) return "—";
+            const d = new Date(value);
+            if(Number.isNaN(d.getTime())) return "—";
+            return new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Europe/London"}).format(d);
+          }
+          function updateClock(){
+            const now = new Date();
+            document.getElementById("wbDate").textContent = new Intl.DateTimeFormat("en-GB",{weekday:"short",day:"2-digit",month:"short",year:"numeric",timeZone:"Europe/London"}).format(now);
+            document.getElementById("wbTime").textContent = new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Europe/London"}).format(now);
+          }
+          updateClock(); setInterval(updateClock,1000);
+
+          function setKpi(key,value){
+            document.querySelectorAll('[data-kpi="'+key+'"]').forEach(el => el.textContent = value);
+          }
+          function renderAgents(agents){
+            const sorted=[...agents].sort((a,b)=>{
+              if(a.status==="On Call" && b.status!=="On Call") return -1;
+              if(b.status==="On Call" && a.status!=="On Call") return 1;
+              return b.answered-a.answered || a.name.localeCompare(b.name);
+            });
+            return sorted.map(a =>
+              '<article class="agent-card '+(a.status==="On Call"?"on-call":a.status==="Available"?"ready":"offline")+'">'+
+                '<div class="agent-head">'+
+                  '<div class="agent-name-wrap"><span class="agent-dot"></span><div><strong>'+html(a.name)+'</strong><span class="agent-ext">'+html(a.ext)+'</span></div></div>'+
+                  '<span class="agent-state">'+(a.status==="On Call" ? "On Call · "+duration(a.currentDuration) : html(a.status || "Unknown"))+'</span>'+
+                '</div>'+
+                '<div class="agent-metrics">'+
+                  '<div><span>Calls Today</span><strong>'+a.answered+'</strong></div>'+
+                  '<div><span>Avg Answer</span><strong>'+answerSpeed(a.avgAnswerSeconds,a.approxRings)+'</strong></div>'+
+                  '<div><span>Avg Duration</span><strong>'+duration(a.avgDuration)+'</strong></div>'+
+                  '<div><span>Last Call</span><strong>'+timeOnly(a.lastCallTime)+'</strong></div>'+
+                '</div>'+
+              '</article>'
+            ).join("");
+          }
+          function renderRecent(recent){
+            if(!recent.length) return '<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>';
+            return recent.map(c =>
+              '<tr>'+
+                '<td>'+timeOnly(c.time)+'</td><td>'+html(c.caller)+'</td>'+
+                '<td><span class="call-status '+html(c.status.toLowerCase().replace(/\\s+/g,"-"))+'">'+html(c.status)+'</span></td>'+
+                '<td>'+answerSpeed(c.answerSeconds,c.approxRings)+'</td>'+
+                '<td>'+(c.status==="Waiting" ? "—" : duration(c.duration))+'</td><td>'+html(c.agent || "—")+'</td>'+
+              '</tr>'
+            ).join("");
+          }
+          function renderLeaders(agents){
+            const ranked=[...agents].sort((a,b)=>b.answered-a.answered || a.name.localeCompare(b.name)).slice(0,5);
+            const max=Math.max(1,...ranked.map(a=>a.answered));
+            return ranked.map((a,i) =>
+              '<div class="leader-row"><span class="rank">'+(i+1)+'</span><span class="leader-name">'+html(a.name)+' <small>('+html(a.ext)+')</small></span>'+
+              '<span class="leader-track"><i style="width:'+Math.max(4,Math.round(a.answered/max*100))+'%"></i></span><strong>'+a.answered+'</strong></div>'
+            ).join("");
+          }
+          async function refreshWallboard(){
+            try{
+              const r=await fetch("/api/call-wallboard/live",{cache:"no-store"});
+              if(!r.ok) return;
+              const data=await r.json();
+              setKpi("callsToday",data.totals.callsToday);
+              setKpi("answered",data.totals.answered);
+              setKpi("missed",data.totals.missed);
+              setKpi("waiting",data.totals.waiting);
+              setKpi("answerRate",data.totals.answerRate);
+              setKpi("answerRate2",data.totals.answerRate);
+              setKpi("missedRate",data.totals.missedRate);
+              setKpi("missedRate2",data.totals.missedRate);
+              setKpi("avgTalk",duration(data.totals.avgTalkSeconds));
+              setKpi("longestWait",duration(data.totals.longestWaitSeconds));
+              setKpi("inProgress",data.totals.inProgress);
+              const ready=data.agents.filter(a=>a.status==="Available").length;
+              setKpi("availableAgents",ready); setKpi("totalAgents",data.agents.length);
+              document.getElementById("agentCount").textContent=data.agents.length;
+              document.getElementById("agentGrid").innerHTML=renderAgents(data.agents);
+              document.getElementById("recentRows").innerHTML=renderRecent(data.recent);
+              document.getElementById("leaderboard").innerHTML=renderLeaders(data.agents);
+
+              const alert=document.getElementById("waitingAlert");
+              const text=document.getElementById("waitingAlertText");
+              const longest=document.getElementById("longestWaitLabel");
+              if(data.totals.waiting>0){
+                alert.classList.add("hot");
+                text.textContent=(data.totals.waiting===1 ? "1 caller waiting" : data.totals.waiting+" callers waiting") + (data.totals.longestWaitSeconds ? " · "+duration(data.totals.longestWaitSeconds) : "");
+                longest.textContent="Longest wait "+duration(data.totals.longestWaitSeconds);
+              }else{
+                alert.classList.remove("hot"); text.textContent="No callers currently waiting"; longest.textContent="Queue clear";
+              }
+              document.getElementById("lastDataText").textContent=data.lastReceived ? "Latest Yay event "+timeOnly(data.lastReceived) : "Waiting for Yay call data";
+            }catch(e){}
+          }
+          setInterval(refreshWallboard,5000);
+        </script>
       </body>
       </html>
     `);
@@ -4529,7 +5910,6 @@ app.post("/invoices/create", async (req, res) => {
     res.status(500).send("Create invoice error. Check Render logs.");
   }
 });
-
 
 app.get("/invoices/:id/edit", async (req, res) => {
   try {
@@ -6502,12 +7882,18 @@ async function assertTechnicianAssignableForJob(technicianId, targetDateValue) {
 }
 
 function technicianOptions(technicians, selectedId = "", targetDateValue = null) {
-  return technicians.map(tech => {
+  const ordered = [...technicians].sort((a, b) => {
+    const aSub = Boolean(a.is_subcontractor);
+    const bSub = Boolean(b.is_subcontractor);
+    if (aSub !== bSub) return aSub ? 1 : -1;
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  return ordered.map(tech => {
     const selected = String(tech.id) === String(selectedId || "") ? "selected" : "";
     const assignableForTarget = targetDateValue ? technicianCanBeAssignedOn(tech, targetDateValue) : true;
     const disabled = !assignableForTarget && !selected ? "disabled" : "";
     const returnDate = dateInputValue(tech.return_to_work_date);
-    const labelBits = [tech.name];
+    const labelBits = [tech.is_subcontractor ? `[SUB] ${tech.name}` : tech.name];
     if (tech.status) labelBits.push(tech.status);
     if (returnDate) labelBits.push(`returns ${returnDate}`);
     return `<option value="${tech.id}" data-status="${escapeHtml(tech.status || '')}" data-return-date="${escapeHtml(returnDate)}" ${selected} ${disabled}>${escapeHtml(labelBits.join(" — "))}</option>`;
@@ -6623,6 +8009,18 @@ function jobTechnicianSummary(job) {
 
   return lines.join("\n");
 }
+app.get("/api/account-requests/pending", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT COUNT(*)::int AS count, MAX(client_submitted_at) AS latest
+      FROM jobs WHERE status = 'account_pending_review'
+    `);
+    res.json({ count: Number(result.rows[0]?.count || 0), latest: result.rows[0]?.latest || null });
+  } catch (error) {
+    res.status(500).json({ count: 0 });
+  }
+});
+
 app.get("/jobs", async (req, res) => {
   try {
     const selectedStatus = (req.query.status || "active").trim();
@@ -6632,6 +8030,8 @@ app.get("/jobs", async (req, res) => {
     const customDateFrom = (req.query.date_from || "").trim();
     const customDateTo = (req.query.date_to || "").trim();
     const search = (req.query.search || "").trim();
+    const requestedKpiPeriod = (req.query.kpi_period || "today").trim().toLowerCase();
+    const kpiPeriod = ["today", "week", "month"].includes(requestedKpiPeriod) ? requestedKpiPeriod : "today";
 
     const where = [];
     const params = [];
@@ -6699,7 +8099,7 @@ app.get("/jobs", async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult] = await Promise.all([
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult, accountPendingMetricResult, periodMetricsResult] = await Promise.all([
       pool.query(`
         SELECT j.*, t.name AS technician_name
         FROM jobs j
@@ -6707,6 +8107,7 @@ app.get("/jobs", async (req, res) => {
         ${whereSql}
         ORDER BY
           CASE j.status
+            WHEN 'account_pending_review' THEN 0
             WHEN 'open' THEN 1
             WHEN 'assigned' THEN 2
             WHEN 'awaiting_payment' THEN 3
@@ -6723,7 +8124,12 @@ app.get("/jobs", async (req, res) => {
       `, params),
       pool.query(`SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status`),
       pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE closed_at IS NOT NULL AND DATE(closed_at) = CURRENT_DATE`),
-      pool.query(`SELECT id, name, status, priority, location_checked_in_at FROM technicians WHERE active = TRUE ORDER BY name ASC`),
+      pool.query(`
+        SELECT id, name, status, priority, is_subcontractor, location_checked_in_at
+        FROM technicians
+        WHERE active = TRUE
+        ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+      `),
       pool.query(`SELECT DISTINCT COALESCE(source_campaign, '') AS campaign FROM jobs WHERE COALESCE(source_campaign, '') <> '' ORDER BY campaign ASC LIMIT 80`),
       pool.query(`
         SELECT
@@ -6753,7 +8159,45 @@ app.get("/jobs", async (req, res) => {
         FROM jobs
         WHERE status IN ('awaiting_payment', 'awaiting_balance', 'sent_to_pm', 'disputed')
            OR (closed_at IS NOT NULL AND COALESCE(customer_paid, FALSE) = FALSE AND COALESCE(final_value, 0) > 0 AND COALESCE(status, '') <> 'fully_paid')
-      `)
+      `),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE status = 'account_pending_review'`),
+      pool.query(`
+        WITH bounds AS (
+          SELECT CASE
+            WHEN $1 = 'week' THEN date_trunc('week', NOW())
+            WHEN $1 = 'month' THEN date_trunc('month', NOW())
+            ELSE date_trunc('day', NOW())
+          END AS period_start
+        )
+        SELECT
+          COUNT(*) FILTER (
+            WHERE j.created_at >= b.period_start
+          )::int AS jobs_created,
+          COUNT(*) FILTER (
+            WHERE j.closed_at IS NOT NULL
+              AND j.closed_at >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          )::int AS jobs_closed,
+          COUNT(*) FILTER (
+            WHERE j.status IN ('cancelled_before_arrival', 'cancelled_onsite')
+              AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+          )::int AS jobs_cancelled,
+          COALESCE(SUM(j.final_value) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          ), 0) AS income,
+          COALESCE(SUM(j.materials_cost) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+          ), 0) AS materials,
+          COALESCE(AVG(j.final_value) FILTER (
+            WHERE COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.period_start
+              AND COALESCE(j.status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+              AND COALESCE(j.final_value, 0) > 0
+          ), 0) AS average_job_value
+        FROM jobs j
+        CROSS JOIN bounds b
+      `, [kpiPeriod])
     ]);
 
     const counts = Object.fromEntries(countsResult.rows.map(row => [row.status || "open", row.count]));
@@ -6765,7 +8209,7 @@ app.get("/jobs", async (req, res) => {
       { value: "active", label: `Active / scheduled jobs (${activeCount})` },
       { value: "all", label: "All orders" },
       { value: "closed_today", label: `Closed today (${closedToday})` },
-      { value: "cancelled", label: `Total cancelled (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
+      { value: "cancelled", label: `All cancelled jobs (${Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0)})` },
       ...jobStatuses.map(item => ({ value: item.value, label: `${item.label} (${counts[item.value] || 0})` }))
     ];
 
@@ -6788,19 +8232,32 @@ app.get("/jobs", async (req, res) => {
       { value: "custom", label: "Custom date range" }
     ];
 
-    const cancelledTotal = Number(counts.cancelled_before_arrival || 0) + Number(counts.cancelled_onsite || 0);
     const openDisputesTotal = Number(disputesMetricResult.rows[0]?.count || 0);
     const paymentChaseTotal = Number(paymentChaseMetricResult.rows[0]?.count || 0);
+    const accountPendingTotal = Number(accountPendingMetricResult.rows[0]?.count || 0);
+    const periodMetrics = periodMetricsResult.rows[0] || {};
 
+    const periodLabel = kpiPeriod === "week" ? "This week" : (kpiPeriod === "month" ? "This month" : "Today");
+    const money = value => `£${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    // These cards are live workload figures and do not change with the KPI period selector.
     const statusCards = [
+      { label: "ACCOUNT JOBS - REVIEW", value: accountPendingTotal, className: accountPendingTotal ? "board-account-alert" : "board-blue", hrefStatus: "account_pending_review" },
       { label: "Job awaiting to be assigned", value: Number(counts.open || 0), className: "board-blue", hrefStatus: "open" },
       { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green", hrefStatus: "assigned" },
       { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
-      { label: "Closed today", value: closedToday, className: "board-red", hrefStatus: "closed_today" },
-      { label: "Total cancelled", value: cancelledTotal, className: "board-slate", hrefStatus: "cancelled" },
       { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" },
       { label: "Payment chase", value: paymentChaseTotal, className: "board-purple", href: "/payment-chasing" }
+    ];
+
+    const periodCards = [
+      { label: "Jobs created", value: Number(periodMetrics.jobs_created || 0), className: "board-blue" },
+      { label: "Closed", value: Number(periodMetrics.jobs_closed || 0), className: "board-green" },
+      { label: "Cancelled", value: Number(periodMetrics.jobs_cancelled || 0), className: "board-slate" },
+      { label: "Income", value: money(periodMetrics.income), className: "board-green" },
+      { label: "Materials", value: money(periodMetrics.materials), className: "board-amber" },
+      { label: "Avg job value", value: money(periodMetrics.average_job_value), className: "board-pink" }
     ];
 
     function technicianBadgeClass(status) {
@@ -6821,12 +8278,13 @@ app.get("/jobs", async (req, res) => {
 
     const rows = jobsResult.rows.map(job => {
       const customerPhone = job.customer_phone ? `<a class="phone-link" href="${phoneHref(job.customer_phone)}">${escapeHtml(job.customer_phone)}</a>` : "";
+      const accountPending = job.status === "account_pending_review";
       return `
-        <tr>
+        <tr class="${accountPending ? "account-request-row" : ""}">
           <td><span class="board-status ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
           <td><strong>${escapeHtml(job.postcode || "—")}</strong><div class="small-muted">${escapeHtml(job.job_number || jobNumber(job.id))}</div></td>
           <td>${escapeHtml(job.job_type || "—")}</td>
-          <td>${escapeHtml(job.source_campaign || "—")}</td>
+          <td>${escapeHtml(job.source_campaign || "—")}${job.client_reference ? `<div class="small-muted">Ref: ${escapeHtml(job.client_reference)}</div>` : ""}</td>
           <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
           <td>${escapeHtml(job.dispatcher_name || "Unknown")}</td>
           <td><strong>${escapeHtml(job.customer_name || "—")}</strong><div class="small-muted">${customerPhone}</div></td>
@@ -6862,6 +8320,13 @@ app.get("/jobs", async (req, res) => {
       `;
     }).join("");
 
+    const periodCardHtml = periodCards.map(card => `
+      <div class="board-card period-card ${card.className}">
+        <div class="board-card-label">${escapeHtml(card.label)}</div>
+        <div class="board-card-number">${escapeHtml(String(card.value))}</div>
+      </div>
+    `).join("");
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -6885,17 +8350,59 @@ app.get("/jobs", async (req, res) => {
           .board-actions { display: flex; gap: 12px; align-items: center; flex: 0 0 auto; }
           .board-actions .primary-action { background: var(--brand-green-dark); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
           .board-actions .secondary-action { background: var(--charcoal); color: white; padding: 14px 18px; border-radius: 14px; font-weight: 900; text-decoration: none; }
+          .kpi-panel {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 20px;
+            padding: 16px 18px 18px;
+            margin: 22px 0 20px;
+            box-shadow: 0 10px 24px rgba(17,24,39,0.04);
+          }
+          .kpi-panel-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 14px;
+          }
+          .kpi-title-wrap { display:flex; align-items:center; gap:12px; min-width:0; }
+          .kpi-title { color:#111827; font-size:15px; font-weight:900; }
+          .kpi-subtitle { color:#667085; font-size:12px; margin-top:2px; }
+          .kpi-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+          .kpi-period-btn {
+            border:1px solid #d1d5db; background:#f8fafc; color:#475569;
+            padding:8px 12px; border-radius:999px; font-weight:900; font-size:12px; cursor:pointer;
+          }
+          .kpi-period-btn.is-active { background:#17212b; color:#fff; border-color:#17212b; }
+          .kpi-collapse-btn {
+            border:1px solid #d1d5db; background:#fff; color:#475569;
+            width:34px; height:34px; border-radius:10px; font-weight:900; cursor:pointer;
+          }
+          .kpi-panel.is-collapsed .kpi-panel-body { display:none; }
+          .kpi-panel.is-collapsed .kpi-panel-head { margin-bottom:0; }
+          .kpi-panel.is-collapsed .kpi-collapse-btn { transform:rotate(180deg); }
+          .kpi-section-label {
+            color:#667085; font-size:11px; font-weight:900; text-transform:uppercase;
+            letter-spacing:.06em; margin:12px 0 8px;
+          }
           .status-card-grid {
             display: grid;
-            grid-template-columns: repeat(8, minmax(135px, 1fr));
-            gap: 18px;
-            margin: 22px 0 20px;
+            grid-template-columns: repeat(7, minmax(135px, 1fr));
+            gap: 14px;
+            margin: 0;
           }
-          .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; min-height: 110px; padding: 20px 20px 16px 24px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
+          .period-card-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(145px, 1fr));
+            gap: 14px;
+            margin: 0;
+          }
+          .period-card { cursor:default; }
+          .board-card { position: relative; display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; min-height: 98px; padding: 16px 16px 14px 20px; text-decoration: none; box-shadow: 0 12px 28px rgba(17,24,39,0.05); overflow: hidden; }
           .board-card:before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; }
           .board-card:after { content: ""; position: absolute; right: -28px; top: -34px; width: 110px; height: 110px; border-radius: 999px; opacity: 0.10; }
           .board-card-label { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; min-height: 34px; max-width: 160px; }
-          .board-card-number { color: #111827; font-size: 40px; font-weight: 900; margin-top: 12px; }
+          .board-card-number { color: #111827; font-size: 34px; font-weight: 900; margin-top: 9px; }
           .board-blue:before, .board-blue:after { background: #2563eb; }
           .board-green:before, .board-green:after { background: #16a34a; }
           .board-red:before, .board-red:after { background: #dc2626; }
@@ -6904,6 +8411,13 @@ app.get("/jobs", async (req, res) => {
           .board-slate:before, .board-slate:after { background: #475569; }
           .board-orange:before, .board-orange:after { background: #f97316; }
           .board-purple:before, .board-purple:after { background: #7c3aed; }
+          @keyframes accountPulse { 0%,100% { box-shadow:0 0 0 0 rgba(220,38,38,.25); } 50% { box-shadow:0 0 0 10px rgba(220,38,38,0); } }
+          @keyframes accountRowPulse { 0%,100% { background:#fff7ed; } 50% { background:#fee2e2; } }
+          .board-account-alert { border:2px solid #dc2626; animation:accountPulse 1.3s infinite; background:#fff7ed; }
+          .board-account-alert:before, .board-account-alert:after { background:#dc2626; }
+          .account-request-row td { animation:accountRowPulse 1.3s infinite; border-bottom-color:#fecaca !important; }
+          .account-request-banner { background:#991b1b; color:white; padding:16px 18px; border-radius:16px; margin:0 0 18px; font-weight:900; display:flex; justify-content:space-between; align-items:center; gap:15px; animation:accountPulse 1.3s infinite; }
+          .account-request-banner a { background:white; color:#991b1b; padding:9px 13px; border-radius:10px; text-decoration:none; white-space:nowrap; }
           .tech-strip { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px 20px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .tech-strip-title { color: #667085; font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; }
           .tech-chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -6957,11 +8471,14 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
           .feed-dot.job-cancelled-onsite { background: #4b5563; }
           @media (max-width: 1500px) {
-            .status-card-grid { grid-template-columns: repeat(3, minmax(175px, 1fr)); }
+            .status-card-grid { grid-template-columns: repeat(4, minmax(150px, 1fr)); }
+            .period-card-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
             .board-content-grid { grid-template-columns: minmax(0, 1fr) 330px; }
           }
           @media (max-width: 1200px) {
-            .status-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .status-card-grid, .period-card-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .kpi-panel-head { align-items:flex-start; flex-direction:column; }
+            .kpi-controls { justify-content:flex-start; }
             .board-content-grid { grid-template-columns: 1fr; }
             .board-filters { grid-template-columns: 1fr; }
             .dispatch-table { display: block; overflow-x: auto; }
@@ -6982,9 +8499,55 @@ app.get("/jobs", async (req, res) => {
             </div>
           </div>
 
-          <section class="status-card-grid">
-            ${cardHtml}
+          <section class="kpi-panel" id="dispatch_kpi_panel">
+            <div class="kpi-panel-head">
+              <div class="kpi-title-wrap">
+                <div>
+                  <div class="kpi-title">Dispatch KPIs</div>
+                  <div class="kpi-subtitle">Live workload plus ${escapeHtml(periodLabel.toLowerCase())}'s performance.</div>
+                </div>
+              </div>
+              <div class="kpi-controls">
+                <button type="button" class="kpi-period-btn${kpiPeriod === "today" ? " is-active" : ""}" data-kpi-period="today">Today</button>
+                <button type="button" class="kpi-period-btn${kpiPeriod === "week" ? " is-active" : ""}" data-kpi-period="week">This Week</button>
+                <button type="button" class="kpi-period-btn${kpiPeriod === "month" ? " is-active" : ""}" data-kpi-period="month">This Month</button>
+                <button type="button" class="kpi-collapse-btn" id="kpi_collapse_btn" aria-label="Collapse KPI section" title="Collapse / expand KPIs">⌃</button>
+              </div>
+            </div>
+            <div class="kpi-panel-body">
+              <div class="kpi-section-label">Live workload</div>
+              <div class="status-card-grid">${cardHtml}</div>
+              <div class="kpi-section-label">${escapeHtml(periodLabel)} performance</div>
+              <div class="period-card-grid">${periodCardHtml}</div>
+            </div>
           </section>
+          <script>
+            (function () {
+              const panel = document.getElementById("dispatch_kpi_panel");
+              const collapseBtn = document.getElementById("kpi_collapse_btn");
+              const stored = window.localStorage ? localStorage.getItem("dispatchKpisCollapsed") : null;
+              if (panel && stored === "1") panel.classList.add("is-collapsed");
+
+              if (collapseBtn && panel) {
+                collapseBtn.addEventListener("click", function () {
+                  panel.classList.toggle("is-collapsed");
+                  if (window.localStorage) {
+                    localStorage.setItem("dispatchKpisCollapsed", panel.classList.contains("is-collapsed") ? "1" : "0");
+                  }
+                });
+              }
+
+              document.querySelectorAll("[data-kpi-period]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                  const url = new URL(window.location.href);
+                  url.searchParams.set("kpi_period", button.getAttribute("data-kpi-period"));
+                  window.location.href = url.toString();
+                });
+              });
+            })();
+          </script>
+
+          ${accountPendingTotal > 0 ? `<div class="account-request-banner"><span>⚠ ${accountPendingTotal} NEW ACCOUNT JOB${accountPendingTotal === 1 ? "" : "S"} NEED${accountPendingTotal === 1 ? "S" : ""} REVIEW</span><a href="/jobs?status=account_pending_review">Review now</a></div>` : ""}
 
           <section class="tech-strip">
             <div class="tech-strip-title">Technician availability</div>
@@ -7011,6 +8574,16 @@ app.get("/jobs", async (req, res) => {
               </div>
             </form>
             <script>
+              const initialAccountPending = ${accountPendingTotal};
+              setInterval(async () => {
+                try {
+                  const response = await fetch("/api/account-requests/pending", { cache: "no-store" });
+                  if (!response.ok) return;
+                  const data = await response.json();
+                  if (Number(data.count || 0) !== Number(initialAccountPending || 0)) window.location.reload();
+                } catch (_) {}
+              }, 3000);
+
               const boardDateFilter = document.getElementById("board_date_filter");
               const customDateRange = document.getElementById("custom_date_range");
               function toggleBoardCustomDates() {
@@ -7079,6 +8652,26 @@ app.get("/jobs", async (req, res) => {
   }
 });
 
+app.post("/jobs/:id/account-review/accept", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).send("Invalid job ID.");
+    const reviewedBy = currentAgentName(req) || "Unknown";
+    const result = await pool.query(`
+      UPDATE jobs
+      SET status = 'open', account_reviewed_at = NOW(), account_reviewed_by = $1, updated_at = NOW()
+      WHERE id = $2 AND status = 'account_pending_review'
+      RETURNING id
+    `, [reviewedBy, id]);
+    if (!result.rows.length) return res.redirect(`/jobs/${id}/edit`);
+    await addJobAuditEntry(id, "account_job_acknowledged", "status", "Account job - review required", "Job awaiting to be assigned", reviewedBy);
+    res.redirect(`/jobs/${id}/edit`);
+  } catch (error) {
+    console.error("Account review accept error:", error);
+    res.status(500).send(`Could not accept account job: ${escapeHtml(error.message)}`);
+  }
+});
+
 app.post("/jobs/:id/delete", async (req, res) => {
   const jobId = Number(req.params.id);
   if (!Number.isFinite(jobId)) return res.redirect("/jobs");
@@ -7107,6 +8700,8 @@ app.post("/jobs/:id/delete", async (req, res) => {
     ]);
 
     await client.query(`DELETE FROM job_sms_log WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM job_stripe_payment_links WHERE job_id = $1`, [jobId]);
+    await client.query(`DELETE FROM account_client_activity WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_evidence_links WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_payment_chases WHERE job_id = $1`, [jobId]);
     await client.query(`DELETE FROM job_audit_log WHERE job_id = $1`, [jobId]);
@@ -7143,7 +8738,12 @@ app.get("/jobs/new", async (req, res) => {
     const addressesJson = JSON.stringify(addresses).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
     const addressOptions = addresses.map((address, index) => `<option value="${index}">${escapeHtml(address.summary || address.full_address || `Address ${index + 1}`)}</option>`).join("");
 
-    const technicians = (await pool.query(`SELECT id, name, status, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`
+      SELECT id, name, status, return_to_work_date, is_subcontractor
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+    `)).rows;
     const templates = (await pool.query(`SELECT id, template_name, customer_name, customer_address, customer_postcode FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 
@@ -7882,7 +9482,12 @@ app.get("/jobs/:id/edit", async (req, res) => {
     `, [id]);
     if (!jobResult.rows.length) return res.status(404).send("Job not found");
     const job = jobResult.rows[0];
-    const technicians = (await pool.query(`SELECT id, name, status, phone, checkin_token, return_to_work_date FROM technicians WHERE active = TRUE ORDER BY name ASC`)).rows;
+    const technicians = (await pool.query(`
+      SELECT id, name, status, phone, checkin_token, return_to_work_date, is_subcontractor
+      FROM technicians
+      WHERE active = TRUE
+      ORDER BY COALESCE(is_subcontractor, FALSE) ASC, name ASC
+    `)).rows;
     const templates = (await pool.query(`SELECT id, template_name FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const campaignOptions = await getCampaignOptions(job.source_campaign || "Unknown");
     const summary = jobTechnicianSummary(job);
@@ -7914,6 +9519,14 @@ app.get("/jobs/:id/edit", async (req, res) => {
       ORDER BY created_at DESC, id DESC
       LIMIT 30
     `, [id])).rows;
+
+    const stripePaymentLinks = (await pool.query(`
+      SELECT * FROM job_stripe_payment_links
+      WHERE job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 30
+    `, [id])).rows;
+    const stripeDefaultAmount = stripeOutstandingAmount(job);
 
     const isImportedJob = Boolean(job.is_imported);
     const activityItems = [
@@ -8021,6 +9634,18 @@ app.get("/jobs/:id/edit", async (req, res) => {
               <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
             </div>
           </div>
+
+          ${job.status === "account_pending_review" ? `
+            <div style="background:#991b1b;color:white;border-radius:18px;padding:18px 20px;margin-bottom:20px;display:flex;justify-content:space-between;gap:18px;align-items:center;box-shadow:0 12px 28px rgba(153,27,27,.2);">
+              <div>
+                <strong style="font-size:18px;">ACCOUNT CLIENT JOB - REVIEW REQUIRED</strong>
+                <div style="margin-top:5px;">${escapeHtml(job.source_campaign || "Account client")}${job.client_reference ? ` · Client ref ${escapeHtml(job.client_reference)}` : ""} · submitted ${escapeHtml(formatDateTime(job.client_submitted_at || job.created_at))}</div>
+              </div>
+              <form method="POST" action="/jobs/${job.id}/account-review/accept" style="margin:0;" onsubmit="return confirm('Acknowledge this account request and move it into the live dispatch queue?');">
+                <button type="submit" style="background:white;color:#991b1b;">Acknowledge & accept job</button>
+              </form>
+            </div>
+          ` : ""}
 
           <div class="summary-kpis">
             <div class="summary-kpi"><div class="kpi-label">Customer</div><div class="kpi-value">${escapeHtml(job.customer_name || "—")}</div></div>
@@ -8159,6 +9784,20 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 ${renderSmsHistory(smsRows)}
               </div>
 
+              <div class="control-card" id="stripe-payment-card">
+                <h2>Stripe payment link</h2>
+                ${renderStripeConfigNotice()}
+                <p class="muted-note">Create a one-off Stripe-hosted payment page for this job. The amount defaults from the outstanding balance where the job values allow it, but you can change it before creating the link.</p>
+                <form method="POST" action="/jobs/${job.id}/stripe-payment-links" class="quick-form" onsubmit="const b=this.querySelector('button[type=submit]'); if(b){b.disabled=true;b.textContent='Creating...';} return true;">
+                  <label>Amount</label>
+                  <input name="amount" inputmode="decimal" placeholder="£" value="${stripeDefaultAmount !== null && stripeDefaultAmount > 0 ? Number(stripeDefaultAmount).toFixed(2) : ""}" required>
+                  <label>Description</label>
+                  <input value="${escapeHtml(stripePaymentDescription(job))}" readonly>
+                  <button type="submit" ${stripeConfigured() ? "" : "disabled"}>Create Stripe payment link</button>
+                </form>
+                ${renderStripePaymentLinkHistory(stripePaymentLinks)}
+              </div>
+
               <div class="control-card">
                 <h2>Payment chase</h2>
                 <p class="muted-note">Use this when a job is partially or fully unpaid. Log the chase, outcome and next follow-up date.</p>
@@ -8216,6 +9855,21 @@ app.get("/jobs/:id/edit", async (req, res) => {
             box.select();
             document.execCommand("copy");
             alert("Technician summary copied.");
+          }
+
+          function copyStripeLink(url) {
+            if (!url) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(url).then(() => alert("Stripe payment link copied."));
+              return;
+            }
+            const temp = document.createElement("textarea");
+            temp.value = url;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand("copy");
+            temp.remove();
+            alert("Stripe payment link copied.");
           }
 
           const smsTemplateSelect = document.getElementById("sms_template");
@@ -8328,6 +9982,132 @@ app.post("/jobs/:id/evidence", async (req, res) => {
   } catch (error) {
     console.error("Add job evidence error:", error);
     res.status(500).send("Could not add job evidence link. Check Render logs.");
+  }
+});
+
+
+app.post("/jobs/:id/stripe-payment-links", async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).send("Invalid job ID.");
+
+    const jobResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+
+    const job = jobResult.rows[0];
+    const amount = parseMoneyInput(req.body.amount);
+    if (amount === null || amount < 0.50) {
+      return res.status(400).send("Please enter a Stripe payment link amount of at least £0.50.");
+    }
+
+    const changedBy = currentAgentName(req) || "Unknown";
+    const created = await createStripePaymentLink(job, amount, changedBy);
+
+    await pool.query(`
+      INSERT INTO job_stripe_payment_links
+        (job_id, stripe_payment_link_id, payment_url, amount, currency, description, stripe_status, created_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    `, [
+      id,
+      created.stripePaymentLinkId,
+      created.url,
+      created.amount,
+      created.currency,
+      created.description,
+      created.rawStatus,
+      changedBy
+    ]);
+
+    await addJobAuditEntry(
+      id,
+      "stripe_payment_link_created",
+      "Stripe payment link",
+      "—",
+      `${money(created.amount)} · ${created.description} · ${created.url}`,
+      changedBy
+    );
+
+    res.redirect(`/jobs/${id}/edit#stripe-payment-card`);
+  } catch (error) {
+    console.error("Create Stripe payment link error:", error.message);
+    res.status(500).send(`Could not create Stripe payment link: ${escapeHtml(error.message)}. No payment has been taken.`);
+  }
+});
+
+app.post("/jobs/:id/stripe-payment-links/:linkId/send-sms", async (req, res) => {
+  const id = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+  try {
+    if (!Number.isInteger(id) || !Number.isInteger(linkId)) return res.status(400).send("Invalid job or payment link ID.");
+
+    const jobResult = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [id]);
+    if (!jobResult.rows.length) return res.status(404).send("Job not found");
+    const job = jobResult.rows[0];
+
+    const linkResult = await pool.query(`
+      SELECT * FROM job_stripe_payment_links
+      WHERE id = $1 AND job_id = $2
+    `, [linkId, id]);
+    if (!linkResult.rows.length) return res.status(404).send("Stripe payment link not found for this job");
+    const paymentLink = linkResult.rows[0];
+
+    const to = cleanSmsNumber(job.offsite_payment && job.bill_payer_phone ? job.bill_payer_phone : job.customer_phone);
+    if (!to) return res.status(400).send("Customer / bill payer mobile number is missing.");
+
+    const customerName = job.customer_name ? ` ${job.customer_name}` : "";
+    const postcode = compactPostcode(job.postcode || "") || "your address";
+    const message = `Hi${customerName}, please use this secure Stripe link to pay ${money(paymentLink.amount)} for your locksmith job at ${postcode}: ${paymentLink.payment_url} This is an automated payment message; please do not reply. Questions: ${smsOfficeTel()}`;
+
+    let status = "sent";
+    let providerResponse = "";
+    try {
+      const sendResult = await sendYaySms(to, message, `${job.job_number || jobNumber(job.id)} - Stripe payment link`);
+      status = sendResult.status;
+      providerResponse = sendResult.providerResponse;
+    } catch (sendError) {
+      status = "failed";
+      providerResponse = sendError.message;
+      console.error("Stripe payment SMS send error:", sendError);
+    }
+
+    const sentBy = currentAgentName(req) || "Unknown";
+    await pool.query(`
+      INSERT INTO job_sms_log (job_id, sent_to, sms_type, template_name, message_body, status, provider, provider_response, sent_by, created_at)
+      VALUES ($1, $2, 'stripe_payment_link', 'Stripe payment link', $3, $4, 'yay', $5, $6, NOW())
+    `, [id, to, message, status, providerResponse, sentBy]);
+
+    await pool.query(`
+      UPDATE job_stripe_payment_links
+      SET send_count = COALESCE(send_count, 0) + 1,
+          last_sent_to = $1,
+          last_sent_by = $2,
+          last_sent_at = NOW()
+      WHERE id = $3 AND job_id = $4
+    `, [to, sentBy, linkId, id]);
+
+    await addJobAuditEntry(
+      id,
+      "stripe_payment_link_sms_sent",
+      "Stripe payment link",
+      "—",
+      `${money(paymentLink.amount)} link sent to ${to}: ${status}`,
+      sentBy
+    );
+
+    res.redirect(`/jobs/${id}/edit#stripe-payment-card`);
+  } catch (error) {
+    console.error("Send Stripe payment SMS error:", error);
+    res.status(500).send(`Could not send/log Stripe payment SMS: ${escapeHtml(error.message)}`);
   }
 });
 
@@ -9735,9 +11515,181 @@ function technicianPortalShell(title, bodyHtml) {
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <style>${technicianWorkspaceStyles()}</style>
     </head>
-    <body>${bodyHtml}</body>
+    <body>
+      ${bodyHtml}
+      <script>
+        function copyTechStripeLink(url) {
+          if (!url) return;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(() => alert("Stripe payment link copied."));
+            return;
+          }
+          const temp = document.createElement("textarea");
+          temp.value = url;
+          document.body.appendChild(temp);
+          temp.select();
+          document.execCommand("copy");
+          temp.remove();
+          alert("Stripe payment link copied.");
+        }
+      </script>
+    </body>
     </html>
   `;
+}
+
+
+function renderTechnicianStripeLinks(rows = [], token, jobId) {
+  if (!rows.length) return `<p class="job-sub" style="margin:8px 0 0;">No Stripe payment links created for this job yet.</p>`;
+  return `
+    <div style="margin-top:10px; display:grid; gap:8px;">
+      ${rows.map(row => `
+        <div style="padding:10px; border:1px solid #dbe3ec; border-radius:12px; background:#f8fafc;">
+          <div><strong>${money(row.amount || 0)}</strong> · ${escapeHtml(String(row.currency || "GBP").toUpperCase())}</div>
+          <div class="job-sub">${escapeHtml(row.description || "Stripe payment link")}</div>
+          <div class="actions" style="margin-top:8px;">
+            <a class="button dark" href="${escapeHtml(row.payment_url || "#")}" target="_blank" rel="noopener noreferrer">Open link</a>
+            <button class="button dark" type="button" onclick="copyTechStripeLink(${JSON.stringify(String(row.payment_url || ""))})">Copy link</button>
+            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${Number(jobId)}/stripe-payment-links/${Number(row.id)}/send-sms" style="margin:0;" onsubmit="return confirm('Send this Stripe payment link to the customer by SMS?');">
+              <button class="button red" type="submit">Send by SMS</button>
+            </form>
+          </div>
+          ${Number(row.send_count || 0) > 0 ? `<div class="job-sub" style="margin-top:6px;">SMS attempted ${Number(row.send_count || 0)} time(s)${row.last_sent_at ? ` · last ${escapeHtml(formatDateTime(row.last_sent_at))}` : ""}</div>` : ""}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+
+
+function maskMobileForCustomer(value) {
+  const clean = String(value || "").replace(/\s+/g, "");
+  if (clean.length <= 4) return clean || "customer mobile";
+  return `${"*".repeat(Math.max(0, clean.length - 4))}${clean.slice(-4)}`;
+}
+
+function techCloseDraftToken(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encoded}.${signValue(encoded)}`;
+}
+
+function readTechCloseDraftToken(token) {
+  try {
+    const raw = String(token || "");
+    if (!raw.includes(".")) return null;
+    const [encoded, signature] = raw.split(".");
+    const expected = signValue(encoded);
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+
+    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (!payload || !payload.createdAt) return null;
+    if (Date.now() - Number(payload.createdAt) > 1000 * 60 * 30) return null;
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+function customerConfirmationCodeHash(jobId, code) {
+  return crypto
+    .createHash("sha256")
+    .update(`${authSecret()}|${Number(jobId)}|${String(code || "").trim()}`)
+    .digest("hex");
+}
+
+function makeCustomerConfirmationCode() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function clientIpAddress(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || String(req.socket?.remoteAddress || "");
+}
+
+function technicianInvoiceCompanyForJob(job) {
+  const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
+  if (job.account_job || job.account_template_id) return "locksmiths";
+  if (payment.includes("card")) return "online";
+  if (payment.includes("bank") || payment.includes("bacs")) return "locksmiths";
+  return "online";
+}
+
+function technicianInvoicePaymentForJob(job) {
+  const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
+  if (job.account_job || job.account_template_id) return "Bank transfer";
+  if (payment.includes("card")) return "Card";
+  if (payment.includes("bank") || payment.includes("bacs")) return "Bank transfer";
+  return "Cash";
+}
+
+function technicianInvoiceNetValue(job) {
+  const net = Number(job.net_value || 0);
+  if (Number.isFinite(net) && net > 0) return Math.round(net * 100) / 100;
+
+  const gross = Number(job.final_value || 0);
+  if (Number.isFinite(gross) && gross > 0) return Math.round((gross / 1.2) * 100) / 100;
+
+  return null;
+}
+
+function technicianInvoiceDescription(job) {
+  const bits = [];
+  if (job.job_type) bits.push(String(job.job_type).trim());
+  if (job.job_description) bits.push(String(job.job_description).trim());
+  return bits.filter(Boolean).join(" — ").slice(0, 240) || "Locksmith services";
+}
+
+function technicianInvoiceNumber(job) {
+  return String(job.job_number || `JOB-${job.id}`);
+}
+
+async function technicianJobForInvoice(token, jobId) {
+  const tech = await getTechnicianByToken(token);
+  if (!tech) return { tech: null, job: null };
+
+  const result = await pool.query(`
+    SELECT j.*
+    FROM jobs j
+    WHERE j.id = $1
+      AND (
+        j.assigned_technician_id = $2
+        OR j.assigned_technician_id IN (
+          SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+        )
+      )
+  `, [jobId, tech.id, tech.name]);
+
+  return { tech, job: result.rows[0] || null };
+}
+
+async function technicianInvoiceAddressForJob(job) {
+  if (job.account_template_id) {
+    const templateResult = await pool.query(`
+      SELECT id, template_name, customer_name, customer_address, customer_postcode
+      FROM invoice_templates
+      WHERE id = $1 AND active = TRUE
+    `, [job.account_template_id]);
+
+    const template = templateResult.rows[0];
+    if (template) {
+      return {
+        template,
+        customerName: template.customer_name || job.customer_name || "",
+        customerAddress: template.customer_address || "",
+        customerPostcode: compactPostcode(template.customer_postcode || ""),
+        siteSameAsInvoice: false
+      };
+    }
+  }
+
+  return {
+    template: null,
+    customerName: job.customer_name || "",
+    customerAddress: techJobAddress(job),
+    customerPostcode: compactPostcode(job.postcode || ""),
+    siteSameAsInvoice: true
+  };
 }
 
 function techJobAddress(job) {
@@ -10047,6 +11999,22 @@ app.get('/tech-workspace/:token', async (req, res) => {
         j.created_at DESC
     `, values)).rows;
 
+    const stripeLinksByJob = {};
+    const activeJobIds = jobs.map(job => Number(job.id)).filter(Number.isInteger);
+    if (activeJobIds.length) {
+      const stripeRows = (await pool.query(`
+        SELECT *
+        FROM job_stripe_payment_links
+        WHERE job_id = ANY($1::int[])
+        ORDER BY created_at DESC, id DESC
+      `, [activeJobIds])).rows;
+      stripeRows.forEach(row => {
+        const key = String(row.job_id);
+        if (!stripeLinksByJob[key]) stripeLinksByJob[key] = [];
+        stripeLinksByJob[key].push(row);
+      });
+    }
+
     const openDisputes = await getOpenDisputesForTechnician(tech);
     const disputeNotice = openDisputes.length ? `
       <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
@@ -10065,8 +12033,16 @@ app.get('/tech-workspace/:token', async (req, res) => {
       `<div class="brief-line green">Close jobs with final value, payment method and materials used.</div>`
     ].join('');
 
-    const jobCards = jobs.map(job => `
-      <div class="job-card">
+    const jobCards = jobs.map(job => {
+      const techStripeLinks = stripeLinksByJob[String(job.id)] || [];
+      const outstanding = stripeOutstandingAmount(job);
+      const fallbackAmount = Number(job.quoted_price || job.starting_price || 0);
+      const techStripeDefaultAmount = outstanding !== null && outstanding > 0
+        ? outstanding
+        : (fallbackAmount > 0 ? fallbackAmount : null);
+
+      return `
+      <div class="job-card" id="job-${job.id}">
         <div class="job-head">
           <div>
             <h2 class="job-title">${escapeHtml(job.postcode || job.job_number || 'Job')}</h2>
@@ -10081,14 +12057,35 @@ app.get('/tech-workspace/:token', async (req, res) => {
           </div>
           <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
         </div>
-        <div class="actions">
+
+        <div style="margin-top:14px; padding:12px; border-radius:14px; background:#f8fafc; border:1px solid #dbe3ec;">
+          <strong>Stripe payment link</strong>
+          <p class="job-sub" style="margin:5px 0 10px;">Create a secure Stripe link for this job and send it to the customer by SMS.</p>
+          ${renderStripeConfigNotice()}
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/stripe-payment-links" style="display:grid; grid-template-columns:minmax(110px,160px) 1fr auto; gap:8px; align-items:end;">
+            <div>
+              <label>Amount</label>
+              <input name="amount" inputmode="decimal" placeholder="£" value="${techStripeDefaultAmount !== null ? Number(techStripeDefaultAmount).toFixed(2) : ''}" required>
+            </div>
+            <div>
+              <label>Description</label>
+              <input value="${escapeHtml(stripePaymentDescription(job))}" readonly>
+            </div>
+            <button class="button dark" type="submit" ${stripeConfigured() ? "" : "disabled"}>Create payment link</button>
+          </form>
+          ${renderTechnicianStripeLinks(techStripeLinks, token, job.id)}
+        </div>
+
+        <div class="actions" style="margin-top:14px;">
           <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/onsite">
             <button class="button red" type="submit">On site</button>
           </form>
+          <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/invoice/new">Create invoice</a>
           <a class="button red" href="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close">Close job</a>
         </div>
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     const body = `
       <div class="briefing" id="briefing">
@@ -10122,6 +12119,673 @@ app.get('/tech-workspace/:token', async (req, res) => {
   } catch (error) {
     console.error('Technician workspace error:', error);
     res.status(500).send('Technician workspace error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
+  }
+});
+
+
+
+app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.send(technicianLoginPage(token, tech));
+    }
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const existingInvoice = (await pool.query(`
+      SELECT id, invoice_number, total, invoice_stage, created_at
+      FROM invoices
+      WHERE linked_job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `, [jobId])).rows[0];
+
+    if (existingInvoice) {
+      const body = `
+        <div class="topbar">
+          <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+          <div class="live">Invoice already created</div>
+        </div>
+        <div class="wrap">
+          ${technicianWorkspaceTabs(token, 'jobs')}
+          <div class="card">
+            <h1>Invoice already exists</h1>
+            <p>An invoice is already linked to <strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong>.</p>
+            <p><strong>Invoice:</strong> ${escapeHtml(existingInvoice.invoice_number)}<br>
+            <strong>Total:</strong> ${money(existingInvoice.total)}<br>
+            <strong>Stage:</strong> ${escapeHtml(existingInvoice.invoice_stage || 'Draft only')}</p>
+            <div class="actions">
+              <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/${existingInvoice.id}/pdf" target="_blank">Open invoice PDF</a>
+              <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Back to job</a>
+            </div>
+          </div>
+        </div>
+      `;
+      return res.send(technicianPortalShell('Invoice already exists', body));
+    }
+
+    const invoiceAddress = await technicianInvoiceAddressForJob(job);
+    const defaultCompany = technicianInvoiceCompanyForJob(job);
+    const defaultPayment = technicianInvoicePaymentForJob(job);
+    const defaultNet = technicianInvoiceNetValue(job);
+    const invoiceDate = new Date().toLocaleDateString('en-GB', {
+      timeZone: 'Europe/London',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    const templateNotice = invoiceAddress.template
+      ? `<div style="padding:12px;border-radius:12px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:14px;">
+           <strong>Account invoice template:</strong> ${escapeHtml(invoiceAddress.template.template_name)}<br>
+           <span class="job-sub">The invoice address below has been taken from the account template saved on the job. The job address remains the site address.</span>
+         </div>`
+      : `<div style="padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #dbe3ec;margin-bottom:14px;">
+           <strong>Private / normal customer invoice</strong><br>
+           <span class="job-sub">The customer and site address have been taken directly from the job.</span>
+         </div>`;
+
+    const cashNotice = defaultPayment === 'Cash'
+      ? `<div style="padding:12px;border-radius:12px;background:#fff7ed;border:1px solid #fed7aa;margin-bottom:14px;">
+           <strong>Cash payment:</strong> cash is valid for either company, so please confirm the company before creating the invoice.
+         </div>`
+      : '';
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">Create job invoice</div>
+      </div>
+
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <h1>Create invoice</h1>
+        <p class="job-sub">Job ${escapeHtml(job.job_number || jobNumber(job.id))} · ${escapeHtml(job.postcode || '')}</p>
+
+        ${templateNotice}
+        ${cashNotice}
+
+        <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/create" onsubmit="return confirm('Create this invoice now?');">
+          <div class="card">
+            <h2>Invoice details picked up from the job</h2>
+            <div class="field-grid">
+              <div><label>Invoice / job number</label><input value="${escapeHtml(technicianInvoiceNumber(job))}" readonly></div>
+              <div><label>Invoice date</label><input value="${escapeHtml(invoiceDate)}" readonly></div>
+              <div><label>Locksmith</label><input value="${escapeHtml(tech.name)}" readonly></div>
+              <div><label>Customer</label><input value="${escapeHtml(invoiceAddress.customerName)}" readonly></div>
+              <div class="full"><label>Invoice address</label><textarea readonly>${escapeHtml(invoiceAddress.customerAddress)}</textarea></div>
+              <div><label>Invoice postcode</label><input value="${escapeHtml(invoiceAddress.customerPostcode)}" readonly></div>
+              <div class="full"><label>Site address</label><textarea readonly>${escapeHtml(techJobAddress(job))}</textarea></div>
+              <div><label>Site postcode</label><input value="${escapeHtml(compactPostcode(job.postcode || ''))}" readonly></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Company and payment</h2>
+            <div class="field-grid">
+              <div>
+                <label>Invoice company</label>
+                <select name="company_key" required>
+                  <option value="online" ${defaultCompany === 'online' ? 'selected' : ''}>24H Online Services Ltd</option>
+                  <option value="locksmiths" ${defaultCompany === 'locksmiths' ? 'selected' : ''}>24H Locksmiths Ltd</option>
+                </select>
+              </div>
+              <div>
+                <label>Payment method</label>
+                <select name="payment_method" required>
+                  <option value="Card" ${defaultPayment === 'Card' ? 'selected' : ''}>Card</option>
+                  <option value="Bank transfer" ${defaultPayment === 'Bank transfer' ? 'selected' : ''}>Bank transfer</option>
+                  <option value="Cash" ${defaultPayment === 'Cash' ? 'selected' : ''}>Cash</option>
+                </select>
+              </div>
+              <div>
+                <label>Paid status</label>
+                <select name="paid_status">
+                  <option ${job.customer_paid ? '' : 'selected'}>Unpaid</option>
+                  <option ${job.customer_paid ? 'selected' : ''}>Paid with thanks</option>
+                </select>
+              </div>
+            </div>
+            <p class="job-sub" style="margin-top:10px;">
+              Card invoices use 24H Online Services Ltd. Bank transfer/account invoices use 24H Locksmiths Ltd. Cash can use either, so confirm the company above.
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>Invoice line</h2>
+            <div class="field-grid">
+              <div class="full"><label>Description</label><input name="line1_description" value="${escapeHtml(technicianInvoiceDescription(job))}" required></div>
+              <div><label>Qty</label><input name="line1_qty" value="1" inputmode="numeric" required></div>
+              <div><label>Net unit price</label><input name="line1_unit_price" inputmode="decimal" value="${defaultNet !== null ? defaultNet.toFixed(2) : ''}" placeholder="Enter net amount" required></div>
+              <div class="full"><label>Optional second line</label><input name="line2_description" placeholder="Additional labour / parts / other"></div>
+              <div><label>Qty</label><input name="line2_qty" inputmode="numeric" placeholder="1"></div>
+              <div><label>Net unit price</label><input name="line2_unit_price" inputmode="decimal" placeholder="0.00"></div>
+              <div class="full"><label>Notes</label><textarea name="notes">6 months warranty on parts fitted</textarea></div>
+            </div>
+            <p class="job-sub" style="margin-top:10px;">VAT is added automatically at 20%. The first line has been prefilled from the job and can be adjusted before creation.</p>
+          </div>
+
+          <div class="actions">
+            <button class="button green" type="submit">Create invoice</button>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Cancel</a>
+          </div>
+        </form>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Create invoice', body));
+  } catch (error) {
+    console.error('Technician job invoice page error:', error);
+    res.status(500).send('Could not prepare technician invoice. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/invoice/create', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const duplicate = (await pool.query(`
+      SELECT id, invoice_number
+      FROM invoices
+      WHERE linked_job_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `, [jobId])).rows[0];
+
+    if (duplicate) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}/job/${jobId}/invoice/${duplicate.id}/pdf`);
+    }
+
+    const companyKey = String(req.body.company_key || '').trim();
+    const paymentMethod = String(req.body.payment_method || '').trim();
+
+    if (!companies[companyKey]) return res.status(400).send('Invalid company selected.');
+    if (!isPaymentAllowedForCompany(companyKey, paymentMethod)) {
+      return res.status(400).send(`${escapeHtml(paymentRuleMessage(companyKey))} Please go back and correct the company/payment combination.`);
+    }
+
+    const invoiceAddress = await technicianInvoiceAddressForJob(job);
+
+    const lineItems = [];
+    for (let i = 1; i <= 2; i += 1) {
+      const description = String(req.body[`line${i}_description`] || '').trim();
+      const qty = Number(req.body[`line${i}_qty`] || 0);
+      const unitPrice = parseMoneyInput(req.body[`line${i}_unit_price`]);
+      if (description && qty > 0 && unitPrice !== null) {
+        lineItems.push({ description, qty, unitPrice });
+      }
+    }
+    if (!lineItems.length) return res.status(400).send('At least one invoice line is required.');
+
+    const subtotal = lineItems.reduce((sum, item) => sum + (item.qty * item.unitPrice), 0);
+    const vatAmount = subtotal * 0.20;
+    const total = subtotal + vatAmount;
+
+    const invoiceDate = new Date().toLocaleDateString('en-GB', {
+      timeZone: 'Europe/London',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    const createdBy = `${tech.name} workspace`;
+    const siteAddress = techJobAddress(job);
+    const sitePostcode = compactPostcode(job.postcode || '');
+
+    const insert = await pool.query(`
+      INSERT INTO invoices (
+        invoice_number, company_key, payment_method, dispatcher_name, invoice_stage,
+        stage_updated_by, stage_updated_at, customer_name, customer_address,
+        customer_postcode, customer_phone, site_same_as_invoice, site_address, site_postcode,
+        customer_email, invoice_date, locksmith_name, paid_status, line_items,
+        subtotal, vat_amount, total, notes, created_by_technician_id, linked_job_id,
+        invoice_source, created_at, updated_at
+      )
+      VALUES (
+        $1,$2,$3,$4,'Draft only',
+        $4,NOW(),$5,$6,
+        $7,$8,$9,$10,$11,
+        $12,$13,$14,$15,$16,
+        $17,$18,$19,$20,$21,$22,
+        'technician_job',NOW(),NOW()
+      )
+      RETURNING id, invoice_number, total
+    `, [
+      technicianInvoiceNumber(job),
+      companyKey,
+      paymentMethod,
+      createdBy,
+      invoiceAddress.customerName,
+      invoiceAddress.customerAddress,
+      invoiceAddress.customerPostcode,
+      job.customer_phone || '',
+      invoiceAddress.siteSameAsInvoice,
+      siteAddress,
+      sitePostcode,
+      job.customer_email || '',
+      invoiceDate,
+      tech.name,
+      req.body.paid_status || (job.customer_paid ? 'Paid with thanks' : 'Unpaid'),
+      JSON.stringify(lineItems),
+      subtotal.toFixed(2),
+      vatAmount.toFixed(2),
+      total.toFixed(2),
+      String(req.body.notes || '').trim(),
+      tech.id,
+      jobId
+    ]);
+
+    const invoice = insert.rows[0];
+
+    await addJobAuditEntry(
+      jobId,
+      'technician_invoice_created',
+      'Invoice',
+      '—',
+      `${invoice.invoice_number} · ${money(invoice.total)} · ${companyKey}`,
+      createdBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/job/${jobId}/invoice/${invoice.id}`);
+  } catch (error) {
+    console.error('Technician job invoice create error:', error);
+    res.status(500).send(`Could not create technician invoice: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.get('/tech-workspace/:token/job/:id/invoice/:invoiceId', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+  const invoiceId = Number(req.params.invoiceId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const invoice = (await pool.query(`
+      SELECT *
+      FROM invoices
+      WHERE id = $1 AND linked_job_id = $2
+    `, [invoiceId, jobId])).rows[0];
+
+    if (!invoice) return res.status(404).send('Invoice not found for this job.');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">Invoice created</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs')}
+        <div class="card">
+          <h1>Invoice created</h1>
+          <p><strong>${escapeHtml(invoice.invoice_number)}</strong> is now linked to this job.</p>
+          <p>
+            Customer: ${escapeHtml(invoice.customer_name || '')}<br>
+            Total inc VAT: <strong>${money(invoice.total)}</strong><br>
+            Company: ${escapeHtml((companies[invoice.company_key] || {}).name || invoice.company_key)}<br>
+            Payment: ${escapeHtml(invoice.payment_method || '')}<br>
+            Stage: ${escapeHtml(invoice.invoice_stage || 'Draft only')}
+          </p>
+          <div class="actions">
+            <a class="button green" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/invoice/${invoiceId}/pdf" target="_blank">Open invoice PDF</a>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}#job-${jobId}">Back to job</a>
+          </div>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Invoice created', body));
+  } catch (error) {
+    console.error('Technician invoice view error:', error);
+    res.status(500).send('Could not open technician invoice. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/job/:id/invoice/:invoiceId/pdf', async (req, res) => {
+  const token = req.params.token;
+  const jobId = Number(req.params.id);
+  const invoiceId = Number(req.params.invoiceId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const { tech, job } = await technicianJobForInvoice(token, jobId);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const invoice = (await pool.query(`
+      SELECT *
+      FROM invoices
+      WHERE id = $1 AND linked_job_id = $2
+    `, [invoiceId, jobId])).rows[0];
+
+    if (!invoice) return res.status(404).send('Invoice not found for this job.');
+
+    const company = companies[invoice.company_key] || companies.online;
+    const lineItems = Array.isArray(invoice.line_items)
+      ? invoice.line_items
+      : JSON.parse(invoice.line_items || '[]');
+
+    const siteSameAsInvoice = invoice.site_same_as_invoice !== false;
+    const siteAddress = siteSameAsInvoice ? invoice.customer_address : invoice.site_address;
+    const sitePostcode = siteSameAsInvoice ? invoice.customer_postcode : invoice.site_postcode;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="invoice-${invoice.invoice_number}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+
+    const logoPath = path.join(__dirname, company.logo);
+    try {
+      doc.image(logoPath, 50, 22, { width: 160 });
+    } catch (error) {
+      console.error('Logo load error:', error);
+      doc.fontSize(20).font('Helvetica-Bold').text(company.displayName, 50, 48);
+    }
+
+    doc.fontSize(9).font('Helvetica')
+      .text(company.address1, 50, 102)
+      .text(company.address2, 50, 115)
+      .text(company.postcode, 50, 128)
+      .text(`Tel: ${company.tel}`, 50, 141);
+
+    doc.fontSize(20).font('Helvetica-Bold').text('INVOICE', 390, 55);
+    doc.fontSize(10).font('Helvetica')
+      .text(`Invoice No: ${pdfText(invoice.invoice_number)}`, 390, 90)
+      .text(`Date: ${pdfText(invoice.invoice_date)}`, 390, 105)
+      .text(`Locksmith: ${pdfText(invoice.locksmith_name)}`, 390, 120);
+
+    doc.moveTo(50, 165).lineTo(545, 165).stroke();
+
+    doc.roundedRect(50, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Invoice Address', 65, 197);
+    doc.font('Helvetica').fontSize(9.5)
+      .text(pdfText(invoice.customer_name), 65, 217, { width: 190 })
+      .text(pdfText(invoice.customer_address), 65, 233, { width: 190, height: 40 })
+      .text(`Postcode: ${pdfText(invoice.customer_postcode)}`, 65, 276, { width: 190 });
+
+    doc.roundedRect(305, 185, 240, 110, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Site Address', 320, 197);
+    doc.font('Helvetica').fontSize(9.5)
+      .text(siteSameAsInvoice ? 'Same as invoice address' : pdfText(siteAddress), 320, 217, { width: 190, height: 56 })
+      .text(`Postcode: ${pdfText(sitePostcode)}`, 320, 276, { width: 190 });
+
+    doc.roundedRect(50, 310, 495, 52, 8).stroke();
+    doc.fontSize(11).font('Helvetica-Bold').text('Invoice Details', 65, 322);
+    doc.font('Helvetica').fontSize(10)
+      .text(`Payment: ${pdfText(invoice.payment_method)}`, 65, 342)
+      .text(`Status: ${pdfText(invoice.paid_status)}`, 250, 342);
+
+    const tableTop = 390;
+    doc.font('Helvetica-Bold').fontSize(10);
+    doc.text('Qty', 55, tableTop);
+    doc.text('Description', 105, tableTop);
+    doc.text('Unit Price', 400, tableTop);
+    doc.text('Total', 480, tableTop);
+    doc.moveTo(50, tableTop + 16).lineTo(545, tableTop + 16).stroke();
+
+    let y = tableTop + 32;
+    doc.font('Helvetica').fontSize(10);
+    lineItems.forEach(item => {
+      const description = pdfText(item.description);
+      const lineTotal = Number(item.qty || 0) * Number(item.unitPrice || 0);
+      doc.text(String(item.qty), 60, y);
+      doc.text(description, 105, y, { width: 255 });
+      doc.text(money(item.unitPrice), 400, y);
+      doc.text(money(lineTotal), 480, y);
+      const extraHeight = description.length > 55 ? 14 : 0;
+      y += 22 + extraHeight;
+    });
+
+    doc.moveTo(50, y + 4).lineTo(545, y + 4).stroke();
+    const totalsY = y + 18;
+    doc.font('Helvetica').fontSize(10);
+    doc.text('Subtotal', 380, totalsY);
+    doc.text(money(invoice.subtotal), 480, totalsY);
+    doc.text('VAT', 380, totalsY + 18);
+    doc.text(money(invoice.vat_amount), 480, totalsY + 18);
+    doc.font('Helvetica-Bold');
+    doc.text('TOTAL', 380, totalsY + 38);
+    doc.text(money(invoice.total), 480, totalsY + 38);
+
+    const paymentBoxY = totalsY + 78;
+    doc.roundedRect(50, paymentBoxY, 260, 105, 8).stroke();
+    doc.font('Helvetica-Bold').fontSize(10).text('Payment Details', 70, paymentBoxY + 15);
+
+    if (invoice.payment_method === 'Bank transfer') {
+      doc.font('Helvetica').fontSize(10)
+        .text('Please pay via BACS transfer to:', 70, paymentBoxY + 34);
+      doc.font('Helvetica-Bold').text(company.name, 70, paymentBoxY + 55, { width: 220 });
+      doc.font('Helvetica')
+        .text(`Sort code: ${company.sortCode}`, 70, paymentBoxY + 73)
+        .text(`Account: ${company.account}`, 70, paymentBoxY + 88);
+    } else if (invoice.payment_method === 'Card') {
+      doc.font('Helvetica').fontSize(10)
+        .text('Payment method: Card', 70, paymentBoxY + 34)
+        .text('Please use the card payment link provided separately.', 70, paymentBoxY + 55, { width: 210 });
+    } else {
+      doc.font('Helvetica').fontSize(10)
+        .text('Payment method: Cash', 70, paymentBoxY + 34)
+        .text('Cash payment to be collected/confirmed by the office.', 70, paymentBoxY + 55, { width: 210 });
+    }
+
+    doc.roundedRect(330, paymentBoxY, 215, 105, 8).stroke();
+    doc.font('Helvetica-Bold').fontSize(10).text('Notes', 350, paymentBoxY + 15);
+    doc.font('Helvetica').fontSize(9.5).text(
+      pdfText(invoice.notes || '6 months warranty on parts fitted'),
+      350,
+      paymentBoxY + 35,
+      { width: 175, height: 55 }
+    );
+
+    doc.font('Helvetica-Bold').fontSize(10).text(company.name, 50, 718, { align: 'center', width: 495 });
+    doc.font('Helvetica').fontSize(9)
+      .text(company.footer, 50, 733, { align: 'center', width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, { align: 'center', width: 495 });
+    doc.moveTo(50, 768).lineTo(545, 768).stroke();
+    doc.fontSize(9).font('Helvetica-Oblique').text('Thank you for using our services', 50, 780, {
+      align: 'center',
+      width: 495
+    });
+
+    doc.end();
+  } catch (error) {
+    console.error('Technician invoice PDF error:', error);
+    res.status(500).send('Could not generate technician invoice PDF. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/stripe-payment-links', async (req, res) => {
+  const token = req.params.token;
+  const id = Number(req.params.id);
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!Number.isInteger(id)) return res.status(400).send('Invalid job ID.');
+
+    const jobResult = await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE j.id = $1
+        AND (
+          j.assigned_technician_id = $2
+          OR j.assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [id, tech.id, tech.name]);
+
+    if (!jobResult.rows.length) {
+      return res.status(403).send('This job is not assigned to your technician account.');
+    }
+
+    const job = jobResult.rows[0];
+    const amount = parseMoneyInput(req.body.amount);
+    if (amount === null || amount < 0.50) {
+      return res.status(400).send('Please enter a Stripe payment link amount of at least £0.50.');
+    }
+
+    const createdBy = `${tech.name} workspace`;
+    const created = await createStripePaymentLink(job, amount, createdBy);
+
+    await pool.query(`
+      INSERT INTO job_stripe_payment_links
+        (job_id, stripe_payment_link_id, payment_url, amount, currency, description, stripe_status, created_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    `, [
+      id,
+      created.stripePaymentLinkId,
+      created.url,
+      created.amount,
+      created.currency,
+      created.description,
+      created.rawStatus,
+      createdBy
+    ]);
+
+    await addJobAuditEntry(
+      id,
+      'stripe_payment_link_created',
+      'Stripe payment link',
+      '—',
+      `${money(created.amount)} · ${created.description} · ${created.url}`,
+      createdBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${id}`);
+  } catch (error) {
+    console.error('Technician Stripe payment link error:', error);
+    res.status(500).send(`Could not create Stripe payment link: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/stripe-payment-links/:linkId/send-sms', async (req, res) => {
+  const token = req.params.token;
+  const id = Number(req.params.id);
+  const linkId = Number(req.params.linkId);
+
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!Number.isInteger(id) || !Number.isInteger(linkId)) {
+      return res.status(400).send('Invalid job or payment link ID.');
+    }
+
+    const jobResult = await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE j.id = $1
+        AND (
+          j.assigned_technician_id = $2
+          OR j.assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [id, tech.id, tech.name]);
+
+    if (!jobResult.rows.length) {
+      return res.status(403).send('This job is not assigned to your technician account.');
+    }
+    const job = jobResult.rows[0];
+
+    const linkResult = await pool.query(`
+      SELECT *
+      FROM job_stripe_payment_links
+      WHERE id = $1 AND job_id = $2
+    `, [linkId, id]);
+
+    if (!linkResult.rows.length) {
+      return res.status(404).send('Stripe payment link not found for this job.');
+    }
+    const paymentLink = linkResult.rows[0];
+
+    const to = cleanSmsNumber(job.offsite_payment && job.bill_payer_phone ? job.bill_payer_phone : job.customer_phone);
+    if (!to) return res.status(400).send('Customer / bill payer mobile number is missing.');
+
+    const customerName = job.customer_name ? ` ${job.customer_name}` : '';
+    const postcode = compactPostcode(job.postcode || '') || 'your address';
+    const message = `Hi${customerName}, please use this secure Stripe link to pay ${money(paymentLink.amount)} for your locksmith job at ${postcode}: ${paymentLink.payment_url} This is an automated payment message; please do not reply. Questions: ${smsOfficeTel()}`;
+
+    let status = 'sent';
+    let providerResponse = '';
+
+    try {
+      const sendResult = await sendYaySms(
+        to,
+        message,
+        `${job.job_number || jobNumber(job.id)} - Stripe payment link`
+      );
+      status = sendResult.status;
+      providerResponse = sendResult.providerResponse;
+    } catch (sendError) {
+      status = 'failed';
+      providerResponse = sendError.message;
+      console.error('Technician Stripe payment SMS error:', sendError);
+    }
+
+    const sentBy = `${tech.name} workspace`;
+
+    await pool.query(`
+      INSERT INTO job_sms_log
+        (job_id, sent_to, sms_type, template_name, message_body, status, provider, provider_response, sent_by, created_at)
+      VALUES ($1, $2, 'stripe_payment_link', 'Stripe payment link', $3, $4, 'yay', $5, $6, NOW())
+    `, [id, to, message, status, providerResponse, sentBy]);
+
+    await pool.query(`
+      UPDATE job_stripe_payment_links
+      SET send_count = COALESCE(send_count, 0) + 1,
+          last_sent_to = $1,
+          last_sent_by = $2,
+          last_sent_at = NOW()
+      WHERE id = $3 AND job_id = $4
+    `, [to, sentBy, linkId, id]);
+
+    await addJobAuditEntry(
+      id,
+      'stripe_payment_link_sms_sent',
+      'Stripe payment link',
+      '—',
+      `${money(paymentLink.amount)} link sent to ${to}: ${status}`,
+      sentBy
+    );
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}#job-${id}`);
+  } catch (error) {
+    console.error('Technician Stripe payment SMS route error:', error);
+    res.status(500).send(`Could not send Stripe payment SMS: ${escapeHtml(error.message || String(error))}.`);
   }
 });
 
@@ -10183,7 +12847,7 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
           <h1>Close job</h1>
           <p class="job-sub"><strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong> · ${escapeHtml(job.job_type || '')} · ${escapeHtml(job.customer_name || '')}</p>
           <p class="job-sub">${escapeHtml(techJobAddress(job) || '')}</p>
-          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${job.id}/close/customer-confirmation" onsubmit="return confirm('Continue to customer confirmation? The final amount will be locked for the customer to review.');">
             <p class="job-sub">Enter the NET value only. VAT is calculated automatically at 20%.</p>
             <div class="field-grid">
               <div><label>NET job value</label><input id="techNetValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : '')}" inputmode="decimal" placeholder="£ ex VAT" required></div>
@@ -10218,7 +12882,21 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <p class="job-sub">The office will file photos, invoices and proof in Dropbox after the job. Please send any job photos/evidence to the office in the usual way.</p>
             </div>
             <br>
-            <button class="button red" type="submit">Submit close job</button>
+            <div style="margin:16px 0;padding:14px;border:1px solid #dbe3ec;border-radius:14px;background:#f8fafc;">
+              <strong>Customer verification</strong>
+              <p class="job-sub" style="margin:6px 0 10px;">Use SMS verification whenever the customer has access to their phone. Use the fallback only when their phone is unavailable or cannot be used.</p>
+              <label style="display:block;margin:6px 0;">
+                <input type="radio" name="customer_verification_route" value="sms" checked>
+                Customer has their phone — send SMS verification code
+              </label>
+              <label style="display:block;margin:6px 0;">
+                <input type="radio" name="customer_verification_route" value="fallback">
+                Customer phone unavailable / no charge — use ID check + signature
+              </label>
+            </div>
+
+            <button class="button red" type="submit">Continue to customer confirmation</button>
+            <p class="job-sub" style="margin-top:10px;">The next screen separates the technician step from the customer confirmation step.</p>
           </form>
           <script>
             function recalcTechCloseValues(){
@@ -10258,27 +12936,59 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
   }
 });
 
-app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
+app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
+
     const token = req.params.token;
+    const jobId = Number(req.params.id);
     const tech = await getTechnicianByToken(token);
     if (!tech) return res.status(404).send('Invalid technician link');
-    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const job = (await pool.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
 
     const body = req.body;
     const netValue = parseMoneyInput(body.net_value || body.final_value);
+    if (netValue === null || netValue < 0) {
+      return res.status(400).send('Please enter a valid NET job value.');
+    }
+
     const vatAmount = calculateVatFromNet(netValue);
     const finalValue = calculateGrossFromNet(netValue);
     const includesCard = closePaymentIncludesCard(body);
     const isAmex = includesCard && body.card_is_amex === 'true';
     const amexIdProvided = isAmex && body.amex_id_provided === 'true';
+
     if (isAmex && !amexIdProvided) {
       return res.status(400).send('AMEX payment selected. Please confirm that ID from the client has been provided.');
     }
-    const selectedStatus = closingJobStatuses.some(item => item.value === body.status) ? body.status : 'fully_paid';
-    const oldJob = (await pool.query(`SELECT * FROM jobs WHERE id = $1`, [req.params.id])).rows[0];
-    const techCloseValues = {
+
+    const selectedStatus = closingJobStatuses.some(item => item.value === body.status)
+      ? body.status
+      : 'fully_paid';
+
+    const verificationRoute = body.customer_verification_route === 'fallback' ? 'fallback' : 'sms';
+
+    const draft = {
+      jobId,
+      techId: tech.id,
+      techName: tech.name,
       net_value: netValue,
       vat_amount: vatAmount,
       final_value: finalValue,
@@ -10296,10 +13006,625 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       outcome: body.outcome || '',
       tech_notes: body.tech_notes || '',
       close_notes: body.close_notes || '',
-      status: selectedStatus
+      status: selectedStatus,
+      verification_route: verificationRoute,
+      createdAt: Date.now()
     };
 
+    const draftToken = techCloseDraftToken(draft);
+
+    if (verificationRoute === 'fallback') {
+      const fallbackHtml = `
+        <div class="topbar">
+          <div class="brand"><span class="brand-badge">24H</span><span>Fallback verification</span></div>
+          <span class="pill">Technician step</span>
+        </div>
+
+        <div class="wrap">
+          <div class="card" style="max-width:760px;margin:0 auto;">
+            <h1>Customer phone unavailable</h1>
+            <p><strong>This is the fallback route.</strong> Use it only when the customer cannot receive or access the SMS code.</p>
+
+            <div style="padding:14px;border-radius:14px;background:#fff7ed;border:1px solid #fed7aa;margin:16px 0;">
+              <strong>Final amount: ${money(finalValue)}</strong><br>
+              <span class="job-sub">The amount is now locked for this confirmation.</span>
+            </div>
+
+            <form method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close/customer-confirmation/fallback">
+              <input type="hidden" name="close_draft_token" value="${escapeHtml(draftToken)}">
+
+              <div class="field-grid">
+                <div>
+                  <label>Why SMS cannot be used</label>
+                  <select name="verification_reason" required>
+                    <option value="">Select reason</option>
+                    <option>Customer does not have phone with them</option>
+                    <option>Customer phone battery flat</option>
+                    <option>No mobile signal / SMS unavailable</option>
+                    <option>Customer cannot access SMS</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label>ID checked</label>
+                  <select name="id_type" required>
+                    <option value="">Select ID type</option>
+                    <option>Driving Licence</option>
+                    <option>Passport</option>
+                    <option>National identity card</option>
+                    <option>Other photo ID</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label>Last 4 characters of ID</label>
+                  <input name="id_last4" maxlength="4" minlength="2" placeholder="e.g. 1234" required autocomplete="off">
+                </div>
+
+                <div class="full">
+                  <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                    <input type="checkbox" name="id_visually_checked" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                    <span>I confirm I have physically seen the customer's photo ID and the person presenting it matches the customer in front of me.</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="actions" style="margin-top:18px;">
+                <button class="button red" type="submit">Continue — hand phone to customer</button>
+                <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">Cancel</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+      return res.send(technicianPortalShell('Fallback verification', fallbackHtml));
+    }
+
+    const customerPhone = cleanSmsNumber(job.customer_phone);
+    if (!customerPhone) {
+      return res.status(400).send('A customer mobile number is required for SMS verification. Please go back and choose the fallback route, or ask the office to correct the customer mobile number.');
+    }
+
+    const verificationCode = makeCustomerConfirmationCode();
+    const codeHash = customerConfirmationCodeHash(jobId, verificationCode);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
     await pool.query(`
+      INSERT INTO job_customer_confirmation_codes
+        (job_id, code_hash, sent_to, expires_at, sent_at, attempts)
+      VALUES ($1, $2, $3, $4, NOW(), 0)
+      ON CONFLICT (job_id)
+      DO UPDATE SET
+        code_hash = EXCLUDED.code_hash,
+        sent_to = EXCLUDED.sent_to,
+        expires_at = EXCLUDED.expires_at,
+        sent_at = NOW(),
+        attempts = 0
+    `, [jobId, codeHash, customerPhone, expiresAt]);
+
+    const verifyMessage =
+      `24H Locksmiths verification code: ${verificationCode}. ` +
+      `Use this code only when confirming the completed work and final amount of ${money(finalValue)} ` +
+      `for ${compactPostcode(job.postcode || '') || 'your job'}. Do not give this code to anyone before you are ready to confirm.`;
+
+    try {
+      await sendYaySms(
+        customerPhone,
+        verifyMessage,
+        `${job.job_number || jobNumber(job.id)} - customer confirmation code`
+      );
+    } catch (smsError) {
+      console.error('Customer confirmation SMS error:', smsError);
+      return res.status(500).send('The customer verification code could not be sent. Please go back and use the fallback route if the customer cannot receive SMS.');
+    }
+
+    const agreementText =
+      `I confirm that the work and final amount of ${money(finalValue)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    const bodyHtml = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>Customer confirmation</span></div>
+        <span class="pill">Customer step</span>
+      </div>
+
+      <div class="wrap">
+        <div class="card" style="max-width:760px;margin:0 auto;">
+          <div style="padding:14px;border-radius:14px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:16px;text-align:center;">
+            <strong style="font-size:20px;">Please hand this device to the customer</strong>
+          </div>
+
+          <h1>Confirm completed work and final amount</h1>
+          <p class="job-sub">Please check the details below before signing.</p>
+
+          <div style="padding:16px;border:2px solid #111827;border-radius:16px;margin:18px 0;background:#fff;">
+            <div class="job-sub">Work</div>
+            <div style="font-size:18px;font-weight:800;">${escapeHtml(job.job_type || 'Locksmith services')}</div>
+            <div class="job-sub" style="margin-top:6px;">${escapeHtml(techJobAddress(job) || '')}</div>
+            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <div class="job-sub">Final amount</div>
+            <div style="font-size:34px;font-weight:900;">${money(finalValue)}</div>
+            <div class="job-sub">Includes VAT of ${money(vatAmount)} · NET ${money(netValue)}</div>
+          </div>
+
+          <form id="customerConfirmForm" method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">
+            <input type="hidden" name="close_draft_token" value="${escapeHtml(draftToken)}">
+            <input type="hidden" name="verification_method" value="sms">
+            <input type="hidden" id="signatureData" name="signature_data" value="">
+
+            <div class="field-grid">
+              <div class="full">
+                <label>Your name</label>
+                <input name="customer_signer_name" value="${escapeHtml(job.customer_name || '')}" placeholder="Customer name" required autocomplete="name">
+              </div>
+              <div class="full">
+                <label>Verification code</label>
+                <input name="verification_code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6-digit code" required>
+                <p class="job-sub">A 6-digit code has been sent to ${escapeHtml(maskMobileForCustomer(customerPhone))}.</p>
+              </div>
+            </div>
+
+            <div style="padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe3ec;margin:16px 0;">
+              <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                <input type="checkbox" name="customer_agreed" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                <span>${escapeHtml(agreementText)}</span>
+              </label>
+            </div>
+
+            <div>
+              <label>Your signature</label>
+              <p class="job-sub">Please sign in the box using your finger or mouse.</p>
+              <canvas id="signaturePad" width="700" height="230" style="width:100%;height:230px;border:2px solid #111827;border-radius:14px;background:#fff;touch-action:none;"></canvas>
+              <div class="actions" style="margin-top:8px;">
+                <button class="button dark" type="button" id="clearSignature">Clear signature</button>
+              </div>
+            </div>
+
+            <div style="margin-top:20px;">
+              <button class="button red" type="submit" style="width:100%;justify-content:center;font-size:17px;">Confirm and complete job</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <script>
+        (function(){
+          const canvas = document.getElementById('signaturePad');
+          const ctx = canvas.getContext('2d');
+          const clearButton = document.getElementById('clearSignature');
+          const form = document.getElementById('customerConfirmForm');
+          const hidden = document.getElementById('signatureData');
+
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          let drawing = false;
+          let hasInk = false;
+
+          function point(event) {
+            const rect = canvas.getBoundingClientRect();
+            const source = event.touches && event.touches[0] ? event.touches[0] : event;
+            return {
+              x: (source.clientX - rect.left) * (canvas.width / rect.width),
+              y: (source.clientY - rect.top) * (canvas.height / rect.height)
+            };
+          }
+
+          function start(event) {
+            event.preventDefault();
+            drawing = true;
+            const p = point(event);
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+          }
+
+          function move(event) {
+            if (!drawing) return;
+            event.preventDefault();
+            const p = point(event);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            hasInk = true;
+          }
+
+          function stop(event) {
+            if (event) event.preventDefault();
+            drawing = false;
+          }
+
+          canvas.addEventListener('mousedown', start);
+          canvas.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', stop);
+          canvas.addEventListener('touchstart', start, { passive:false });
+          canvas.addEventListener('touchmove', move, { passive:false });
+          canvas.addEventListener('touchend', stop, { passive:false });
+
+          clearButton.addEventListener('click', function(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            hasInk = false;
+            hidden.value = '';
+          });
+
+          form.addEventListener('submit', function(event){
+            if (!hasInk) {
+              event.preventDefault();
+              alert('Please add your signature before confirming.');
+              return;
+            }
+            hidden.value = canvas.toDataURL('image/png');
+          });
+        })();
+      </script>
+    `;
+
+    res.send(technicianPortalShell('Customer confirmation', bodyHtml));
+  } catch (error) {
+    console.error('Customer confirmation page error:', error);
+    res.status(500).send(`Could not prepare customer confirmation: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/close/customer-confirmation/fallback', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const token = req.params.token;
+    const jobId = Number(req.params.id);
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+
+    const draft = readTechCloseDraftToken(req.body.close_draft_token);
+    if (!draft || Number(draft.jobId) !== jobId || Number(draft.techId) !== Number(tech.id) || draft.verification_route !== 'fallback') {
+      return res.status(400).send('This fallback confirmation has expired or is invalid. Please return to the job and start the close process again.');
+    }
+
+    const reason = String(req.body.verification_reason || '').trim();
+    const idType = String(req.body.id_type || '').trim();
+    const idLast4 = String(req.body.id_last4 || '').trim().replace(/\s+/g, '').slice(-4);
+    const idChecked = req.body.id_visually_checked === 'true';
+
+    if (!reason || !idType || idLast4.length < 2 || !idChecked) {
+      return res.status(400).send('Please complete the fallback verification details and confirm that the customer photo ID was physically checked.');
+    }
+
+    const job = (await pool.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!job) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const fallbackDraft = {
+      ...draft,
+      verification_reason: reason,
+      id_type: idType,
+      id_last4: idLast4,
+      id_visually_checked: true,
+      createdAt: Date.now()
+    };
+    const fallbackToken = techCloseDraftToken(fallbackDraft);
+
+    const agreementText =
+      `I confirm that the work and final amount of ${money(draft.final_value)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    const bodyHtml = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>Customer confirmation</span></div>
+        <span class="pill">Fallback verification</span>
+      </div>
+
+      <div class="wrap">
+        <div class="card" style="max-width:760px;margin:0 auto;">
+          <div style="padding:14px;border-radius:14px;background:#ecfdf5;border:1px solid #bbf7d0;margin-bottom:16px;text-align:center;">
+            <strong style="font-size:20px;">Please hand this device to the customer</strong>
+          </div>
+
+          <h1>Confirm completed work and final amount</h1>
+          <p class="job-sub">SMS verification is unavailable. Your signature will be recorded together with the technician's visual ID check.</p>
+
+          <div style="padding:16px;border:2px solid #111827;border-radius:16px;margin:18px 0;background:#fff;">
+            <div class="job-sub">Work</div>
+            <div style="font-size:18px;font-weight:800;">${escapeHtml(job.job_type || 'Locksmith services')}</div>
+            <div class="job-sub" style="margin-top:6px;">${escapeHtml(techJobAddress(job) || '')}</div>
+            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <div class="job-sub">Final amount</div>
+            <div style="font-size:34px;font-weight:900;">${money(draft.final_value)}</div>
+            <div class="job-sub">Includes VAT of ${money(draft.vat_amount)} · NET ${money(draft.net_value)}</div>
+          </div>
+
+          <form id="customerFallbackForm" method="POST" action="/tech-workspace/${escapeHtml(token)}/job/${jobId}/close">
+            <input type="hidden" name="close_draft_token" value="${escapeHtml(fallbackToken)}">
+            <input type="hidden" name="verification_method" value="fallback">
+            <input type="hidden" id="fallbackSignatureData" name="signature_data" value="">
+
+            <div class="field-grid">
+              <div class="full">
+                <label>Your name</label>
+                <input name="customer_signer_name" value="${escapeHtml(job.customer_name || '')}" placeholder="Customer name" required autocomplete="name">
+              </div>
+            </div>
+
+            <div style="padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe3ec;margin:16px 0;">
+              <label style="display:flex;gap:10px;align-items:flex-start;font-weight:800;">
+                <input type="checkbox" name="customer_agreed" value="true" required style="width:22px;height:22px;margin-top:1px;">
+                <span>${escapeHtml(agreementText)}</span>
+              </label>
+            </div>
+
+            <div>
+              <label>Your signature</label>
+              <p class="job-sub">Please sign in the box using your finger or mouse.</p>
+              <canvas id="fallbackSignaturePad" width="700" height="230" style="width:100%;height:230px;border:2px solid #111827;border-radius:14px;background:#fff;touch-action:none;"></canvas>
+              <div class="actions" style="margin-top:8px;">
+                <button class="button dark" type="button" id="clearFallbackSignature">Clear signature</button>
+              </div>
+            </div>
+
+            <div style="margin-top:20px;">
+              <button class="button red" type="submit" style="width:100%;justify-content:center;font-size:17px;">Confirm and complete job</button>
+            </div>
+          </form>
+
+          <p class="job-sub" style="margin-top:14px;">Fallback verification is recorded separately so the office can see when SMS verification was not used.</p>
+        </div>
+      </div>
+
+      <script>
+        (function(){
+          const canvas = document.getElementById('fallbackSignaturePad');
+          const ctx = canvas.getContext('2d');
+          const clearButton = document.getElementById('clearFallbackSignature');
+          const form = document.getElementById('customerFallbackForm');
+          const hidden = document.getElementById('fallbackSignatureData');
+
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          let drawing = false;
+          let hasInk = false;
+
+          function point(event) {
+            const rect = canvas.getBoundingClientRect();
+            const source = event.touches && event.touches[0] ? event.touches[0] : event;
+            return {
+              x: (source.clientX - rect.left) * (canvas.width / rect.width),
+              y: (source.clientY - rect.top) * (canvas.height / rect.height)
+            };
+          }
+
+          function start(event) {
+            event.preventDefault();
+            drawing = true;
+            const p = point(event);
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+          }
+
+          function move(event) {
+            if (!drawing) return;
+            event.preventDefault();
+            const p = point(event);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            hasInk = true;
+          }
+
+          function stop(event) {
+            if (event) event.preventDefault();
+            drawing = false;
+          }
+
+          canvas.addEventListener('mousedown', start);
+          canvas.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', stop);
+          canvas.addEventListener('touchstart', start, { passive:false });
+          canvas.addEventListener('touchmove', move, { passive:false });
+          canvas.addEventListener('touchend', stop, { passive:false });
+
+          clearButton.addEventListener('click', function(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            hasInk = false;
+            hidden.value = '';
+          });
+
+          form.addEventListener('submit', function(event){
+            if (!hasInk) {
+              event.preventDefault();
+              alert('Please add your signature before confirming.');
+              return;
+            }
+            hidden.value = canvas.toDataURL('image/png');
+          });
+        })();
+      </script>
+    `;
+
+    res.send(technicianPortalShell('Customer fallback confirmation', bodyHtml));
+  } catch (error) {
+    console.error('Customer fallback confirmation error:', error);
+    res.status(500).send(`Could not prepare fallback customer confirmation: ${escapeHtml(error.message || String(error))}.`);
+  }
+});
+
+app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureTechnicianWorkspaceSchema();
+
+    const token = req.params.token;
+    const jobId = Number(req.params.id);
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+
+    const draft = readTechCloseDraftToken(req.body.close_draft_token);
+    if (!draft || Number(draft.jobId) !== jobId || Number(draft.techId) !== Number(tech.id)) {
+      return res.status(400).send('This customer confirmation has expired or is invalid. Please return to the job and start the close process again.');
+    }
+
+    if (req.body.customer_agreed !== 'true') {
+      return res.status(400).send('Customer agreement is required before the job can be completed.');
+    }
+
+    const signerName = String(req.body.customer_signer_name || '').trim();
+    if (!signerName) return res.status(400).send('Customer name is required.');
+
+    const signatureData = String(req.body.signature_data || '');
+    if (!signatureData.startsWith('data:image/png;base64,') || signatureData.length < 500) {
+      return res.status(400).send('Customer signature is required.');
+    }
+    if (signatureData.length > 500000) {
+      return res.status(400).send('Customer signature is too large. Please clear it and sign again.');
+    }
+
+    const verificationMethod = req.body.verification_method === 'fallback' ? 'fallback' : 'sms';
+    let verificationPhone = '';
+    let verificationReason = '';
+    let idType = '';
+    let idLast4 = '';
+    let idVisuallyChecked = false;
+
+    if (verificationMethod === 'sms') {
+      const code = String(req.body.verification_code || '').trim();
+      if (!/^\d{6}$/.test(code)) {
+        return res.status(400).send('Please enter the 6-digit verification code sent to the customer.');
+      }
+
+      const codeRow = (await client.query(`
+        SELECT *
+        FROM job_customer_confirmation_codes
+        WHERE job_id = $1
+        FOR UPDATE
+      `, [jobId])).rows[0];
+
+      if (!codeRow) {
+        return res.status(400).send('No active customer verification code was found. Please start the close process again.');
+      }
+
+      if (new Date(codeRow.expires_at).getTime() < Date.now()) {
+        return res.status(400).send('The customer verification code has expired. Please return to the job and start the close process again.');
+      }
+
+      if (Number(codeRow.attempts || 0) >= 5) {
+        return res.status(400).send('Too many incorrect verification attempts. Please return to the job and request a new code.');
+      }
+
+      const suppliedHash = customerConfirmationCodeHash(jobId, code);
+      if (suppliedHash !== codeRow.code_hash) {
+        await client.query(`
+          UPDATE job_customer_confirmation_codes
+          SET attempts = COALESCE(attempts, 0) + 1
+          WHERE job_id = $1
+        `, [jobId]);
+        return res.status(400).send('The verification code is incorrect. Please check the SMS and try again.');
+      }
+
+      verificationPhone = codeRow.sent_to || '';
+    } else {
+      if (draft.verification_route !== 'fallback') {
+        return res.status(400).send('Fallback verification was not prepared correctly. Please return to the job and start again.');
+      }
+
+      verificationReason = String(draft.verification_reason || '').trim();
+      idType = String(draft.id_type || '').trim();
+      idLast4 = String(draft.id_last4 || '').trim().slice(-4);
+      idVisuallyChecked = draft.id_visually_checked === true;
+
+      if (!verificationReason || !idType || idLast4.length < 2 || !idVisuallyChecked) {
+        return res.status(400).send('Fallback ID verification details are incomplete. Please return to the job and start again.');
+      }
+    }
+
+    const oldJob = (await client.query(`
+      SELECT *
+      FROM jobs
+      WHERE id = $1
+        AND (
+          assigned_technician_id = $2
+          OR assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+      FOR UPDATE
+    `, [jobId, tech.id, tech.name])).rows[0];
+
+    if (!oldJob) return res.status(403).send('This job is not assigned to your technician account.');
+
+    const agreementText =
+      `I confirm that the work and final amount of ${money(draft.final_value)} shown above have been explained to me and I am happy to proceed with payment.`;
+
+    await client.query('BEGIN');
+
+    const verificationLabel = verificationMethod === 'sms'
+      ? 'SMS code + signature on technician device'
+      : 'Fallback: signature on technician device + photo ID visually checked';
+
+    const confirmation = (await client.query(`
+      INSERT INTO job_customer_confirmations (
+        job_id, technician_id, technician_name, customer_name, customer_phone,
+        agreed_net, agreed_vat, agreed_gross, agreement_text, signature_data,
+        verification_method, verification_phone, verification_reason, id_type,
+        id_last4, id_visually_checked, ip_address, user_agent, confirmed_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
+      RETURNING id, confirmed_at
+    `, [
+      jobId,
+      tech.id,
+      tech.name,
+      signerName,
+      oldJob.customer_phone || '',
+      Number(draft.net_value || 0),
+      Number(draft.vat_amount || 0),
+      Number(draft.final_value || 0),
+      agreementText,
+      signatureData,
+      verificationLabel,
+      verificationPhone,
+      verificationReason,
+      idType,
+      idLast4,
+      idVisuallyChecked,
+      clientIpAddress(req),
+      String(req.headers['user-agent'] || '').slice(0, 500)
+    ])).rows[0];
+
+    const techCloseValues = {
+      net_value: Number(draft.net_value || 0),
+      vat_amount: Number(draft.vat_amount || 0),
+      final_value: Number(draft.final_value || 0),
+      payment_method: draft.payment_method || '',
+      payment_method_1: draft.payment_method_1 || '',
+      payment_amount_1: draft.payment_amount_1,
+      payment_method_2: draft.payment_method_2 || '',
+      payment_amount_2: draft.payment_amount_2,
+      invoice_photos_confirmed: Boolean(draft.invoice_photos_confirmed),
+      card_is_amex: Boolean(draft.card_is_amex),
+      amex_id_provided: Boolean(draft.amex_id_provided),
+      customer_paid: Boolean(draft.customer_paid),
+      materials_used: draft.materials_used || '',
+      materials_cost: draft.materials_cost,
+      outcome: draft.outcome || '',
+      tech_notes: draft.tech_notes || '',
+      close_notes: draft.close_notes || '',
+      status: draft.status || 'fully_paid'
+    };
+
+    await client.query(`
       UPDATE jobs
       SET net_value = $1,
           vat_amount = $2,
@@ -10323,9 +13648,12 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
           closed_at = COALESCE(closed_at, NOW()),
           tech_updated_at = NOW(),
           tech_close_submitted_by = $19,
+          customer_price_confirmed = TRUE,
+          customer_price_confirmed_at = NOW(),
+          customer_price_confirmed_amount = $3,
+          customer_price_confirmed_by = $20,
           updated_at = NOW()
-      WHERE id = $20
-        AND (assigned_technician_id = $21 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($22)))
+      WHERE id = $21
     `, [
       techCloseValues.net_value,
       techCloseValues.vat_amount,
@@ -10346,14 +13674,13 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       techCloseValues.close_notes,
       techCloseValues.status,
       tech.name,
-      req.params.id,
-      tech.id,
-      tech.name
+      signerName,
+      jobId
     ]);
-    await logJobChanges(Number(req.params.id), oldJob, techCloseValues, `${tech.name} workspace`, "technician_close_submit");
-    await addJobEvidenceLink(Number(req.params.id), body, `${tech.name} workspace`, "technician_close_evidence_added");
 
-    await pool.query(`
+    await client.query(`DELETE FROM job_customer_confirmation_codes WHERE job_id = $1`, [jobId]);
+
+    await client.query(`
       UPDATE technicians
       SET status = CASE WHEN status = 'On job' THEN 'Available' ELSE status END,
           updated_by = $1,
@@ -10361,10 +13688,54 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       WHERE id = $2
     `, [`${tech.name} closed job`, tech.id]);
 
+    await client.query('COMMIT');
+
+    await logJobChanges(
+      jobId,
+      oldJob,
+      techCloseValues,
+      `${tech.name} workspace`,
+      "technician_close_submit"
+    );
+
+    const auditMessage = verificationMethod === 'sms'
+      ? `${signerName} confirmed ${money(techCloseValues.final_value)} by SMS code + signature`
+      : `${signerName} confirmed ${money(techCloseValues.final_value)} by fallback signature; ${idType} ending ${idLast4} visually checked by ${tech.name}`;
+
+    await addJobAuditEntry(
+      jobId,
+      'customer_final_amount_confirmed',
+      'Customer confirmation',
+      '—',
+      auditMessage,
+      'Customer confirmation'
+    );
+
+    const receiptTo = verificationPhone || cleanSmsNumber(oldJob.customer_phone);
+    if (receiptTo) {
+      try {
+        const confirmationSms =
+          `24H Locksmiths confirmation: you confirmed the completed work and final amount of ` +
+          `${money(techCloseValues.final_value)} for ${compactPostcode(oldJob.postcode || '') || 'your job'}. ` +
+          `Confirmation reference ${confirmation.id}. Questions: ${smsOfficeTel()}`;
+
+        await sendYaySms(
+          receiptTo,
+          confirmationSms,
+          `${oldJob.job_number || jobNumber(oldJob.id)} - customer confirmation receipt`
+        );
+      } catch (smsReceiptError) {
+        console.error('Customer confirmation receipt SMS error:', smsReceiptError);
+      }
+    }
+
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
   } catch (error) {
-    console.error('Technician close submit error:', error);
-    res.status(500).send('Technician close submit error: ' + escapeHtml(error.message || 'Unknown error') + '. Check Render logs.');
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('Technician customer-confirmed close error:', error);
+    res.status(500).send('Could not complete the job after customer confirmation. Check Render logs.');
+  } finally {
+    client.release();
   }
 });
 
@@ -10979,6 +14350,10 @@ app.get("/technicians", async (req, res) => {
           ELSE 4
         END,
         CASE
+          WHEN COALESCE(is_subcontractor, FALSE) = FALSE THEN 1
+          ELSE 2
+        END,
+        CASE
           WHEN LOWER(priority) LIKE '%high%' THEN 1
           WHEN LOWER(priority) LIKE '%push%' THEN 2
           WHEN LOWER(priority) LIKE '%do not%' THEN 9
@@ -10993,8 +14368,11 @@ app.get("/technicians", async (req, res) => {
       const priorityBadgeClass = priorityClass(priority);
 
       return `
-        <tr>
-          <td>${escapeHtml(tech.name)}</td>
+        <tr class="${tech.is_subcontractor ? "sub-tech-row" : ""}">
+          <td>
+            <strong>${escapeHtml(tech.name)}</strong>
+            ${tech.is_subcontractor ? `<span class="sub-badge">SUB</span><div class="audit">Second priority</div>` : `<div class="audit">Primary</div>`}
+          </td>
           <td>${escapeHtml(tech.phone)}</td>
           <td>${escapeHtml(tech.base_postcode)}</td>
           <td>${escapeHtml(tech.current_postcode)}</td>
@@ -11034,12 +14412,18 @@ app.get("/technicians", async (req, res) => {
           ${sharedStyles()}
           form.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
           textarea { grid-column: span 4; min-height: 70px; }
+          .sub-badge { display:inline-block; margin-left:7px; padding:3px 7px; border-radius:999px; background:#f59e0b; color:#2b1700; font-size:10px; font-weight:900; letter-spacing:.08em; vertical-align:middle; }
+          .sub-tech-row td { background:#fffbeb; }
+          .sub-toggle { display:flex; align-items:center; gap:9px; padding:10px 12px; border:1px solid #f5d58a; border-radius:12px; background:#fffaf0; font-weight:700; }
+          .sub-toggle input { width:auto; margin:0; }
+          .sub-note { margin:14px 0 0; padding:12px 14px; border-radius:12px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:13px; line-height:1.45; }
         </style>
       </head>
       <body>
         ${nav(req)}
         <h1>Technician Availability</h1>
         <div class="subtitle">Live locksmith availability board · Auto-refreshes every 30 seconds</div>
+        <div class="sub-note"><strong>SUB = subcontractor / second priority.</strong> When checking ETA with a sub by phone, continue using the partial postcode manually. No postcode masking is applied in the system.</div>
         <div class="panel">
           <h2>Add Technician</h2>
           <form class="grid" method="POST" action="/technicians/save">
@@ -11053,6 +14437,7 @@ app.get("/technicians", async (req, res) => {
             <select name="priority">
               <option>Normal</option><option>Push</option><option>High priority</option><option>Do not prioritise</option>
             </select>
+            <label class="sub-toggle"><input type="checkbox" name="is_subcontractor" value="1"> Subcontractor / second priority</label>
             <input name="available_from" placeholder="Available from e.g. 15:30">
             <input type="date" name="return_to_work_date" title="Return to work date">
             <input name="skills" placeholder="Skills e.g. Lockout, uPVC">
@@ -11135,6 +14520,10 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="current_postcode" value="${escapeHtml(tech.current_postcode)}" placeholder="Current postcode">
             <select name="status">${statusOptions}</select>
             <select name="priority">${priorityOptions}</select>
+            <label style="display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #f5d58a;border-radius:12px;background:#fffaf0;font-weight:700;">
+              <input type="checkbox" name="is_subcontractor" value="1" ${tech.is_subcontractor ? "checked" : ""} style="width:auto;margin:0;">
+              Subcontractor / second priority
+            </label>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
@@ -11159,6 +14548,7 @@ app.post("/technicians/save", async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
     const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, return_to_work_date, skills, notes } = req.body;
+    const isSubcontractor = req.body.is_subcontractor === "1" || req.body.is_subcontractor === "on";
     const technicianPin = String(req.body.technician_pin || '').replace(/\D/g, '').slice(0, 4) || makeTechnicianPin();
     const agentName = currentAgentName(req);
 
@@ -11167,17 +14557,17 @@ app.post("/technicians/save", async (req, res) => {
         UPDATE technicians
         SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
             status = $5, priority = $6, available_from = $7, return_to_work_date = $8, skills = $9,
-            notes = $10, technician_pin = $11, updated_by = $12, updated_at = NOW()
-        WHERE id = $13
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, agentName, id]);
+            notes = $10, technician_pin = $11, is_subcontractor = $12, updated_by = $13, updated_at = NOW()
+        WHERE id = $14
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, isSubcontractor, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, return_to_work_date, skills, notes, updated_by, checkin_token, technician_pin, updated_at
+          available_from, return_to_work_date, skills, notes, is_subcontractor, updated_by, checkin_token, technician_pin, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, agentName, makeCheckinToken(), technicianPin]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, isSubcontractor, agentName, makeCheckinToken(), technicianPin]);
     }
 
     res.redirect("/technicians");
