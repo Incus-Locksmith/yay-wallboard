@@ -1,4 +1,4 @@
-// YDP Unified master + overall Avg Time to Answer KPI (v95)
+// YDP Unified master + single-line wallboard KPIs (v96)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -4642,11 +4642,11 @@ app.get("/call-wallboard", async (req, res) => {
           .live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);margin-left:8px}
           .portal-link{position:fixed;right:16px;bottom:14px;z-index:20;background:rgba(4,19,34,.82);color:#a9c1da;border:1px solid rgba(148,163,184,.2);padding:8px 11px;border-radius:10px;text-decoration:none;font-size:11px;opacity:.45;transition:.2s}
           .portal-link:hover{opacity:1;color:white}
-          .kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
-          .kpi{background:linear-gradient(180deg,rgba(12,39,66,.96),rgba(7,29,50,.96));border:1px solid var(--line);border-radius:15px;padding:13px 15px;min-width:0;box-shadow:0 12px 30px rgba(0,0,0,.16)}
-          .kpi-label{color:#c1d0df;font-size:13px;font-weight:800}
-          .kpi-value{font-size:clamp(28px,3vw,45px);line-height:1;font-weight:950;margin-top:7px;letter-spacing:-.04em}
-          .kpi-foot{font-size:11px;color:#91a8bd;margin-top:6px}
+          .kpis{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+          .kpi{background:linear-gradient(180deg,rgba(12,39,66,.96),rgba(7,29,50,.96));border:1px solid var(--line);border-radius:15px;padding:12px 12px;min-width:0;box-shadow:0 12px 30px rgba(0,0,0,.16)}
+          .kpi-label{color:#c1d0df;font-size:12px;font-weight:800;white-space:nowrap}
+          .kpi-value{font-size:clamp(27px,2.25vw,42px);line-height:1;font-weight:950;margin-top:7px;letter-spacing:-.04em}
+          .kpi-foot{font-size:10px;color:#91a8bd;margin-top:6px;line-height:1.15}
           .green .kpi-value{color:var(--green)} .red .kpi-value{color:#ff6b78}.amber .kpi-value{color:var(--amber)}.blue .kpi-value{color:#8dcaff}
           .alertbar{border-radius:14px;padding:11px 18px;display:flex;justify-content:space-between;align-items:center;gap:20px;background:rgba(8,35,59,.95);border:1px solid var(--line);min-height:55px}
           .alertbar.hot{background:linear-gradient(90deg,rgba(114,8,27,.92),rgba(66,8,24,.92));border-color:#ff4155;box-shadow:0 0 22px rgba(255,50,70,.24);animation:alertPulse 1.4s infinite}
@@ -4683,7 +4683,7 @@ app.get("/call-wallboard", async (req, res) => {
           .rank{width:22px;height:22px;border-radius:6px;background:#183858;display:grid;place-items:center;font-weight:900}.leader-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.leader-name small{color:#839bb2}
           .leader-track{height:8px;background:#16334e;border-radius:999px;overflow:hidden}.leader-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#20da78,#5ef0a0)}
           .health-grid{padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.health{background:rgba(255,255,255,.025);border:1px solid rgba(148,163,184,.13);border-radius:11px;padding:10px}.health span{display:block;color:#8fa8c0;font-size:9px}.health strong{display:block;font-size:22px;margin-top:5px}.health small{display:block;margin-top:4px;color:#9fb2c8;font-size:9px}
-          @media(max-width:1200px){.agent-grid{grid-template-columns:repeat(3,1fr)}.kpis{grid-template-columns:repeat(3,1fr)}}
+          @media(max-width:1050px){.agent-grid{grid-template-columns:repeat(3,1fr)}.kpis{grid-template-columns:repeat(3,1fr)}}
           @media(max-width:900px){.wallboard{display:block}.topbar,.main-grid,.bottom-grid{grid-template-columns:1fr}.topbar,.kpis,.main-grid,.bottom-grid{margin-bottom:12px}.agent-grid{grid-template-columns:repeat(2,1fr)}.kpis{grid-template-columns:repeat(2,1fr)}.clock{text-align:left}.title-wrap{border-left:0;padding-left:0}.panel{margin-bottom:10px}}
         </style>
       </head>
