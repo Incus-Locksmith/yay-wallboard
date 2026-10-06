@@ -1,4 +1,4 @@
-// YDP Unified master + CARTO basemap key from Render env (v94)
+// YDP Unified master + overall Avg Time to Answer KPI (v95)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -4443,6 +4443,14 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
     };
   });
 
+  const answerTimeSamples = answeredCalls
+    .map(call => wallboardAnswerSeconds(call))
+    .filter(seconds => seconds !== null && seconds !== undefined && Number.isFinite(Number(seconds)));
+
+  const avgAnswerSeconds = answerTimeSamples.length
+    ? Math.round(answerTimeSamples.reduce((sum, seconds) => sum + Number(seconds), 0) / answerTimeSamples.length)
+    : 0;
+
   const recent = inboundCalls.slice(0, 12).map(call => {
     const ext = String(call.answered_by || "").trim();
     let status = "Missed";
@@ -4474,6 +4482,7 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
       answerRate,
       missedRate,
       avgTalkSeconds,
+      avgAnswerSeconds,
       outbound: outboundCalls.length,
       longestWaitSeconds,
       waitingMaxSeconds
@@ -4698,6 +4707,7 @@ app.get("/call-wallboard", async (req, res) => {
             <div class="kpi red"><div class="kpi-label">Missed</div><div class="kpi-value" data-kpi="missed">${snapshot.totals.missed}</div><div class="kpi-foot"><span data-kpi="missedRate">${snapshot.totals.missedRate}</span>% of inbound</div></div>
             <div class="kpi amber"><div class="kpi-label">Waiting Now</div><div class="kpi-value" data-kpi="waiting">${snapshot.totals.waiting}</div><div class="kpi-foot">Live unconnected calls</div></div>
             <div class="kpi blue"><div class="kpi-label">Avg Talk Time</div><div class="kpi-value" data-kpi="avgTalk">${wbSeconds(snapshot.totals.avgTalkSeconds)}</div><div class="kpi-foot">Answered inbound calls</div></div>
+            <div class="kpi blue"><div class="kpi-label">Avg Time to Answer</div><div class="kpi-value" data-kpi="avgAnswer">${wbSeconds(snapshot.totals.avgAnswerSeconds)}</div><div class="kpi-foot">Ring-to-answer average</div></div>
             <div class="kpi green"><div class="kpi-label">Agents Available</div><div class="kpi-value"><span data-kpi="availableAgents">${availableAgents}</span>/<span data-kpi="totalAgents">${totalAgents}</span></div><div class="kpi-foot">Registered + queue available</div></div>
           </section>
 
@@ -4818,6 +4828,7 @@ app.get("/call-wallboard", async (req, res) => {
               setKpi("missedRate",data.totals.missedRate);
               setKpi("missedRate2",data.totals.missedRate);
               setKpi("avgTalk",duration(data.totals.avgTalkSeconds));
+              setKpi("avgAnswer",duration(data.totals.avgAnswerSeconds));
               setKpi("longestWait",duration(data.totals.longestWaitSeconds));
               setKpi("inProgress",data.totals.inProgress);
               const ready=data.agents.filter(a=>a.status==="Available").length;
