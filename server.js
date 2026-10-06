@@ -1,4 +1,4 @@
-// YDP Unified master + restored Refund Documentation (v97)
+// YDP Unified master + dynamic invoice lines (v98)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -5886,8 +5886,9 @@ app.get("/invoices/new", async (req, res) => {
     }).join("");
 
     function lineBlock(number) {
+      const hidden = number > 5 ? ` style="display:none"` : "";
       return `
-        <div class="line-block">
+        <div class="line-block extra-invoice-line" data-line-number="${number}"${hidden}>
           <div class="line-grid">
             <select name="line${number}_item_id" onchange="fillInvoiceLine(${number}, this)">
               <option value="">Choose invoice line</option>
@@ -5938,6 +5939,23 @@ app.get("/invoices/new", async (req, res) => {
             if (descriptionInput && description) descriptionInput.value = description;
             if (priceInput && price) priceInput.value = price;
             if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+          }
+
+          function addInvoiceLine() {
+            const hiddenLines = Array.from(document.querySelectorAll(".extra-invoice-line"))
+              .filter(line => line.style.display === "none");
+            if (!hiddenLines.length) return;
+
+            const nextLine = hiddenLines[0];
+            nextLine.style.display = "block";
+
+            const qtyInput = nextLine.querySelector("input[name$='_qty']");
+            if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+
+            if (hiddenLines.length === 1) {
+              const button = document.getElementById("add-invoice-line");
+              if (button) button.style.display = "none";
+            }
           }
 
           function fillTemplate(select) {
@@ -6055,7 +6073,15 @@ app.get("/invoices/new", async (req, res) => {
             ${lineBlock(3)}
             ${lineBlock(4)}
             ${lineBlock(5)}
-            <a href="/invoice-items">Edit invoice dropdown lines</a>
+            ${lineBlock(6)}
+            ${lineBlock(7)}
+            ${lineBlock(8)}
+            ${lineBlock(9)}
+            ${lineBlock(10)}
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <button id="add-invoice-line" type="button" class="button secondary" onclick="addInvoiceLine()">+ Add another line</button>
+              <a href="/invoice-items">Edit invoice dropdown lines</a>
+            </div>
           </div>
 
           <div class="panel">
@@ -6107,7 +6133,7 @@ app.post("/invoices/create", async (req, res) => {
 
     const lineItems = [];
 
-    for (let i = 1; i <= 5; i += 1) {
+    for (let i = 1; i <= 10; i += 1) {
       const description = (req.body[`line${i}_description`] || "").trim();
       const qty = Number(req.body[`line${i}_qty`] || 0);
       const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
@@ -6188,8 +6214,10 @@ app.get("/invoices/:id/edit", async (req, res) => {
 
     function lineBlock(number) {
       const item = lineItems[number - 1] || {};
+      const visibleCount = Math.max(5, lineItems.length);
+      const hidden = number > visibleCount ? ` style="display:none"` : "";
       return `
-        <div class="line-block">
+        <div class="line-block extra-invoice-line" data-line-number="${number}"${hidden}>
           <div class="line-grid">
             <select name="line${number}_item_id" onchange="fillInvoiceLine(${number}, this)">
               <option value="">Choose invoice line</option>
@@ -6239,6 +6267,23 @@ app.get("/invoices/:id/edit", async (req, res) => {
             if (descriptionInput && description) descriptionInput.value = description;
             if (priceInput && price) priceInput.value = price;
             if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+          }
+
+          function addInvoiceLine() {
+            const hiddenLines = Array.from(document.querySelectorAll(".extra-invoice-line"))
+              .filter(line => line.style.display === "none");
+            if (!hiddenLines.length) return;
+
+            const nextLine = hiddenLines[0];
+            nextLine.style.display = "block";
+
+            const qtyInput = nextLine.querySelector("input[name$='_qty']");
+            if (qtyInput && !qtyInput.value) qtyInput.value = "1";
+
+            if (hiddenLines.length === 1) {
+              const button = document.getElementById("add-invoice-line");
+              if (button) button.style.display = "none";
+            }
           }
 
           window.addEventListener("DOMContentLoaded", toggleSiteAddress);
@@ -6319,7 +6364,15 @@ app.get("/invoices/:id/edit", async (req, res) => {
             ${lineBlock(3)}
             ${lineBlock(4)}
             ${lineBlock(5)}
-            <a href="/invoice-items">Edit invoice dropdown lines</a>
+            ${lineBlock(6)}
+            ${lineBlock(7)}
+            ${lineBlock(8)}
+            ${lineBlock(9)}
+            ${lineBlock(10)}
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <button id="add-invoice-line" type="button" class="button secondary" onclick="addInvoiceLine()" ${lineItems.length >= 10 ? `style="display:none"` : ""}>+ Add another line</button>
+              <a href="/invoice-items">Edit invoice dropdown lines</a>
+            </div>
           </div>
 
           <div class="panel">
@@ -6375,7 +6428,7 @@ app.post("/invoices/:id/edit", async (req, res) => {
 
     const lineItems = [];
 
-    for (let i = 1; i <= 5; i += 1) {
+    for (let i = 1; i <= 10; i += 1) {
       const description = (req.body[`line${i}_description`] || "").trim();
       const qty = Number(req.body[`line${i}_qty`] || 0);
       const unitPrice = Number(req.body[`line${i}_unit_price`] || 0);
