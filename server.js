@@ -1,4 +1,4 @@
-// YDP Unified master + single-line wallboard KPIs (v96)
+// YDP Unified master + restored Refund Documentation (v97)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -2641,6 +2641,7 @@ function nav(req) {
             <a href="/invoices">Active invoices</a>
             <a href="/invoices/historic">Historic invoices</a>
             <a href="/invoices/new">New invoice</a>
+            <a href="/refund-documents">Refund documentation</a>
             <a href="/invoice-items">Invoice items</a>
             <a href="/invoice-templates">Account templates</a>
           </div>
@@ -2916,6 +2917,50 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_source TEXT;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS invoices_linked_job_idx ON invoices (linked_job_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS invoices_created_by_tech_idx ON invoices (created_by_technician_id);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS refund_documents (
+      id SERIAL PRIMARY KEY,
+      document_type TEXT NOT NULL,
+      document_number TEXT NOT NULL UNIQUE,
+      document_date TEXT NOT NULL,
+      client_name TEXT NOT NULL,
+      client_address TEXT,
+      client_postcode TEXT,
+      client_email TEXT,
+      client_vat_number TEXT,
+      original_job_reference TEXT,
+      original_invoice_reference TEXT,
+      reason TEXT NOT NULL,
+      net_amount NUMERIC(10,2) DEFAULT 0,
+      vat_amount NUMERIC(10,2) DEFAULT 0,
+      total_amount NUMERIC(10,2) NOT NULL,
+      vat_treatment TEXT DEFAULT 'No VAT / refund support document',
+      bank_reference TEXT,
+      client_account_number TEXT,
+      client_sort_code TEXT,
+      notes TEXT,
+      status TEXT DEFAULT 'Draft',
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_account_number TEXT;`);
+  await pool.query(`ALTER TABLE refund_documents ADD COLUMN IF NOT EXISTS client_sort_code TEXT;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS refund_documents_number_unique ON refund_documents (document_number);`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS refund_document_audit_log (
+      id SERIAL PRIMARY KEY,
+      refund_document_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      details TEXT,
+      changed_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS refund_document_audit_idx ON refund_document_audit_log (refund_document_id, created_at DESC);`);
+
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -5434,6 +5479,201 @@ app.post("/invoice-templates/save", async (req, res) => {
     console.error("Save invoice template error:", error);
     res.status(500).send("Save invoice template error. Check Render logs.");
   }
+});
+
+function refundDocumentTypeLabel(type) {
+  if (type === "client_refund_invoice") return "Client Refund Invoice / Bank Supporting Document";
+  return "24H Credit Note";
+}
+
+function refundStatusOptions(selected = "Draft") {
+  return ["Draft", "Approved", "Refund processed", "Cancelled"].map(value =>
+    `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`
+  ).join("");
+}
+
+app.get("/refund-documents", async (req, res) => {
+  try {
+    const rows = (await pool.query(`SELECT * FROM refund_documents ORDER BY created_at DESC, id DESC LIMIT 150`)).rows;
+    res.send(`<!DOCTYPE html><html><head><title>Refund Documentation</title><style>${sharedStyles()}</style></head><body>
+      ${nav(req)}
+      <h1>Refund Documentation</h1>
+      <div class="subtitle">Keep refund paperwork separate from normal sales invoices.</div>
+      <div class="panel">
+        <a class="button green" href="/refund-documents/new?type=client_refund_invoice">Create client refund invoice / bank document</a>
+        <a class="button secondary" href="/refund-documents/new?type=credit_note">Create 24H credit note</a>
+        <a class="button secondary" href="/invoices">Back to invoices</a>
+      </div>
+      <div class="panel">
+        <table><thead><tr><th>Document</th><th>Client</th><th>Reason / reference</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        ${rows.map(row => `<tr>
+          <td><strong>${escapeHtml(row.document_number)}</strong><br><span class="muted">${escapeHtml(refundDocumentTypeLabel(row.document_type))}<br>${escapeHtml(row.document_date || "")}</span></td>
+          <td>${escapeHtml(row.client_name || "—")}<br><span class="muted">${escapeHtml(row.client_postcode || "")}</span></td>
+          <td>${escapeHtml(row.reason || "—")}<br><span class="muted">Job: ${escapeHtml(row.original_job_reference || "—")} · Invoice: ${escapeHtml(row.original_invoice_reference || "—")}</span></td>
+          <td><strong>${money(row.total_amount)}</strong></td>
+          <td>${escapeHtml(row.status || "Draft")}</td>
+          <td><a href="/refund-documents/${row.id}/pdf" target="_blank">PDF</a> · <a href="/refund-documents/${row.id}/edit">Edit</a></td>
+        </tr>`).join("") || `<tr><td colspan="6">No refund documents yet.</td></tr>`}
+        </tbody></table>
+      </div>
+    </body></html>`);
+  } catch (error) {
+    console.error("Refund documents list error:", error);
+    res.status(500).send("Refund documents error. Check Render logs.");
+  }
+});
+
+app.get("/refund-documents/new", async (req, res) => {
+  const type = req.query.type === "credit_note" ? "credit_note" : "client_refund_invoice";
+  const today = new Date().toISOString().slice(0, 10);
+  const prefix = type === "credit_note" ? "CN" : "CRI";
+  const suggested = `${prefix}-${today.replaceAll("-", "")}-${String(Date.now()).slice(-4)}`;
+  res.send(`<!DOCTYPE html><html><head><title>New Refund Document</title><style>${sharedStyles()}</style></head><body>
+    ${nav(req)}
+    <h1>${escapeHtml(refundDocumentTypeLabel(type))}</h1>
+    <div class="subtitle">${type === "client_refund_invoice" ? "A supporting document showing the client as the party requesting/receiving the refund from 24H Locksmiths Ltd." : "A credit note issued by 24H Locksmiths Ltd to the client."}</div>
+    <form class="panel" method="post" action="/refund-documents/create">
+      <input type="hidden" name="document_type" value="${escapeHtml(type)}">
+      <div class="grid-2">
+        <div class="field"><label>Document number</label><input name="document_number" required value="${escapeHtml(suggested)}"></div>
+        <div class="field"><label>Document date</label><input type="date" name="document_date" required value="${today}"></div>
+        <div class="field"><label>Client name / company</label><input name="client_name" required></div>
+        <div class="field"><label>Client email</label><input name="client_email" type="email"></div>
+        <div class="field wide"><label>Client address</label><textarea name="client_address" rows="3"></textarea></div>
+        <div class="field"><label>Client postcode</label><input name="client_postcode"></div>
+        <div class="field"><label>Original job reference</label><input name="original_job_reference" placeholder="Optional but recommended"></div>
+        <div class="field"><label>Original 24H invoice/reference</label><input name="original_invoice_reference" placeholder="Optional but recommended"></div>
+        <div class="field wide"><label>Refund reason</label><input name="reason" required placeholder="e.g. Agreed refund for locksmith services"></div>
+        <div class="field"><label>Refund amount</label><input name="total_amount" type="number" step="0.01" min="0.01" required></div>
+        <div class="field"><label>Bank/reference notes</label><input name="bank_reference"></div>
+        <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" placeholder="Enter manually"></div>
+        <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" placeholder="e.g. 12-34-56"></div>
+        <div class="field"><label>Status</label><select name="status">${refundStatusOptions("Draft")}</select></div>
+        <div class="field wide"><label>Notes</label><textarea name="notes" rows="3"></textarea></div>
+      </div>
+      ${type === "client_refund_invoice" ? `<div style="padding:12px;margin:14px 0;border:1px solid #f59e0b;border-radius:10px;background:#fffbeb;"><strong>Important:</strong> This is stored as refund/bank supporting documentation, not as a 24H sales invoice. Only use it where the client and refund details are genuine.</div>` : ""}
+      <button class="button green" type="submit">Create document</button> <a class="button secondary" href="/refund-documents">Cancel</a>
+    </form>
+  </body></html>`);
+});
+
+app.post("/refund-documents/create", async (req, res) => {
+  try {
+    const type = req.body.document_type === "credit_note" ? "credit_note" : "client_refund_invoice";
+    const number = String(req.body.document_number || "").trim();
+    const clientName = String(req.body.client_name || "").trim();
+    const reason = String(req.body.reason || "").trim();
+    const total = Number(req.body.total_amount || 0);
+    if (!number || !clientName || !reason || !Number.isFinite(total) || total <= 0) return res.status(400).send("Document number, client, reason and a positive total are required.");
+    const duplicate = await pool.query(`SELECT id FROM refund_documents WHERE LOWER(document_number)=LOWER($1) LIMIT 1`, [number]);
+    if (duplicate.rows.length) return res.status(400).send("That refund document number already exists.");
+    const result = await pool.query(`
+      INSERT INTO refund_documents (
+        document_type, document_number, document_date, client_name, client_address, client_postcode, client_email, client_vat_number,
+        original_job_reference, original_invoice_reference, reason, net_amount, vat_amount, total_amount, vat_treatment,
+        bank_reference, client_account_number, client_sort_code, notes, status, created_by, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW()) RETURNING id
+    `, [type, number, req.body.document_date, clientName, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", currentAgentName(req) || "Unknown"]);
+    const id = result.rows[0].id;
+    await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id, action_type, details, changed_by, created_at) VALUES ($1,'created',$2,$3,NOW())`, [id, `${refundDocumentTypeLabel(type)} ${number} created for ${clientName}, total ${money(total)}`, currentAgentName(req) || "Unknown"]);
+    res.redirect(`/refund-documents/${id}/edit?created=1`);
+  } catch (error) {
+    console.error("Create refund document error:", error);
+    res.status(500).send("Could not create refund document. Check Render logs.");
+  }
+});
+
+app.get("/refund-documents/:id/edit", async (req, res) => {
+  try {
+    const docRow = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
+    if (!docRow) return res.status(404).send("Refund document not found");
+    const audit = (await pool.query(`SELECT * FROM refund_document_audit_log WHERE refund_document_id=$1 ORDER BY created_at DESC,id DESC LIMIT 30`, [req.params.id])).rows;
+    res.send(`<!DOCTYPE html><html><head><title>Edit Refund Document</title><style>${sharedStyles()}</style></head><body>${nav(req)}
+      <h1>${escapeHtml(docRow.document_number)}</h1><div class="subtitle">${escapeHtml(refundDocumentTypeLabel(docRow.document_type))}</div>
+      <div class="panel"><a class="button green" href="/refund-documents/${docRow.id}/pdf" target="_blank">Open PDF</a> <a class="button secondary" href="/refund-documents">Back to refund documents</a></div>
+      <form class="panel" method="post" action="/refund-documents/${docRow.id}/edit">
+        <div class="grid-2">
+          <div class="field"><label>Document number</label><input name="document_number" required value="${escapeHtml(docRow.document_number)}"></div>
+          <div class="field"><label>Date</label><input type="date" name="document_date" required value="${escapeHtml(docRow.document_date || "")}"></div>
+          <div class="field"><label>Client name/company</label><input name="client_name" required value="${escapeHtml(docRow.client_name || "")}"></div>
+          <div class="field"><label>Client email</label><input name="client_email" type="email" value="${escapeHtml(docRow.client_email || "")}"></div>
+          <div class="field wide"><label>Client address</label><textarea name="client_address" rows="3">${escapeHtml(docRow.client_address || "")}</textarea></div>
+          <div class="field"><label>Client postcode</label><input name="client_postcode" value="${escapeHtml(docRow.client_postcode || "")}"></div>
+          <div class="field"><label>Original job reference</label><input name="original_job_reference" value="${escapeHtml(docRow.original_job_reference || "")}"></div>
+          <div class="field"><label>Original 24H invoice/reference</label><input name="original_invoice_reference" value="${escapeHtml(docRow.original_invoice_reference || "")}"></div>
+          <div class="field wide"><label>Refund reason</label><input name="reason" required value="${escapeHtml(docRow.reason || "")}"></div>
+          <div class="field"><label>Refund amount</label><input type="number" step="0.01" min="0.01" required name="total_amount" value="${Number(docRow.total_amount || 0).toFixed(2)}"></div>
+          <div class="field"><label>Bank/reference notes</label><input name="bank_reference" value="${escapeHtml(docRow.bank_reference || "")}"></div>
+          <div class="field"><label>Client account number</label><input name="client_account_number" inputmode="numeric" autocomplete="off" value="${escapeHtml(docRow.client_account_number || "")}"></div>
+          <div class="field"><label>Client sort code</label><input name="client_sort_code" autocomplete="off" value="${escapeHtml(docRow.client_sort_code || "")}"></div>
+          <div class="field"><label>Status</label><select name="status">${refundStatusOptions(docRow.status || "Draft")}</select></div>
+          <div class="field wide"><label>Notes</label><textarea name="notes" rows="3">${escapeHtml(docRow.notes || "")}</textarea></div>
+        </div><button class="button green" type="submit">Save changes</button>
+      </form>
+      <div class="panel"><h2>Audit trail</h2>${audit.map(a => `<div style="padding:9px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.action_type)}</strong> · ${escapeHtml(formatDateTime(a.created_at))} · ${escapeHtml(a.changed_by || "Unknown")}<br><span class="muted">${escapeHtml(a.details || "")}</span></div>`).join("") || `<p class="muted">No audit entries.</p>`}</div>
+    </body></html>`);
+  } catch (error) { console.error("Edit refund document page error:", error); res.status(500).send("Refund document error."); }
+});
+
+app.post("/refund-documents/:id/edit", async (req, res) => {
+  try {
+    const old = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
+    if (!old) return res.status(404).send("Refund document not found");
+    const number = String(req.body.document_number || "").trim();
+    const total = Number(req.body.total_amount || 0);
+    if (!number || !String(req.body.client_name || "").trim() || !String(req.body.reason || "").trim() || !Number.isFinite(total) || total <= 0) return res.status(400).send("Required refund document fields are missing.");
+    const duplicate = await pool.query(`SELECT id FROM refund_documents WHERE LOWER(document_number)=LOWER($1) AND id<>$2 LIMIT 1`, [number, req.params.id]);
+    if (duplicate.rows.length) return res.status(400).send("That refund document number already exists.");
+    await pool.query(`UPDATE refund_documents SET document_number=$1,document_date=$2,client_name=$3,client_address=$4,client_postcode=$5,client_email=$6,client_vat_number=$7,original_job_reference=$8,original_invoice_reference=$9,reason=$10,net_amount=$11,vat_amount=$12,total_amount=$13,vat_treatment=$14,bank_reference=$15,client_account_number=$16,client_sort_code=$17,notes=$18,status=$19,updated_at=NOW() WHERE id=$20`, [number, req.body.document_date, req.body.client_name, req.body.client_address || "", req.body.client_postcode || "", req.body.client_email || "", req.body.client_vat_number || "", req.body.original_job_reference || "", req.body.original_invoice_reference || "", req.body.reason, 0, 0, total, "", req.body.bank_reference || "", req.body.client_account_number || "", req.body.client_sort_code || "", req.body.notes || "", req.body.status || "Draft", req.params.id]);
+    await pool.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'edited',$2,$3,NOW())`, [req.params.id, `Updated ${number}; status ${req.body.status || "Draft"}; total ${money(total)}`, currentAgentName(req) || "Unknown"]);
+    res.redirect(`/refund-documents/${req.params.id}/edit?saved=1`);
+  } catch (error) { console.error("Save refund document error:", error); res.status(500).send("Could not save refund document."); }
+});
+
+app.get("/refund-documents/:id/pdf", async (req, res) => {
+  try {
+    const row = (await pool.query(`SELECT * FROM refund_documents WHERE id=$1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).send("Refund document not found");
+    const company = companies.locksmiths;
+    const isClientInvoice = row.document_type === "client_refund_invoice";
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${isClientInvoice ? "client-refund-invoice" : "credit-note"}-${row.document_number}.pdf"`);
+    const doc = new PDFDocument({ size: "A4", margin: 50 }); doc.pipe(res);
+    doc.font("Helvetica-Bold").fontSize(22).text(isClientInvoice ? "CLIENT REFUND INVOICE" : "CREDIT NOTE", 50, 48);
+    doc.font("Helvetica").fontSize(9).text(isClientInvoice ? "Bank supporting document for an agreed refund" : "Issued by 24H Locksmiths Ltd", 50, 78);
+    doc.fontSize(10).text(`Document No: ${pdfText(row.document_number)}`, 380, 52).text(`Date: ${pdfText(row.document_date)}`, 380, 68).text(`Status: ${pdfText(row.status || "Draft")}`, 380, 84);
+    doc.moveTo(50, 112).lineTo(545,112).stroke();
+    if (isClientInvoice) {
+      doc.font("Helvetica-Bold").fontSize(11).text("FROM — Client", 50, 132);
+      doc.font("Helvetica").fontSize(10).text(pdfText(row.client_name), 50, 151).text(pdfText(row.client_address || ""), 50, 168, {width:210}).text(pdfText(row.client_postcode || ""), 50, 206).text(row.client_vat_number ? `VAT: ${pdfText(row.client_vat_number)}` : "", 50, 221);
+      doc.font("Helvetica-Bold").fontSize(11).text("TO — 24H Locksmiths Ltd", 315, 132);
+      doc.font("Helvetica").fontSize(10).text(company.name,315,151).text(company.address1,315,168).text(`${company.address2}, ${company.postcode}`,315,185).text(`Company No: ${company.reg}`,315,202);
+    } else {
+      doc.font("Helvetica-Bold").fontSize(11).text("FROM — 24H Locksmiths Ltd", 50, 132);
+      doc.font("Helvetica").fontSize(10).text(company.name,50,151).text(company.address1,50,168).text(`${company.address2}, ${company.postcode}`,50,185).text(`Company No: ${company.reg}`,50,202);
+      doc.font("Helvetica-Bold").fontSize(11).text("TO — Client", 315,132);
+      doc.font("Helvetica").fontSize(10).text(pdfText(row.client_name),315,151).text(pdfText(row.client_address || ""),315,168,{width:210}).text(pdfText(row.client_postcode || ""),315,206).text(row.client_vat_number ? `VAT: ${pdfText(row.client_vat_number)}` : "",315,221);
+    }
+    doc.moveTo(50,250).lineTo(545,250).stroke();
+    doc.font("Helvetica-Bold").fontSize(11).text("Refund details",50,270);
+    doc.font("Helvetica").fontSize(10).text(`Reason: ${pdfText(row.reason)}`,50,292,{width:495});
+    doc.text(`Original job reference: ${pdfText(row.original_job_reference || "—")}`,50,322);
+    doc.text(`Original 24H invoice/reference: ${pdfText(row.original_invoice_reference || "—")}`,50,340);
+    if (row.bank_reference) doc.text(`Bank/reference: ${pdfText(row.bank_reference)}`,50,358);
+    doc.roundedRect(330,395,215,78,8).stroke();
+    doc.font("Helvetica").fontSize(10).text("Refund amount",350,412).text(money(row.total_amount),465,412);
+    doc.moveTo(350,438).lineTo(525,438).strokeColor("#222222").stroke();
+    doc.font("Helvetica-Bold").fontSize(12).text("TOTAL REFUND",350,450).text(money(row.total_amount),465,450);
+    if (row.notes) doc.text(`Notes: ${pdfText(row.notes)}`,50,435,{width:250});
+    if (isClientInvoice) {
+      doc.font("Helvetica").fontSize(10).fillColor("#000000").text("Please make payments to the agreed bank account.", 50, 505, { width: 495, align: "center" });
+      if (row.client_account_number || row.client_sort_code) {
+        doc.font("Helvetica-Bold").fontSize(10).text("Bank details for refund", 50, 530, { width: 495, align: "center" });
+        doc.font("Helvetica").fontSize(10).text(`Account number: ${pdfText(row.client_account_number || "—")}    Sort code: ${pdfText(row.client_sort_code || "—")}`, 50, 548, { width: 495, align: "center" });
+      }
+    }
+    doc.end();
+  } catch (error) { console.error("Refund PDF error:", error); res.status(500).send("Could not create refund PDF."); }
 });
 
 app.get("/invoices", async (req, res) => {
