@@ -1,4 +1,4 @@
-// YDP Unified master: advanced wallboard + invoice editing + technician flows (v93)
+// YDP Unified master + CARTO basemap key from Render env (v94)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -11319,7 +11319,7 @@ app.get("/dispatch", async (req, res) => {
           const customerDistrict = ${JSON.stringify(customerDistrict || "")};
           const map = L.map("dispatch-map", { scrollWheelZoom: true, zoomControl: true });
 
-          L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+          L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(process.env.CARTO_BASEMAP_KEY || "")}", {
             subdomains: "abcd",
             maxZoom: 19,
             attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
