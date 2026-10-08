@@ -1,4 +1,4 @@
-// YDP Unified master + account campaign requirements (v101)
+// YDP Unified master + dynamic invoice PDF footer (v102)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -6609,7 +6609,24 @@ app.get("/invoices/:id/pdf", async (req, res) => {
     doc.text("TOTAL", 380, totalsY + 38);
     doc.text(money(invoice.total), 480, totalsY + 38);
 
-    const paymentBoxY = totalsY + 78;
+    // Keep the payment/notes boxes and company footer together.
+    // If extra invoice lines push this section too far down, move the whole
+    // footer section cleanly onto a second page instead of letting elements overlap.
+    const footerSectionHeight = 190;
+    const pageBottom = 810;
+    let paymentBoxY = totalsY + 78;
+
+    if (paymentBoxY + footerSectionHeight > pageBottom) {
+      doc.addPage();
+      doc.font("Helvetica-Bold").fontSize(11).text(
+        `Invoice ${pdfText(invoice.invoice_number)} - payment details`,
+        50,
+        50,
+        { width: 495 }
+      );
+      doc.moveTo(50, 72).lineTo(545, 72).stroke();
+      paymentBoxY = 95;
+    }
 
     doc.roundedRect(50, paymentBoxY, 260, 105, 8).stroke();
     doc.font("Helvetica-Bold").fontSize(10).text("Payment Details", 70, paymentBoxY + 15);
@@ -6643,15 +6660,23 @@ app.get("/invoices/:id/pdf", async (req, res) => {
       { width: 175, height: 55 }
     );
 
-    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, 718, { align: "center", width: 495 });
+    const companyFooterY = paymentBoxY + 122;
+
+    doc.font("Helvetica-Bold").fontSize(10).text(company.name, 50, companyFooterY, {
+      align: "center",
+      width: 495
+    });
 
     doc.font("Helvetica").fontSize(9)
-      .text(company.footer, 50, 733, { align: "center", width: 495 })
-      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, 748, { align: "center", width: 495 });
+      .text(company.footer, 50, companyFooterY + 15, { align: "center", width: 495 })
+      .text(`REG: ${company.reg}    VAT NO: ${company.vat}`, 50, companyFooterY + 30, {
+        align: "center",
+        width: 495
+      });
 
-    doc.moveTo(50, 768).lineTo(545, 768).stroke();
+    doc.moveTo(50, companyFooterY + 50).lineTo(545, companyFooterY + 50).stroke();
 
-    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, 780, {
+    doc.fontSize(9).font("Helvetica-Oblique").text("Thank you for using our services", 50, companyFooterY + 62, {
       align: "center",
       width: 495
     });
