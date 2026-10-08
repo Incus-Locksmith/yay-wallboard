@@ -1,4 +1,4 @@
-// YDP Unified master + dynamic invoice lines (v98)
+// YDP Unified master + partial-payment close warning (v99)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10628,20 +10628,25 @@ app.get("/jobs/:id/close", async (req, res) => {
           <p><strong>Description:</strong><br>${escapeHtml(job.job_description || "—")}</p>
         </div>
 
-        <form method="POST" action="/jobs/${job.id}/close" onsubmit="return confirm('Have you closed it correctly, with the NET value?');">
+        <form method="POST" action="/jobs/${job.id}/close" onsubmit="return confirmCloseJob();">
           <div class="panel">
             <h2>Close job / payment</h2>
             <p class="muted">Enter the NET value. VAT is calculated automatically at 20%, and the full value is saved against the job. Cancelled jobs should be cancelled from Quick Actions; they do not need to be closed here.</p>
+            <div id="partialPaymentWarning" style="display:none; margin:14px 0; padding:14px 16px; border:2px solid #f59e0b; border-radius:10px; background:#422006; color:#fde68a;">
+              <strong>⚠ Part payment detected</strong>
+              <div id="partialPaymentWarningText" style="margin-top:6px;"></div>
+              <div style="margin-top:6px;"><strong>When you close this job it will appear in Payment Chasing for the outstanding balance.</strong></div>
+            </div>
             <div class="job-grid">
               <div class="field"><label>NET job value</label><input id="netValue" name="net_value" value="${job.net_value !== null && job.net_value !== undefined ? Number(job.net_value).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? (Number(job.final_value) / 1.2).toFixed(2) : "")}" inputmode="decimal" required></div>
               <div class="field"><label>UK VAT 20%</label><input id="vatValue" name="vat_amount_display" value="" readonly></div>
               <div class="field"><label>Full value inc VAT</label><input id="grossValue" name="final_value_display" value="" readonly></div>
-              <div class="field"><label>Customer paid?</label><select name="customer_paid"><option value="false" ${!job.customer_paid ? "selected" : ""}>No</option><option value="true" ${job.customer_paid ? "selected" : ""}>Yes</option></select></div>
+              <div class="field"><label>Customer paid?</label><select id="customerPaid" name="customer_paid" onchange="checkPartialPaymentWarning()"><option value="false" ${!job.customer_paid ? "selected" : ""}>No</option><option value="true" ${job.customer_paid ? "selected" : ""}>Yes</option></select></div>
               <div class="field"><label>Payment method 1</label><select id="paymentMethod1" name="payment_method_1" onchange="toggleClosePaymentRules()"><option value="">Select method</option>${optionList(splitPaymentMethods, job.payment_method_1 || job.payment_method || job.expected_payment_method || "")}</select></div>
-              <div class="field"><label>Payment amount 1</label><input name="payment_amount_1" value="${job.payment_amount_1 !== null && job.payment_amount_1 !== undefined ? Number(job.payment_amount_1).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : "")}" inputmode="decimal" placeholder="£"></div>
+              <div class="field"><label>Payment amount 1</label><input id="paymentAmount1" name="payment_amount_1" value="${job.payment_amount_1 !== null && job.payment_amount_1 !== undefined ? Number(job.payment_amount_1).toFixed(2) : (job.final_value !== null && job.final_value !== undefined ? Number(job.final_value).toFixed(2) : "")}" inputmode="decimal" placeholder="£" oninput="checkPartialPaymentWarning()"></div>
               <div class="field"><label>Payment method 2 / split payment</label><select id="paymentMethod2" name="payment_method_2" onchange="toggleClosePaymentRules()"><option value="">No split payment</option>${optionList(splitPaymentMethods, job.payment_method_2 || "")}</select></div>
-              <div class="field"><label>Payment amount 2</label><input name="payment_amount_2" value="${job.payment_amount_2 !== null && job.payment_amount_2 !== undefined ? Number(job.payment_amount_2).toFixed(2) : ""}" inputmode="decimal" placeholder="£"></div>
-              <div class="field"><label>Final close status</label><select name="status">${literalClosingStatusOptions(job.status || (job.customer_paid ? "fully_paid" : "awaiting_payment"))}</select><small class="muted">Closing outcomes only. Cancelled jobs should be cancelled from Quick Actions, not closed here.</small></div>
+              <div class="field"><label>Payment amount 2</label><input id="paymentAmount2" name="payment_amount_2" value="${job.payment_amount_2 !== null && job.payment_amount_2 !== undefined ? Number(job.payment_amount_2).toFixed(2) : ""}" inputmode="decimal" placeholder="£" oninput="checkPartialPaymentWarning()"></div>
+              <div class="field"><label>Final close status</label><select id="closeStatus" name="status" onchange="checkPartialPaymentWarning()">${literalClosingStatusOptions(job.status || (job.customer_paid ? "fully_paid" : "awaiting_payment"))}</select><small class="muted">Closing outcomes only. Cancelled jobs should be cancelled from Quick Actions, not closed here.</small></div>
               <div class="field"><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ""}" inputmode="decimal" placeholder="e.g. 18"></div>
               <div class="field"><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || "Completed")}</select></div>
             </div>
@@ -10697,9 +10702,60 @@ app.get("/jobs/:id/close", async (req, res) => {
             const isAmex = document.getElementById('cardIsAmex')?.value === 'true';
             document.getElementById('amexIdBox').style.display = hasCard && isAmex ? 'block' : 'none';
           }
-          document.getElementById('netValue').addEventListener('input', recalcCloseValues);
+          function moneyNumber(value){
+            return Number(String(value || '').replace(/[^0-9.-]/g, '')) || 0;
+          }
+          function partialPaymentDetails(){
+            const gross = moneyNumber(document.getElementById('grossValue')?.value);
+            const paid1 = moneyNumber(document.getElementById('paymentAmount1')?.value);
+            const paid2 = moneyNumber(document.getElementById('paymentAmount2')?.value);
+            const paid = Math.round((paid1 + paid2) * 100) / 100;
+            const outstanding = Math.max(0, Math.round((gross - paid) * 100) / 100);
+            const partial = gross > 0 && paid > 0 && outstanding > 0.009;
+            return { gross, paid, outstanding, partial };
+          }
+          function checkPartialPaymentWarning(){
+            const details = partialPaymentDetails();
+            const box = document.getElementById('partialPaymentWarning');
+            const message = document.getElementById('partialPaymentWarningText');
+            if (!box || !message) return details;
+
+            if (details.partial) {
+              box.style.display = 'block';
+              message.textContent = 'Received £' + details.paid.toFixed(2) + ' of £' + details.gross.toFixed(2) + '. Outstanding balance: £' + details.outstanding.toFixed(2) + '.';
+
+              const paidSelect = document.getElementById('customerPaid');
+              if (paidSelect) paidSelect.value = 'false';
+
+              const statusSelect = document.getElementById('closeStatus');
+              if (statusSelect && ['fully_paid', 'awaiting_payment'].includes(statusSelect.value)) {
+                statusSelect.value = 'awaiting_balance';
+              }
+            } else {
+              box.style.display = 'none';
+            }
+            return details;
+          }
+          function confirmCloseJob(){
+            const details = checkPartialPaymentWarning();
+            if (details.partial) {
+              return confirm(
+                'PART PAYMENT\n\n' +
+                '£' + details.paid.toFixed(2) + ' has been received.\n' +
+                '£' + details.outstanding.toFixed(2) + ' is still outstanding.\n\n' +
+                'Closing this job will move it into PAYMENT CHASING for the outstanding balance.\n\n' +
+                'Continue and close the job?'
+              );
+            }
+            return confirm('Have you closed it correctly, with the NET value?');
+          }
+          document.getElementById('netValue').addEventListener('input', function(){
+            recalcCloseValues();
+            checkPartialPaymentWarning();
+          });
           recalcCloseValues();
           toggleClosePaymentRules();
+          checkPartialPaymentWarning();
         </script>
       </body>
       </html>
@@ -10724,25 +10780,35 @@ app.post("/jobs/:id/close", async (req, res) => {
     if (isAmex && !amexIdProvided) {
       return res.status(400).send("AMEX payment selected. Please confirm that ID from the client has been provided.");
     }
+    const paymentAmount1 = parseMoneyInput(body.payment_amount_1);
+    const paymentAmount2 = parseMoneyInput(body.payment_amount_2);
+    const totalPaid = Math.round((paymentAmount1 + paymentAmount2) * 100) / 100;
+    const outstandingBalance = Math.max(0, Math.round((finalValue - totalPaid) * 100) / 100);
+    const isPartiallyPaid = finalValue > 0 && totalPaid > 0 && outstandingBalance > 0.009;
+    const requestedStatus = body.status || "fully_paid";
+    const normalisedStatus = isPartiallyPaid && ["fully_paid", "awaiting_payment"].includes(requestedStatus)
+      ? "awaiting_balance"
+      : requestedStatus;
+
     const closeValues = {
       net_value: netValue,
       vat_amount: vatAmount,
       final_value: finalValue,
       payment_method: buildSplitPaymentSummary(body),
       payment_method_1: body.payment_method_1 || "",
-      payment_amount_1: parseMoneyInput(body.payment_amount_1),
+      payment_amount_1: paymentAmount1,
       payment_method_2: body.payment_method_2 || "",
-      payment_amount_2: parseMoneyInput(body.payment_amount_2),
+      payment_amount_2: paymentAmount2,
       invoice_photos_confirmed: closePaymentRequiresInvoicePhotos(body) ? body.invoice_photos_confirmed === "true" : false,
       card_is_amex: isAmex,
       amex_id_provided: amexIdProvided,
-      customer_paid: body.customer_paid === "true",
+      customer_paid: isPartiallyPaid ? false : body.customer_paid === "true",
       materials_used: body.materials_used,
       materials_cost: parseMoneyInput(body.materials_cost),
       outcome: body.outcome,
       tech_notes: body.tech_notes,
       close_notes: body.close_notes,
-      status: body.status || "fully_paid"
+      status: normalisedStatus
     };
     await pool.query(`
       UPDATE jobs SET
