@@ -1,4 +1,4 @@
-// YDP Unified master + partial-payment close warning popup fix (v100)
+// YDP Unified master + account campaign requirements (v101)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3110,6 +3110,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS udprn TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lock_change_keys TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_campaign TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS account_requirements_snapshot TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS quoted_price NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS starting_price NUMERIC(10,2);`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS call_out_agreed NUMERIC(10,2);`);
@@ -3393,6 +3394,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 100;`);
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`);
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS notes TEXT;`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS account_requirements TEXT;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS campaigns_active_idx ON campaigns (active);`);
 
 
@@ -6802,7 +6804,7 @@ app.get("/campaigns", async (req, res) => {
     let where = "";
     if (search) {
       params.push(`%${search}%`);
-      where = `WHERE name ILIKE $1 OR campaign_type ILIKE $1 OR notes ILIKE $1`;
+      where = `WHERE name ILIKE $1 OR campaign_type ILIKE $1 OR notes ILIKE $1 OR account_requirements ILIKE $1`;
     }
 
     const [campaignsResult, statsResult] = await Promise.all([
@@ -6879,6 +6881,7 @@ app.get("/campaigns", async (req, res) => {
               <div><label>Sort order</label><input name="sort_order" value="100"></div>
               <div><label>Status</label><select name="active"><option value="true">Active</option><option value="false">Hidden</option></select></div>
               <div style="grid-column: span 2;"><label>Notes</label><input name="notes" placeholder="Internal notes about this campaign/source"></div>
+              <div style="grid-column: 1 / -1;"><label>Account preferences / requirements</label><textarea name="account_requirements" rows="4" placeholder="For Account campaigns: booking instructions, approval limits, PO/reference requirements, contact rules, pricing notes, invoicing requirements, etc."></textarea><div class="muted" style="margin-top:6px;">Shown automatically to dispatchers when this Account client is selected on Create Order.</div></div>
               <div style="display:flex;align-items:end;"><button type="submit">Add campaign</button></div>
             </form>
           </div>
@@ -6933,6 +6936,7 @@ app.get("/campaigns/:id/edit", async (req, res) => {
               <div><label>Sort order</label><input name="sort_order" value="${Number(campaign.sort_order || 100)}"></div>
               <div><label>Status</label><select name="active"><option value="true" ${campaign.active ? "selected" : ""}>Active</option><option value="false" ${!campaign.active ? "selected" : ""}>Hidden</option></select></div>
               <div style="grid-column: span 2;"><label>Notes</label><input name="notes" value="${escapeHtml(campaign.notes || "")}"></div>
+              <div style="grid-column: 1 / -1;"><label>Account preferences / requirements</label><textarea name="account_requirements" rows="5" placeholder="Booking instructions, approval limits, PO/reference requirements, pricing or invoicing notes...">${escapeHtml(campaign.account_requirements || "")}</textarea><div class="muted" style="margin-top:6px;">These instructions are shown on Create Order when this Account client is selected.</div></div>
               <div style="display:flex;align-items:end;gap:12px;"><button type="submit">Save campaign</button><a href="/campaigns">Cancel</a></div>
             </form>
           </div>
@@ -6956,6 +6960,7 @@ app.post("/campaigns/save", async (req, res) => {
     const sortOrder = Number(req.body.sort_order || 100) || 100;
     const active = req.body.active !== "false";
     const notes = req.body.notes || "";
+    const accountRequirements = req.body.account_requirements || "";
 
     if (!name) return res.redirect("/campaigns");
 
@@ -6964,16 +6969,16 @@ app.post("/campaigns/save", async (req, res) => {
         UPDATE campaigns
         SET name = $1, campaign_type = $2, default_payment_method = $3,
             commission_percentage = $4, sort_order = $5, active = $6,
-            notes = $7, updated_at = NOW()
-        WHERE id = $8
-      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes, id]);
+            notes = $7, account_requirements = $8, updated_at = NOW()
+        WHERE id = $9
+      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes, accountRequirements, id]);
     } else {
       await pool.query(`
         INSERT INTO campaigns (
           name, campaign_type, default_payment_method, commission_percentage,
-          sort_order, active, notes, created_at, updated_at
+          sort_order, active, notes, account_requirements, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
         ON CONFLICT (name) DO UPDATE SET
           campaign_type = EXCLUDED.campaign_type,
           default_payment_method = EXCLUDED.default_payment_method,
@@ -6981,8 +6986,9 @@ app.post("/campaigns/save", async (req, res) => {
           sort_order = EXCLUDED.sort_order,
           active = TRUE,
           notes = EXCLUDED.notes,
+          account_requirements = EXCLUDED.account_requirements,
           updated_at = NOW()
-      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes]);
+      `, [name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active, notes, accountRequirements]);
     }
 
     res.redirect("/campaigns");
@@ -9050,6 +9056,13 @@ app.get("/jobs/new", async (req, res) => {
     `)).rows;
     const templates = (await pool.query(`SELECT id, template_name, customer_name, customer_address, customer_postcode FROM invoice_templates WHERE active = TRUE ORDER BY sort_order ASC, template_name ASC`)).rows;
     const templatesJson = JSON.stringify(templates).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+    const accountCampaigns = (await pool.query(`
+      SELECT id, name, default_payment_method, account_requirements
+      FROM campaigns
+      WHERE active = TRUE AND LOWER(COALESCE(campaign_type, '')) = 'account'
+      ORDER BY sort_order ASC, name ASC
+    `)).rows;
+    const accountCampaignsJson = JSON.stringify(accountCampaigns).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 
     const statusMessage = !search
       ? "Enter a postcode, press Find address, then choose the address from the dropdown."
@@ -9391,7 +9404,7 @@ app.get("/jobs/new", async (req, res) => {
                   </div>
                   <div class="field">
                     <label>Campaign</label>
-                    <select name="source_campaign">${optionList(campaignOptions, "Unknown")}</select>
+                    <select id="source_campaign" name="source_campaign">${optionList(campaignOptions, "Unknown")}</select>
                   </div>
                 </div>
 
@@ -9414,14 +9427,20 @@ app.get("/jobs/new", async (req, res) => {
 
                 <div class="section-title">Customer Details</div>
                 <div class="field" style="max-width: 500px;">
-                  <label>Existing Customer</label>
-                  <select id="existing_customer">
-                    <option value="">--</option>
-                    ${templates.map(template => `<option value="${template.id}">${escapeHtml(template.template_name)} — ${escapeHtml(template.customer_name)}</option>`).join("")}
+                  <label>Account client</label>
+                  <select id="account_client_campaign_id" name="account_client_campaign_id">
+                    <option value="">-- No account client --</option>
+                    ${accountCampaigns.map(campaign => `<option value="${campaign.id}">${escapeHtml(campaign.name)}</option>`).join("")}
                   </select>
                 </div>
 
-                <div class="divider-text">Or Create New Customer</div>
+                <div id="account_requirements_box" style="display:none; margin-top:14px; padding:15px 16px; border:2px solid #2563eb; border-radius:8px; background:#eff6ff; color:#1e3a8a;">
+                  <strong>Account preferences / requirements</strong>
+                  <div id="account_requirements_text" style="margin-top:7px; white-space:pre-wrap; line-height:1.45;"></div>
+                </div>
+                <input type="hidden" id="account_requirements_snapshot" name="account_requirements_snapshot">
+
+                <div class="divider-text">Customer / site contact details</div>
 
                 <div class="customer-line">
                   <div class="field">
@@ -9533,6 +9552,7 @@ app.get("/jobs/new", async (req, res) => {
         <script>
           const addresses = ${addressesJson};
           const templates = ${templatesJson};
+          const accountCampaigns = ${accountCampaignsJson};
 
           function setValue(id, value) {
             const element = document.getElementById(id);
@@ -9556,18 +9576,34 @@ app.get("/jobs/new", async (req, res) => {
           const addressSelect = document.getElementById("address-select");
           if (addressSelect) addressSelect.addEventListener("change", () => chooseAddress(addressSelect.value));
 
-          const existingCustomer = document.getElementById("existing_customer");
-          if (existingCustomer) {
-            existingCustomer.addEventListener("change", () => {
-              const template = templates.find(item => String(item.id) === String(existingCustomer.value));
-              if (!template) return;
-              setValue("customer_name", template.customer_name || "");
-              setValue("postcode", String(template.customer_postcode || "").toUpperCase().replace(/\s+/g, ""));
-              const accountJob = document.getElementById("account_job");
-              const accountTemplate = document.getElementById("account_template_id");
-              if (accountJob) accountJob.value = "true";
-              if (accountTemplate) accountTemplate.value = String(template.id);
-            });
+          const accountClientCampaign = document.getElementById("account_client_campaign_id");
+          function applyAccountClient() {
+            const selected = accountCampaigns.find(item => String(item.id) === String(accountClientCampaign?.value || ""));
+            const box = document.getElementById("account_requirements_box");
+            const textBox = document.getElementById("account_requirements_text");
+            const snapshot = document.getElementById("account_requirements_snapshot");
+            const accountJob = document.getElementById("account_job");
+            const campaignSelect = document.getElementById("source_campaign");
+
+            if (!selected) {
+              if (box) box.style.display = "none";
+              if (textBox) textBox.textContent = "";
+              if (snapshot) snapshot.value = "";
+              return;
+            }
+
+            if (accountJob) accountJob.value = "true";
+            if (campaignSelect) campaignSelect.value = selected.name;
+            if (snapshot) snapshot.value = selected.account_requirements || "";
+
+            if (textBox) {
+              textBox.textContent = selected.account_requirements || "No special preferences or requirements have been recorded for this account.";
+            }
+            if (box) box.style.display = "block";
+          }
+          if (accountClientCampaign) {
+            accountClientCampaign.addEventListener("change", applyAccountClient);
+            applyAccountClient();
           }
 
           const accountTemplate = document.getElementById("account_template_id");
@@ -9661,14 +9697,14 @@ app.post("/jobs/create", async (req, res) => {
       INSERT INTO jobs (
         customer_name, customer_phone, customer_alt_phone, customer_email,
         address_line_1, address_line_2, address_line_3, town, county, postcode, latitude, longitude, udprn,
-        job_type, job_description, lock_change_keys, urgency, source_campaign, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
+        job_type, job_description, lock_change_keys, urgency, source_campaign, account_requirements_snapshot, quoted_price, starting_price, call_out_agreed, start_price_locks, offsite_payment, bill_payer_name, bill_payer_phone, expected_payment_method,
         account_job, account_template_id, assigned_technician_id, eta, scheduled_at, dispatcher_name, dispatcher_notes, status,
         created_at, updated_at
       ) VALUES (
         $1,$2,$3,$4,
         $5,$6,$7,$8,$9,$10,$11,$12,$13,
-        $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-        $27,$28,$29,$30,$31,$32,$33,$34,
+        $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+        $28,$29,$30,$31,$32,$33,$34,$35,
         NOW(), NOW()
       ) RETURNING id
     `, [
@@ -9690,6 +9726,7 @@ app.post("/jobs/create", async (req, res) => {
       body.job_type === "LOCK CHANGE" ? (body.lock_change_keys || "Not asked / not applicable") : null,
       body.urgency || "Normal",
       body.source_campaign,
+      body.account_requirements_snapshot || "",
       parseMoneyInput(body.quoted_price),
       parseMoneyInput(body.starting_price),
       parseMoneyInput(body.call_out_agreed),
