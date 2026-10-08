@@ -1,4 +1,4 @@
-// YDP Unified master + partial-payment close warning (v99)
+// YDP Unified master + partial-payment close warning popup fix (v100)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10740,10 +10740,10 @@ app.get("/jobs/:id/close", async (req, res) => {
             const details = checkPartialPaymentWarning();
             if (details.partial) {
               return confirm(
-                'PART PAYMENT\n\n' +
-                '£' + details.paid.toFixed(2) + ' has been received.\n' +
-                '£' + details.outstanding.toFixed(2) + ' is still outstanding.\n\n' +
-                'Closing this job will move it into PAYMENT CHASING for the outstanding balance.\n\n' +
+                'PART PAYMENT\\n\\n' +
+                '£' + details.paid.toFixed(2) + ' has been received.\\n' +
+                '£' + details.outstanding.toFixed(2) + ' is still outstanding.\\n\\n' +
+                'Closing this job will move it into PAYMENT CHASING for the outstanding balance.\\n\\n' +
                 'Continue and close the job?'
               );
             }
