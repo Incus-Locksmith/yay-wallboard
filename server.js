@@ -1,4 +1,4 @@
-// YDP Unified master + dispute refund workflow (v103)
+// YDP Unified master + dispute refund paperwork fix (v104)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -16223,7 +16223,10 @@ app.post("/disputes/:id/refund/paperwork", async (req, res) => {
     const disputeResult = await client.query(`
       SELECT d.*, j.job_number, j.customer_name AS job_customer_name, j.customer_email AS job_customer_email,
              j.address_line_1, j.address_line_2, j.address_line_3, j.town, j.county, j.postcode
-      FROM disputes d LEFT JOIN jobs j ON j.id=d.job_id WHERE d.id=$1 FOR UPDATE
+      FROM disputes d
+      LEFT JOIN jobs j ON j.id=d.job_id
+      WHERE d.id=$1
+      FOR UPDATE OF d
     `, [id]);
     const dispute = disputeResult.rows[0];
     if (!dispute) { await client.query("ROLLBACK"); return res.status(404).send("Dispute not found"); }
@@ -16263,7 +16266,7 @@ app.post("/disputes/:id/refund/paperwork", async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK").catch(()=>{});
     console.error("Refund paperwork error:", error);
-    res.status(500).send("Could not raise refund paperwork.");
+    res.status(500).send(`Could not raise refund paperwork: ${escapeHtml(error.message || "Unknown error")}`);
   } finally { client.release(); }
 });
 
