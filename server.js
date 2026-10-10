@@ -1,4 +1,4 @@
-// YDP Unified master + dispute refund paperwork fix (v104)
+// YDP Unified master + refund approval reporting (v105)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -7798,7 +7798,8 @@ function reportDetailBackLink(type) {
     paid_week: "Revenue this week",
     awaiting: "Awaiting payment",
     disputed: "Disputed jobs",
-    chargebacks: "Chargebacks"
+    chargebacks: "Chargebacks",
+    refund_approval: "Refunds requiring approval"
   };
   return labels[type] || "Report detail";
 }
@@ -7816,6 +7817,7 @@ app.get("/reports/detail", async (req, res) => {
     let total = 0;
     let tableHead = `<tr><th>Date</th><th>Job</th><th>Postcode</th><th>Customer</th><th>Technician</th><th>Status</th><th>Amount</th><th>Notes</th></tr>`;
     let tableBody = "";
+    let extraPanels = "";
 
     if (type === "paid_week") {
       const result = await pool.query(`
@@ -7900,6 +7902,99 @@ app.get("/reports/detail", async (req, res) => {
           <td>${escapeHtml(job.complaint_type || "Marked as disputed")}${job.dispute_status ? `<br>${escapeHtml(disputeStatusLabel(job.dispute_status))}` : ""}</td>
         </tr>
       `).join("");
+    } else if (type === "refund_approval") {
+      const result = await pool.query(`
+        SELECT d.*, j.job_number, j.postcode, j.customer_name, j.final_value,
+               t.name AS technician_name
+        FROM disputes d
+        LEFT JOIN jobs j ON j.id = d.job_id
+        LEFT JOIN technicians t ON t.id = COALESCE(j.assigned_technician_id, d.technician_id)
+        WHERE d.refund_requested_at IS NOT NULL
+          AND d.refund_approved_at IS NULL
+          AND d.refund_completed_at IS NULL
+        ORDER BY d.refund_requested_at ASC
+      `);
+
+      rows = result.rows;
+      total = rows.reduce((sum, row) => sum + Number(row.refund_amount || row.disputed_amount || 0), 0);
+
+      tableBody = rows.map(row => `
+        <tr>
+          <td>${formatDateTime(row.refund_requested_at)}</td>
+          <td>${row.job_id ? `<a href="/jobs/${row.job_id}/edit"><strong>${escapeHtml(row.job_number || jobNumber(row.job_id))}</strong></a><br>` : ""}<a class="muted" href="/disputes/${row.id}">Open dispute / approve refund</a></td>
+          <td><strong>${escapeHtml(row.postcode || "-")}</strong></td>
+          <td>${escapeHtml(row.customer_name || "-")}</td>
+          <td>${escapeHtml(row.technician_name || "Unassigned")}</td>
+          <td><span class="pill amber">Refund requested</span></td>
+          <td><strong>${money(row.refund_amount || row.disputed_amount || 0)}</strong></td>
+          <td>${escapeHtml(row.refund_request_note || row.complaint_summary || row.complaint_type || "Refund awaiting approval")}</td>
+        </tr>
+      `).join("");
+
+      const [techTrend, postcodeTrend] = await Promise.all([
+        pool.query(`
+          SELECT COALESCE(t.name, 'Unassigned') AS technician_name,
+                 COUNT(*)::int AS refund_count,
+                 COALESCE(SUM(COALESCE(d.refund_amount, d.disputed_amount, 0)), 0)::numeric AS refund_value
+          FROM disputes d
+          LEFT JOIN jobs j ON j.id = d.job_id
+          LEFT JOIN technicians t ON t.id = COALESCE(j.assigned_technician_id, d.technician_id)
+          WHERE d.refund_requested_at IS NOT NULL
+            AND d.refund_requested_at >= NOW() - INTERVAL '90 days'
+          GROUP BY COALESCE(t.name, 'Unassigned')
+          ORDER BY refund_count DESC, refund_value DESC, technician_name ASC
+          LIMIT 20
+        `),
+        pool.query(`
+          SELECT COALESCE(NULLIF(TRIM(j.postcode), ''), 'Unknown') AS postcode,
+                 COUNT(*)::int AS refund_count,
+                 COALESCE(SUM(COALESCE(d.refund_amount, d.disputed_amount, 0)), 0)::numeric AS refund_value
+          FROM disputes d
+          LEFT JOIN jobs j ON j.id = d.job_id
+          WHERE d.refund_requested_at IS NOT NULL
+            AND d.refund_requested_at >= NOW() - INTERVAL '90 days'
+          GROUP BY COALESCE(NULLIF(TRIM(j.postcode), ''), 'Unknown')
+          ORDER BY refund_count DESC, refund_value DESC, postcode ASC
+          LIMIT 20
+        `)
+      ]);
+
+      const techRows = techTrend.rows.map(row => `
+        <tr>
+          <td><strong>${escapeHtml(row.technician_name)}</strong></td>
+          <td>${Number(row.refund_count || 0)}</td>
+          <td><strong>${money(row.refund_value || 0)}</strong></td>
+        </tr>
+      `).join("");
+
+      const postcodeRows = postcodeTrend.rows.map(row => `
+        <tr>
+          <td><strong>${escapeHtml(row.postcode)}</strong></td>
+          <td>${Number(row.refund_count || 0)}</td>
+          <td><strong>${money(row.refund_value || 0)}</strong></td>
+        </tr>
+      `).join("");
+
+      extraPanels = `
+        <div class="grid-2">
+          <div class="panel">
+            <h2>Refund pattern by technician</h2>
+            <div class="subtitle">Refund requests raised in the last 90 days. This is a management indicator, not a judgement of technician performance on its own.</div>
+            <table>
+              <thead><tr><th>Technician</th><th>Refund requests</th><th>Refund value</th></tr></thead>
+              <tbody>${techRows || `<tr><td colspan="3" class="muted">No refund requests in the last 90 days.</td></tr>`}</tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <h2>Refund pattern by postcode</h2>
+            <div class="subtitle">Postcodes linked to refund requests in the last 90 days.</div>
+            <table>
+              <thead><tr><th>Postcode</th><th>Refund requests</th><th>Refund value</th></tr></thead>
+              <tbody>${postcodeRows || `<tr><td colspan="3" class="muted">No refund requests in the last 90 days.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
     } else if (type === "chargebacks") {
       const result = await pool.query(`
         SELECT d.*, j.job_number, j.postcode, j.customer_name, j.final_value, j.status AS job_status, t.name AS technician_name
@@ -7945,6 +8040,7 @@ app.get("/reports/detail", async (req, res) => {
             <tbody>${tableBody || `<tr><td colspan="8" class="muted">No records found.</td></tr>`}</tbody>
           </table>
         </div>
+        ${extraPanels}
       </body>
       </html>
     `);
@@ -7961,7 +8057,7 @@ app.get("/reports", async (req, res) => {
     const weekStart = startOfWeekMonday(today);
     const tomorrow = addDays(today, 1);
 
-    const [paidWeek, awaiting, disputed, chargebacks] = await Promise.all([
+    const [paidWeek, awaiting, disputed, chargebacks, refundsAwaitingApproval] = await Promise.all([
       pool.query(`
         SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(final_value, 0)), 0)::numeric AS value
         FROM jobs
@@ -7989,6 +8085,14 @@ app.get("/reports", async (req, res) => {
         LEFT JOIN jobs j ON j.id = d.job_id
         WHERE d.chargeback = TRUE
           AND d.status NOT IN ('resolved', 'rejected')
+      `),
+      pool.query(`
+        SELECT COUNT(*)::int AS count,
+               COALESCE(SUM(COALESCE(refund_amount, disputed_amount, 0)), 0)::numeric AS value
+        FROM disputes
+        WHERE refund_requested_at IS NOT NULL
+          AND refund_approved_at IS NULL
+          AND refund_completed_at IS NULL
       `)
     ]);
 
@@ -7996,6 +8100,7 @@ app.get("/reports", async (req, res) => {
     const awaitingRow = awaiting.rows[0] || {};
     const disputedRow = disputed.rows[0] || {};
     const chargebackRow = chargebacks.rows[0] || {};
+    const refundApprovalRow = refundsAwaitingApproval.rows[0] || {};
 
     res.send(`
       <!DOCTYPE html>
@@ -8018,6 +8123,7 @@ app.get("/reports", async (req, res) => {
           ${managementReportCard("Awaiting payment", money(awaitingRow.value || 0), `${Number(awaitingRow.count || 0)} job${Number(awaitingRow.count || 0) === 1 ? "" : "s"} needs money chasing`, "/reports/detail?type=awaiting", "")}
           ${managementReportCard("Disputed", money(disputedRow.value || 0), `${Number(disputedRow.count || 0)} disputed record${Number(disputedRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=disputed", "")}
           ${managementReportCard("Chargebacks", money(chargebackRow.value || 0), `${Number(chargebackRow.count || 0)} chargeback record${Number(chargebackRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=chargebacks", "")}
+          ${managementReportCard("Refunds requiring approval", money(refundApprovalRow.value || 0), `${Number(refundApprovalRow.count || 0)} refund request${Number(refundApprovalRow.count || 0) === 1 ? "" : "s"} waiting for approval`, "/reports/detail?type=refund_approval", "amber")}
         </div>
 
         <div class="panel">
@@ -8029,6 +8135,7 @@ app.get("/reports", async (req, res) => {
               <tr><td><strong>Awaiting payment</strong></td><td>Jobs marked awaiting payment, awaiting balance, sent to PM, or closed but not paid.</td><td>Click to chase payment and view follow-up notes.</td></tr>
               <tr><td><strong>Disputed</strong></td><td>Jobs marked disputed or linked to an open dispute case.</td><td>Click to review dispute value, job and technician.</td></tr>
               <tr><td><strong>Chargebacks</strong></td><td>Open dispute records where chargeback has been raised.</td><td>Click to view chargeback cases.</td></tr>
+              <tr><td><strong>Refunds requiring approval</strong></td><td>Refunds requested from a dispute that have not yet been approved.</td><td>Click to approve the refund and review 90-day refund patterns by technician and postcode.</td></tr>
             </tbody>
           </table>
         </div>
