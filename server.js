@@ -1,4 +1,4 @@
-// YDP Unified master + refund approval reporting (v105)
+// YDP Unified master + tech assignment/admin access fix (v106)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -180,6 +180,10 @@ function authSecret() {
   return process.env.DASHBOARD_PASSWORD || "change-me-now";
 }
 
+function adminSecret() {
+  return process.env.ADMIN_PASSWORD || authSecret();
+}
+
 function parseCookies(req) {
   const header = req.headers.cookie || "";
   const cookies = {};
@@ -195,8 +199,8 @@ function signValue(value) {
   return crypto.createHmac("sha256", authSecret()).update(value).digest("hex");
 }
 
-function makeSessionCookie(agentName) {
-  const payload = Buffer.from(JSON.stringify({ agentName, createdAt: Date.now() })).toString("base64url");
+function makeSessionCookie(agentName, role = "dispatcher") {
+  const payload = Buffer.from(JSON.stringify({ agentName, role, createdAt: Date.now() })).toString("base64url");
   return `${payload}.${signValue(payload)}`;
 }
 
@@ -226,8 +230,8 @@ function readSession(req) {
   }
 }
 
-function setSessionCookie(res, agentName) {
-  const cookieValue = makeSessionCookie(agentName);
+function setSessionCookie(res, agentName, role = "dispatcher") {
+  const cookieValue = makeSessionCookie(agentName, role);
   res.setHeader(
     "Set-Cookie",
     `dashboard_session=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=${60 * 60 * 24 * 7}`
@@ -319,6 +323,7 @@ function requireLogin(req, res, next) {
   if (!session) return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
 
   req.currentAgent = session.agentName;
+  req.currentRole = session.role || "dispatcher";
   next();
 }
 
@@ -327,6 +332,33 @@ app.use(requireLogin);
 function currentAgentName(req) {
   return req.currentAgent || "";
 }
+
+function currentUserRole(req) {
+  return req.currentRole || "dispatcher";
+}
+
+function requirePortalPermissions(req, res, next) {
+  const path = req.path || "";
+  const role = currentUserRole(req);
+
+  if (path.startsWith("/admin") && role !== "admin") {
+    return res.status(403).send(`
+      <!DOCTYPE html><html><head><title>Admin access required</title><style>${sharedStyles()}</style></head>
+      <body>${nav(req)}<h1>Admin access required</h1><div class="panel"><p>This area is only available to Admin users.</p><a class="button" href="/call-wallboard">Back to portal</a></div></body></html>
+    `);
+  }
+
+  if (path.startsWith("/reports") && !["manager", "admin"].includes(role)) {
+    return res.status(403).send(`
+      <!DOCTYPE html><html><head><title>Reporting access required</title><style>${sharedStyles()}</style></head>
+      <body>${nav(req)}<h1>Reporting access required</h1><div class="panel"><p>Reports are available to Manager and Admin users.</p><a class="button" href="/call-wallboard">Back to portal</a></div></body></html>
+    `);
+  }
+
+  next();
+}
+
+app.use(requirePortalPermissions);
 
 async function getActivePortalUsers() {
   const result = await pool.query(`
@@ -2610,6 +2642,9 @@ function sharedStyles() {
 
 function nav(req) {
   const name = currentAgentName(req);
+  const role = currentUserRole(req);
+  const canViewReports = ["manager", "admin"].includes(role);
+  const isAdmin = role === "admin";
   const path = req.path || "/";
   const active = (href) => {
     if (href === "/") return path === "/" ? " active" : "";
@@ -2648,19 +2683,21 @@ function nav(req) {
             <a href="/invoice-templates">Account templates</a>
           </div>
         </div>
-        <a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>
+        ${canViewReports ? `<a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>` : ""}
         <a class="side-link${active("/payment-chasing")}" href="/payment-chasing"><span class="side-dot dot-amber"></span><span>Payment chasing</span></a>
         <a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>
 
-        <div class="sidebar-label section-label">Admin</div>
-        <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
-        <a class="side-link${active("/admin/yay-caller-ids")}" href="/admin/yay-caller-ids"><span class="side-dot dot-blue"></span><span>Yay SMS setup</span></a>
+        ${isAdmin ? `
+          <div class="sidebar-label section-label">Admin</div>
+          <a class="side-link${active("/admin")}" href="/admin/users"><span class="side-dot dot-red"></span><span>Admin Manager</span></a>
+          <a class="side-link${active("/admin/yay-caller-ids")}" href="/admin/yay-caller-ids"><span class="side-dot dot-blue"></span><span>Yay SMS setup</span></a>
+        ` : ""}
       </nav>
 
       <div class="sidebar-user">
         <div class="sidebar-user-label">Logged in as</div>
         <div class="sidebar-user-row">
-          <div class="sidebar-user-name">${escapeHtml(name)}</div>
+          <div class="sidebar-user-name">${escapeHtml(name)} <span style="opacity:.7;font-size:11px;">(${escapeHtml(role)})</span></div>
           <a href="/logout">Logout</a>
         </div>
       </div>
@@ -3657,19 +3694,23 @@ app.post("/login", async (req, res) => {
   const next = req.body.next || "/call-wallboard";
 
   let validUser = false;
+  let userRole = "dispatcher";
   try {
-    const result = await pool.query(`SELECT id FROM app_users WHERE name = $1 AND active = TRUE`, [agentName]);
+    const result = await pool.query(`SELECT id, role FROM app_users WHERE name = $1 AND active = TRUE`, [agentName]);
     validUser = result.rows.length > 0;
+    if (validUser) userRole = result.rows[0].role || "dispatcher";
   } catch (err) {
     console.error("Login validation error:", err);
     validUser = agentNames.includes(agentName);
+    userRole = agentName === "Rachel" ? "admin" : "dispatcher";
   }
 
-  if (!validUser || password !== authSecret()) {
+  const expectedPassword = userRole === "admin" ? adminSecret() : authSecret();
+  if (!validUser || password !== expectedPassword) {
     return res.redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
   }
 
-  setSessionCookie(res, agentName);
+  setSessionCookie(res, agentName, userRole);
   const safeNext = String(next || "");
   if (safeNext && safeNext !== "/" && safeNext !== "/call-wallboard" && safeNext !== "/start-shift") {
     return res.redirect(safeNext);
@@ -5177,7 +5218,8 @@ app.get("/admin/users", async (req, res) => {
               </div>
             </div>
             <div class="help">The extension number connects this user to Yay call data. If Yay sends answered_by as this extension, their answered-call stats will appear on the Call wallboard.</div>
-            <div class="help">For now, users still use the shared dashboard password. Proper individual passwords and reset links should be the next security upgrade.</div>
+            <div class="help">Admin users use the separate Render environment variable <strong>ADMIN_PASSWORD</strong>. Manager and Dispatcher users continue to use the normal dashboard password.</div>
+            <div class="help">Managers can see Reports. Only Admin users can see and open Admin Manager and Yay SMS setup.</div>
           </form>
         </div>
 
@@ -10692,10 +10734,10 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
     const newStatus = technicianId !== null && oldJob && oldJob.status === "open" ? "assigned" : oldJob ? oldJob.status : "open";
     await pool.query(`
       UPDATE jobs
-      SET assigned_technician_id = $1,
-          status = CASE WHEN $1 IS NOT NULL AND status = 'open' THEN 'assigned' ELSE status END,
+      SET assigned_technician_id = $1::integer,
+          status = CASE WHEN $1::integer IS NOT NULL AND status = 'open' THEN 'assigned' ELSE status END,
           updated_at = NOW()
-      WHERE id = $2
+      WHERE id = $2::integer
     `, [technicianId, id]);
     await logJobChanges(id, oldJob, { assigned_technician_id: technicianId, status: newStatus }, currentAgentName(req), "technician_changed");
     res.redirect(`/jobs/${id}/edit`);
