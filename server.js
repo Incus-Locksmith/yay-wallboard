@@ -1,4 +1,4 @@
-// YDP Unified master + dynamic invoice PDF footer (v102)
+// YDP Unified master + dispute refund workflow (v103)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -788,8 +788,10 @@ const disputeStatuses = [
   { value: "open_dispute", label: "Open dispute" },
   { value: "awaiting_customer_email", label: "Awaiting customer email" },
   { value: "under_review", label: "Under review" },
-  { value: "refund_agreed", label: "Refund agreed" },
-  { value: "refund_processed", label: "Refund processed" },
+  { value: "refund_requested", label: "Refund requested" },
+  { value: "refund_agreed", label: "Refund approved" },
+  { value: "refund_paperwork_raised", label: "Refund paperwork raised" },
+  { value: "refund_processed", label: "Refund completed" },
   { value: "chargeback_raised", label: "Chargeback raised" },
   { value: "resolved", label: "Resolved" },
   { value: "rejected", label: "Rejected" }
@@ -3494,6 +3496,29 @@ async function initDb() {
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS created_by TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_requested_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_requested_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_request_note TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approved_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approved_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approval_note TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_document_id INTEGER;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_paperwork_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_paperwork_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_completed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_completed_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_completion_reference TEXT;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dispute_refund_audit_log (
+      id SERIAL PRIMARY KEY,
+      dispute_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      details TEXT,
+      changed_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS dispute_refund_audit_idx ON dispute_refund_audit_log (dispute_id, created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_status_idx ON disputes (status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_job_id_idx ON disputes (job_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS disputes_created_at_idx ON disputes (created_at);`);
@@ -16002,6 +16027,11 @@ app.get("/disputes/:id", async (req, res) => {
     const dispute = result.rows[0];
     if (!dispute) return res.status(404).send("Dispute not found");
 
+    const refundDocument = dispute.refund_document_id
+      ? (await pool.query(`SELECT * FROM refund_documents WHERE id = $1`, [dispute.refund_document_id])).rows[0] || null
+      : null;
+    const refundAudit = (await pool.query(`SELECT * FROM dispute_refund_audit_log WHERE dispute_id = $1 ORDER BY created_at DESC, id DESC LIMIT 50`, [id])).rows;
+
     const technicianResult = await pool.query(`SELECT id, name FROM technicians WHERE active = TRUE ORDER BY name ASC`);
     const technicianOptions = technicianResult.rows.map(tech => {
       const selected = Number(dispute.technician_id) === Number(tech.id) ? "selected" : "";
@@ -16042,6 +16072,79 @@ app.get("/disputes/:id", async (req, res) => {
           technician_name: dispute.technician_name
         }) : ""}
 
+        <div class="panel">
+          <div class="topbar" style="margin-bottom:10px;">
+            <div>
+              <h2 style="margin:0;">Refund process</h2>
+              <div class="subtitle">Request → approve → raise paperwork → confirm refund completed.</div>
+            </div>
+          </div>
+
+          <div class="cards" style="margin-bottom:16px;">
+            <div class="card"><h2>${dispute.refund_requested_at ? "✓" : "1"}</h2><p>Refund requested${dispute.refund_requested_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_requested_at))} · ${escapeHtml(dispute.refund_requested_by || "")}</span>` : ""}</p></div>
+            <div class="card"><h2>${dispute.refund_approved_at ? "✓" : "2"}</h2><p>Refund approved${dispute.refund_approved_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_approved_at))} · ${escapeHtml(dispute.refund_approved_by || "")}</span>` : ""}</p></div>
+            <div class="card"><h2>${dispute.refund_paperwork_at ? "✓" : "3"}</h2><p>Paperwork raised${dispute.refund_paperwork_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_paperwork_at))} · ${escapeHtml(dispute.refund_paperwork_by || "")}</span>` : ""}</p></div>
+            <div class="card"><h2>${dispute.refund_completed_at ? "✓" : "4"}</h2><p>Refund completed${dispute.refund_completed_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_completed_at))} · ${escapeHtml(dispute.refund_completed_by || "")}</span>` : ""}</p></div>
+          </div>
+
+          ${!dispute.refund_requested_at ? `
+            <form method="POST" action="/disputes/${dispute.id}/refund/request" onsubmit="return confirm('Request this refund for approval?');">
+              <div class="grid-2">
+                <div><label>Refund amount requested</label><input name="refund_amount" value="${escapeHtml(dispute.refund_amount || dispute.disputed_amount || "")}" placeholder="£0.00" required></div>
+                <div><label>Request note</label><input name="note" placeholder="Why is the refund being requested?"></div>
+              </div>
+              <button class="button" type="submit">Request refund</button>
+            </form>
+          ` : ""}
+
+          ${dispute.refund_requested_at && !dispute.refund_approved_at ? `
+            <div style="margin-bottom:12px;"><strong>Requested amount:</strong> ${money(dispute.refund_amount)}${dispute.refund_request_note ? ` · ${escapeHtml(dispute.refund_request_note)}` : ""}</div>
+            <form method="POST" action="/disputes/${dispute.id}/refund/approve" onsubmit="return confirm('Approve this refund?');">
+              <div class="grid-2">
+                <div><label>Approved refund amount</label><input name="refund_amount" value="${escapeHtml(dispute.refund_amount || "")}" placeholder="£0.00" required></div>
+                <div><label>Approval note</label><input name="note" placeholder="Approval reference / manager note"></div>
+              </div>
+              <button class="button green" type="submit">Approve refund</button>
+            </form>
+          ` : ""}
+
+          ${dispute.refund_approved_at && !dispute.refund_paperwork_at ? `
+            <div style="margin-bottom:12px;"><strong>Approved refund:</strong> ${money(dispute.refund_amount)}${dispute.refund_approval_note ? ` · ${escapeHtml(dispute.refund_approval_note)}` : ""}</div>
+            <form method="POST" action="/disputes/${dispute.id}/refund/paperwork">
+              <div class="grid-2">
+                <div><label>Paperwork type</label><select name="document_type"><option value="client_refund_invoice">Client Refund Invoice / Bank Supporting Document</option><option value="credit_note">24H Credit Note</option></select></div>
+                <div><label>Paperwork note</label><input name="note" placeholder="Optional internal note"></div>
+              </div>
+              <button class="button" type="submit">Raise refund paperwork</button>
+            </form>
+          ` : ""}
+
+          ${dispute.refund_paperwork_at && !dispute.refund_completed_at ? `
+            <div style="margin-bottom:12px;">
+              <strong>Paperwork:</strong>
+              ${refundDocument ? `<a href="/refund-documents/${refundDocument.id}/edit">${escapeHtml(refundDocument.document_number)}</a> · <a href="/refund-documents/${refundDocument.id}/pdf" target="_blank">Open PDF</a>` : "Paperwork record linked"}
+            </div>
+            <form method="POST" action="/disputes/${dispute.id}/refund/complete" onsubmit="return confirm('Confirm that the refund has actually been completed? This will close the refund workflow.');">
+              <div class="grid-2">
+                <div><label>Refund completion reference</label><input name="reference" placeholder="Bank reference / transaction reference"></div>
+                <div><label>Completion note</label><input name="note" placeholder="Optional note"></div>
+              </div>
+              <button class="button green" type="submit">Confirm refund completed</button>
+            </form>
+          ` : ""}
+
+          ${dispute.refund_completed_at ? `
+            <div style="padding:12px 14px;border:2px solid #22c55e;border-radius:8px;background:#f0fdf4;">
+              <strong>✓ Refund completed</strong><br>
+              ${money(dispute.refund_amount)} completed ${escapeHtml(formatDateTime(dispute.refund_completed_at))} by ${escapeHtml(dispute.refund_completed_by || "Unknown")}.
+              ${dispute.refund_completion_reference ? `<br>Reference: ${escapeHtml(dispute.refund_completion_reference)}` : ""}
+              ${refundDocument ? `<br>Paperwork: <a href="/refund-documents/${refundDocument.id}/edit">${escapeHtml(refundDocument.document_number)}</a> · <a href="/refund-documents/${refundDocument.id}/pdf" target="_blank">PDF</a>` : ""}
+            </div>
+          ` : ""}
+        </div>
+
+        ${refundAudit.length ? `<div class="panel"><h2>Refund audit trail</h2>${refundAudit.map(a => `<div style="padding:9px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.action_type)}</strong> · ${escapeHtml(formatDateTime(a.created_at))} · ${escapeHtml(a.changed_by || "Unknown")}<br><span class="muted">${escapeHtml(a.details || "")}</span></div>`).join("")}</div>` : ""}
+
         <form method="POST" action="/disputes/save" class="panel">
           <input type="hidden" name="id" value="${dispute.id}">
           <input type="hidden" name="job_id" value="${dispute.job_id || ""}">
@@ -16054,7 +16157,7 @@ app.get("/disputes/:id", async (req, res) => {
           <div class="grid-3">
             <div><label>Technician</label><select name="technician_id"><option value="">Not linked</option>${technicianOptions}</select></div>
             <div><label>Complaint type</label><select name="complaint_type">${complaintTypeOptions(dispute.complaint_type || "")}</select></div>
-            <div><label>Status</label><select name="status">${disputeStatusOptions(dispute.status)}</select></div>
+            <div><label>Status</label><select name="status">${optionList(disputeStatuses.filter(item => !["refund_requested","refund_agreed","refund_paperwork_raised","refund_processed"].includes(item.value)), dispute.status)}</select><div class="muted" style="margin-top:5px;">Refund stages are controlled by the Refund process above.</div></div>
           </div>
 
           <div class="grid-3">
@@ -16078,12 +16181,128 @@ app.get("/disputes/:id", async (req, res) => {
   }
 });
 
+
+app.post("/disputes/:id/refund/request", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const amount = parseMoneyInput(req.body.refund_amount);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).send("Enter a valid refund amount.");
+    const dispute = (await pool.query(`SELECT * FROM disputes WHERE id=$1`, [id])).rows[0];
+    if (!dispute) return res.status(404).send("Dispute not found");
+    if (dispute.refund_requested_at) return res.status(400).send("A refund has already been requested for this dispute.");
+    const by = currentAgentName(req) || "Unknown";
+    const note = String(req.body.note || "").trim();
+    await pool.query(`UPDATE disputes SET refund_amount=$1, refund_requested_at=NOW(), refund_requested_by=$2, refund_request_note=$3, status='refund_requested', updated_by=$2, updated_at=NOW() WHERE id=$4`, [amount, by, note, id]);
+    await pool.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund requested',$2,$3,NOW())`, [id, `${money(amount)} requested${note ? ` · ${note}` : ""}`, by]);
+    res.redirect(`/disputes/${id}`);
+  } catch (error) { console.error("Refund request error:", error); res.status(500).send("Could not request refund."); }
+});
+
+app.post("/disputes/:id/refund/approve", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const amount = parseMoneyInput(req.body.refund_amount);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).send("Enter a valid approved refund amount.");
+    const dispute = (await pool.query(`SELECT * FROM disputes WHERE id=$1`, [id])).rows[0];
+    if (!dispute) return res.status(404).send("Dispute not found");
+    if (!dispute.refund_requested_at) return res.status(400).send("The refund must be requested before it can be approved.");
+    if (dispute.refund_approved_at) return res.status(400).send("This refund has already been approved.");
+    const by = currentAgentName(req) || "Unknown";
+    const note = String(req.body.note || "").trim();
+    await pool.query(`UPDATE disputes SET refund_amount=$1, refund_approved_at=NOW(), refund_approved_by=$2, refund_approval_note=$3, status='refund_agreed', updated_by=$2, updated_at=NOW() WHERE id=$4`, [amount, by, note, id]);
+    await pool.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund approved',$2,$3,NOW())`, [id, `${money(amount)} approved${note ? ` · ${note}` : ""}`, by]);
+    res.redirect(`/disputes/${id}`);
+  } catch (error) { console.error("Refund approval error:", error); res.status(500).send("Could not approve refund."); }
+});
+
+app.post("/disputes/:id/refund/paperwork", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    await client.query("BEGIN");
+    const disputeResult = await client.query(`
+      SELECT d.*, j.job_number, j.customer_name AS job_customer_name, j.customer_email AS job_customer_email,
+             j.address_line_1, j.address_line_2, j.address_line_3, j.town, j.county, j.postcode
+      FROM disputes d LEFT JOIN jobs j ON j.id=d.job_id WHERE d.id=$1 FOR UPDATE
+    `, [id]);
+    const dispute = disputeResult.rows[0];
+    if (!dispute) { await client.query("ROLLBACK"); return res.status(404).send("Dispute not found"); }
+    if (!dispute.refund_approved_at) { await client.query("ROLLBACK"); return res.status(400).send("The refund must be approved before paperwork can be raised."); }
+    if (dispute.refund_document_id) { await client.query("ROLLBACK"); return res.redirect(`/refund-documents/${dispute.refund_document_id}/edit`); }
+
+    const type = req.body.document_type === "credit_note" ? "credit_note" : "client_refund_invoice";
+    const prefix = type === "credit_note" ? "CN" : "CRI";
+    const today = new Date().toISOString().slice(0,10);
+    let number = `${prefix}-${today.replaceAll("-", "")}-D${id}`;
+    const duplicate = await client.query(`SELECT 1 FROM refund_documents WHERE LOWER(document_number)=LOWER($1) LIMIT 1`, [number]);
+    if (duplicate.rows.length) number = `${number}-${String(Date.now()).slice(-4)}`;
+
+    let originalInvoiceReference = "";
+    if (dispute.job_id) {
+      const inv = await client.query(`SELECT invoice_number FROM invoices WHERE linked_job_id=$1 ORDER BY created_at DESC LIMIT 1`, [dispute.job_id]);
+      originalInvoiceReference = inv.rows[0]?.invoice_number || "";
+    }
+    const clientName = dispute.job_customer_name || dispute.customer_name || "Customer";
+    const address = [dispute.address_line_1, dispute.address_line_2, dispute.address_line_3, dispute.town, dispute.county].filter(Boolean).join("\n");
+    const reason = String(dispute.complaint_summary || "Refund approved following dispute").trim().slice(0,1000);
+    const by = currentAgentName(req) || "Unknown";
+    const note = String(req.body.note || "").trim();
+    const inserted = await client.query(`
+      INSERT INTO refund_documents (
+        document_type, document_number, document_date, client_name, client_address, client_postcode, client_email,
+        original_job_reference, original_invoice_reference, reason, net_amount, vat_amount, total_amount,
+        vat_treatment, notes, status, created_by, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,$11,'',$12,'Approved',$13,NOW(),NOW()) RETURNING id
+    `, [type, number, today, clientName, address, dispute.postcode || "", dispute.job_customer_email || "", dispute.job_number || (dispute.job_id ? jobNumber(dispute.job_id) : ""), originalInvoiceReference, reason, Number(dispute.refund_amount || 0), note, by]);
+    const documentId = inserted.rows[0].id;
+    await client.query(`UPDATE disputes SET refund_document_id=$1, refund_paperwork_at=NOW(), refund_paperwork_by=$2, status='refund_paperwork_raised', updated_by=$2, updated_at=NOW() WHERE id=$3`, [documentId, by, id]);
+    await client.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'created from dispute',$2,$3,NOW())`, [documentId, `Created from dispute #${id}; approved refund ${money(dispute.refund_amount || 0)}`, by]);
+    await client.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund paperwork raised',$2,$3,NOW())`, [id, `${refundDocumentTypeLabel(type)} ${number} created${note ? ` · ${note}` : ""}`, by]);
+    await client.query("COMMIT");
+    res.redirect(`/refund-documents/${documentId}/edit?from_dispute=${id}`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Refund paperwork error:", error);
+    res.status(500).send("Could not raise refund paperwork.");
+  } finally { client.release(); }
+});
+
+app.post("/disputes/:id/refund/complete", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    await client.query("BEGIN");
+    const dispute = (await client.query(`SELECT * FROM disputes WHERE id=$1 FOR UPDATE`, [id])).rows[0];
+    if (!dispute) { await client.query("ROLLBACK"); return res.status(404).send("Dispute not found"); }
+    if (!dispute.refund_paperwork_at || !dispute.refund_document_id) { await client.query("ROLLBACK"); return res.status(400).send("Refund paperwork must be raised before completion can be confirmed."); }
+    if (dispute.refund_completed_at) { await client.query("ROLLBACK"); return res.status(400).send("This refund is already marked completed."); }
+    const by = currentAgentName(req) || "Unknown";
+    const reference = String(req.body.reference || "").trim();
+    const note = String(req.body.note || "").trim();
+    await client.query(`UPDATE disputes SET refund_completed_at=NOW(), refund_completed_by=$1, refund_completion_reference=$2, status='refund_processed', resolved_at=COALESCE(resolved_at,NOW()), updated_by=$1, updated_at=NOW() WHERE id=$3`, [by, reference, id]);
+    await client.query(`UPDATE refund_documents SET status='Refund processed', bank_reference=CASE WHEN $1<>'' THEN $1 ELSE bank_reference END, notes=CASE WHEN $2<>'' THEN CONCAT(COALESCE(notes,''), CASE WHEN COALESCE(notes,'')<>'' THEN E'\\n' ELSE '' END, $2) ELSE notes END, updated_at=NOW() WHERE id=$3`, [reference, note, dispute.refund_document_id]);
+    await client.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'refund processed',$2,$3,NOW())`, [dispute.refund_document_id, `${money(dispute.refund_amount || 0)} refund completed${reference ? ` · Reference ${reference}` : ""}${note ? ` · ${note}` : ""}`, by]);
+    await client.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund completed',$2,$3,NOW())`, [id, `${money(dispute.refund_amount || 0)} completed${reference ? ` · Reference ${reference}` : ""}${note ? ` · ${note}` : ""}`, by]);
+    await client.query("COMMIT");
+    res.redirect(`/disputes/${id}`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Refund completion error:", error);
+    res.status(500).send("Could not complete refund.");
+  } finally { client.release(); }
+});
+
 app.post("/disputes/save", async (req, res) => {
   try {
     const id = parseOptionalInt(req.body.id);
     const jobId = parseOptionalInt(req.body.job_id);
     const technicianId = parseOptionalInt(req.body.technician_id);
-    const status = req.body.status || "open_dispute";
+    let status = req.body.status || "open_dispute";
+    const controlledRefundStatuses = ["refund_requested", "refund_agreed", "refund_paperwork_raised", "refund_processed"];
+    if (id && controlledRefundStatuses.includes(status)) {
+      const current = (await pool.query(`SELECT status FROM disputes WHERE id=$1`, [id])).rows[0];
+      if (current && !controlledRefundStatuses.includes(current.status)) status = current.status || "open_dispute";
+    }
     const resolvedStatuses = ["resolved", "rejected", "refund_processed"];
     const resolvedAtExpression = resolvedStatuses.includes(status) ? "NOW()" : "NULL";
 
