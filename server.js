@@ -1,4 +1,4 @@
-// YDP Unified master + dispute resolution outcomes (v108)
+// YDP Unified master + refund rejection option (v109)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3558,6 +3558,9 @@ async function initDb() {
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approved_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approved_by TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_approval_note TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_rejected_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_rejected_by TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_rejection_note TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_document_id INTEGER;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_paperwork_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS refund_paperwork_by TEXT;`);
@@ -7972,6 +7975,7 @@ app.get("/reports/detail", async (req, res) => {
         LEFT JOIN technicians t ON t.id = COALESCE(j.assigned_technician_id, d.technician_id)
         WHERE d.refund_requested_at IS NOT NULL
           AND d.refund_approved_at IS NULL
+          AND d.refund_rejected_at IS NULL
           AND d.refund_completed_at IS NULL
         ORDER BY d.refund_requested_at ASC
       `);
@@ -8153,6 +8157,7 @@ app.get("/reports", async (req, res) => {
         FROM disputes
         WHERE refund_requested_at IS NOT NULL
           AND refund_approved_at IS NULL
+          AND refund_rejected_at IS NULL
           AND refund_completed_at IS NULL
       `)
     ]);
@@ -16263,7 +16268,12 @@ app.get("/disputes/:id", async (req, res) => {
 
           <div class="cards" style="margin-bottom:16px;">
             <div class="card"><h2>${dispute.refund_requested_at ? "✓" : "1"}</h2><p>Refund requested${dispute.refund_requested_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_requested_at))} · ${escapeHtml(dispute.refund_requested_by || "")}</span>` : ""}</p></div>
-            <div class="card"><h2>${dispute.refund_approved_at ? "✓" : "2"}</h2><p>Refund approved${dispute.refund_approved_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_approved_at))} · ${escapeHtml(dispute.refund_approved_by || "")}</span>` : ""}</p></div>
+            <div class="card">
+              <h2>${dispute.refund_rejected_at ? "✕" : (dispute.refund_approved_at ? "✓" : "2")}</h2>
+              <p>${dispute.refund_rejected_at ? "Refund not approved" : "Refund approved"}
+                ${dispute.refund_rejected_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_rejected_at))} · ${escapeHtml(dispute.refund_rejected_by || "")}</span>` : (dispute.refund_approved_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_approved_at))} · ${escapeHtml(dispute.refund_approved_by || "")}</span>` : "")}
+              </p>
+            </div>
             <div class="card"><h2>${dispute.refund_paperwork_at ? "✓" : "3"}</h2><p>Paperwork raised${dispute.refund_paperwork_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_paperwork_at))} · ${escapeHtml(dispute.refund_paperwork_by || "")}</span>` : ""}</p></div>
             <div class="card"><h2>${dispute.refund_completed_at ? "✓" : "4"}</h2><p>Refund completed${dispute.refund_completed_at ? `<br><span class="muted">${escapeHtml(formatDateTime(dispute.refund_completed_at))} · ${escapeHtml(dispute.refund_completed_by || "")}</span>` : ""}</p></div>
           </div>
@@ -16278,18 +16288,33 @@ app.get("/disputes/:id", async (req, res) => {
             </form>
           ` : ""}
 
-          ${dispute.refund_requested_at && !dispute.refund_approved_at ? `
+          ${dispute.refund_requested_at && !dispute.refund_approved_at && !dispute.refund_rejected_at ? `
             <div style="margin-bottom:12px;"><strong>Requested amount:</strong> ${money(dispute.refund_amount)}${dispute.refund_request_note ? ` · ${escapeHtml(dispute.refund_request_note)}` : ""}</div>
-            <form method="POST" action="/disputes/${dispute.id}/refund/approve" onsubmit="return confirm('Approve this refund?');">
+            <form method="POST" action="/disputes/${dispute.id}/refund/approve" onsubmit="return confirm('Approve this refund?');" style="margin-bottom:14px;">
               <div class="grid-2">
                 <div><label>Approved refund amount</label><input name="refund_amount" value="${escapeHtml(dispute.refund_amount || "")}" placeholder="£0.00" required></div>
                 <div><label>Approval note</label><input name="note" placeholder="Approval reference / manager note"></div>
               </div>
               <button class="button green" type="submit">Approve refund</button>
             </form>
+
+            <form method="POST" action="/disputes/${dispute.id}/refund/reject" onsubmit="return confirm('Mark this refund request as NOT approved?');">
+              <div class="grid-2">
+                <div><label>Reason refund not approved</label><input name="note" placeholder="Why has this refund request been declined?" required></div>
+                <div style="display:flex;align-items:end;"><button class="button secondary" type="submit">Refund not approved</button></div>
+              </div>
+            </form>
           ` : ""}
 
-          ${dispute.refund_approved_at && !dispute.refund_paperwork_at ? `
+          ${dispute.refund_rejected_at ? `
+            <div style="padding:12px 14px;border:2px solid #ef4444;border-radius:8px;background:#fef2f2;margin-bottom:14px;">
+              <strong>✕ Refund not approved</strong><br>
+              Decision ${escapeHtml(formatDateTime(dispute.refund_rejected_at))} by ${escapeHtml(dispute.refund_rejected_by || "Unknown")}.
+              ${dispute.refund_rejection_note ? `<br><strong>Reason:</strong> ${escapeHtml(dispute.refund_rejection_note)}` : ""}
+            </div>
+          ` : ""}
+
+          ${dispute.refund_approved_at && !dispute.refund_rejected_at && !dispute.refund_paperwork_at ? `
             <div style="margin-bottom:12px;"><strong>Approved refund:</strong> ${money(dispute.refund_amount)}${dispute.refund_approval_note ? ` · ${escapeHtml(dispute.refund_approval_note)}` : ""}</div>
             <form method="POST" action="/disputes/${dispute.id}/refund/paperwork">
               <div class="grid-2">
@@ -16421,6 +16446,42 @@ app.post("/disputes/:id/refund/request", async (req, res) => {
     await pool.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund requested',$2,$3,NOW())`, [id, `${money(amount)} requested${note ? ` · ${note}` : ""}`, by]);
     res.redirect(`/disputes/${id}`);
   } catch (error) { console.error("Refund request error:", error); res.status(500).send("Could not request refund."); }
+});
+
+app.post("/disputes/:id/refund/reject", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const dispute = (await pool.query(`SELECT * FROM disputes WHERE id=$1`, [id])).rows[0];
+    if (!dispute) return res.status(404).send("Dispute not found");
+    if (!dispute.refund_requested_at) return res.status(400).send("The refund must be requested before it can be declined.");
+    if (dispute.refund_approved_at) return res.status(400).send("This refund has already been approved.");
+    if (dispute.refund_rejected_at) return res.status(400).send("This refund request has already been marked not approved.");
+
+    const by = currentAgentName(req) || "Unknown";
+    const note = String(req.body.note || "").trim();
+    if (!note) return res.status(400).send("Enter a reason why the refund was not approved.");
+
+    await pool.query(`
+      UPDATE disputes
+      SET refund_rejected_at=NOW(),
+          refund_rejected_by=$1,
+          refund_rejection_note=$2,
+          status='under_review',
+          updated_by=$1,
+          updated_at=NOW()
+      WHERE id=$3
+    `, [by, note, id]);
+
+    await pool.query(`
+      INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at)
+      VALUES ($1,'Refund not approved',$2,$3,NOW())
+    `, [id, note, by]);
+
+    res.redirect(`/disputes/${id}`);
+  } catch (error) {
+    console.error("Refund rejection error:", error);
+    res.status(500).send("Could not mark refund as not approved.");
+  }
 });
 
 app.post("/disputes/:id/refund/approve", async (req, res) => {
