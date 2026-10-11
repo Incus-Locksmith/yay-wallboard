@@ -1,4 +1,4 @@
-// YDP Unified master + refund transaction reference (v107)
+// YDP Unified master + dispute resolution outcomes (v108)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -855,6 +855,24 @@ function disputeStatusOptions(selectedStatus = "open_dispute") {
 
 function complaintTypeOptions(selectedType = "") {
   return optionList(complaintTypes, selectedType);
+}
+
+const disputeResolutionTypes = [
+  { value: "", label: "Select resolution type" },
+  { value: "partial_refund", label: "Partial refund agreed" },
+  { value: "return_visit_foc", label: "Return visit agreed FOC" },
+  { value: "next_job_discount", label: "% discount agreed on next job" },
+  { value: "warranty_extension", label: "Warranty extension agreed" },
+  { value: "prices_justified", label: "Prices justified by email, no further action" }
+];
+
+function disputeResolutionTypeOptions(selected = "") {
+  return optionList(disputeResolutionTypes, selected);
+}
+
+function disputeResolutionTypeLabel(value = "") {
+  const found = disputeResolutionTypes.find(item => item.value === value);
+  return found ? found.label : "Not yet agreed";
 }
 
 
@@ -3530,6 +3548,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open_dispute';`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS complaint_summary TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution_notes TEXT;`);
+  await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution_type TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS created_by TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS updated_by TEXT;`);
   await pool.query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;`);
@@ -16205,10 +16224,10 @@ app.get("/disputes/:id", async (req, res) => {
         </div>
 
         <div class="cards">
-          <div class="card"><h2><span class="pill ${disputeStatusClass(dispute.status)}">${escapeHtml(disputeStatusLabel(dispute.status))}</span></h2><p>Status</p></div>
-          <div class="card"><h2>${money(dispute.disputed_amount)}</h2><p>Disputed amount</p></div>
-          <div class="card"><h2>${money(dispute.refund_amount)}</h2><p>Refund amount</p></div>
-          <div class="card"><h2>${dispute.chargeback ? "Yes" : "No"}</h2><p>Chargeback</p></div>
+          <div class="card"><h2>${money(dispute.final_value || 0)}</h2><p>Amount invoiced inc VAT</p></div>
+          <div class="card"><h2>${money(dispute.disputed_amount || 0)}</h2><p>Amount disputed</p></div>
+          <div class="card"><h2 style="font-size:18px;line-height:1.3;">${escapeHtml(dispute.complaint_summary || dispute.complaint_type || "Not recorded")}</h2><p>Reason for complaint</p></div>
+          <div class="card"><h2 style="font-size:18px;line-height:1.3;">${escapeHtml(disputeResolutionTypeLabel(dispute.resolution_type || ""))}</h2><p>Resolution</p></div>
         </div>
 
         ${dispute.job_id ? disputeJobSnapshot({
@@ -16221,6 +16240,19 @@ app.get("/disputes/:id", async (req, res) => {
           technician_name: dispute.technician_name
         }) : ""}
 
+        <div class="panel">
+          <h2>Complaint resolution</h2>
+          <div class="subtitle">Choose the agreed outcome. Only Partial refund agreed continues into the refund approval process.</div>
+          <form method="POST" action="/disputes/${dispute.id}/resolution">
+            <div class="grid-2">
+              <div><label>Resolution type</label><select name="resolution_type" required>${disputeResolutionTypeOptions(dispute.resolution_type || "")}</select></div>
+              <div><label>Resolution detail / notes</label><input name="resolution_notes" value="${escapeHtml(dispute.resolution_notes || "")}" placeholder="e.g. 10% off next job, warranty extension, recall details"></div>
+            </div>
+            <button type="submit">Save resolution</button>
+          </form>
+        </div>
+
+        ${dispute.resolution_type === "partial_refund" ? `
         <div class="panel">
           <div class="topbar" style="margin-bottom:10px;">
             <div>
@@ -16292,6 +16324,13 @@ app.get("/disputes/:id", async (req, res) => {
           ` : ""}
         </div>
 
+        ` : `
+        <div class="panel">
+          <h2>Refund process</h2>
+          <div class="subtitle">No refund workflow is required for the selected resolution.</div>
+        </div>
+        `}
+
         ${refundAudit.length ? `<div class="panel"><h2>Refund audit trail</h2>${refundAudit.map(a => `<div style="padding:9px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.action_type)}</strong> · ${escapeHtml(formatDateTime(a.created_at))} · ${escapeHtml(a.changed_by || "Unknown")}<br><span class="muted">${escapeHtml(a.details || "")}</span></div>`).join("")}</div>` : ""}
 
         <form method="POST" action="/disputes/save" class="panel">
@@ -16310,10 +16349,11 @@ app.get("/disputes/:id", async (req, res) => {
           </div>
 
           <div class="grid-3">
-            <div><label>Disputed amount</label><input name="disputed_amount" value="${dispute.disputed_amount || ""}" placeholder="£0.00"></div>
-            <div><label>Refund amount</label><input name="refund_amount" value="${dispute.refund_amount || ""}" placeholder="£0.00"></div>
+            <div><label>Amount invoiced inc VAT</label><input value="${escapeHtml(dispute.final_value || "")}" readonly></div>
+            <div><label>Amount disputed</label><input name="disputed_amount" value="${dispute.disputed_amount || ""}" placeholder="£0.00"></div>
             <div><label>Chargeback raised?</label><select name="chargeback"><option value="false" ${!dispute.chargeback ? "selected" : ""}>No</option><option value="true" ${dispute.chargeback ? "selected" : ""}>Yes</option></select></div>
           </div>
+          <div><label>Resolution type</label><select name="resolution_type">${disputeResolutionTypeOptions(dispute.resolution_type || "")}</select></div>
 
           <div><label>Complaint summary</label><textarea name="complaint_summary" rows="6">${escapeHtml(dispute.complaint_summary || "")}</textarea></div>
           <div><label>Resolution notes</label><textarea name="resolution_notes" rows="6">${escapeHtml(dispute.resolution_notes || "")}</textarea></div>
@@ -16331,6 +16371,41 @@ app.get("/disputes/:id", async (req, res) => {
 });
 
 
+app.post("/disputes/:id/resolution", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const allowed = new Set(["partial_refund","return_visit_foc","next_job_discount","warranty_extension","prices_justified"]);
+    const resolutionType = String(req.body.resolution_type || "").trim();
+    const resolutionNotes = String(req.body.resolution_notes || "").trim();
+    if (!allowed.has(resolutionType)) return res.status(400).send("Choose a valid resolution type.");
+    const by = currentAgentName(req) || "Unknown";
+    const dispute = (await pool.query(`SELECT * FROM disputes WHERE id=$1`, [id])).rows[0];
+    if (!dispute) return res.status(404).send("Dispute not found");
+
+    const newStatus = resolutionType === "partial_refund"
+      ? (dispute.refund_requested_at ? dispute.status : "open_dispute")
+      : "resolved";
+
+    await pool.query(`
+      UPDATE disputes
+      SET resolution_type=$1, resolution_notes=$2, status=$3,
+          updated_by=$4, updated_at=NOW(),
+          resolved_at=CASE WHEN $3='resolved' THEN COALESCE(resolved_at,NOW()) ELSE NULL END
+      WHERE id=$5
+    `,[resolutionType,resolutionNotes,newStatus,by,id]);
+
+    await pool.query(`
+      INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at)
+      VALUES ($1,'Resolution agreed',$2,$3,NOW())
+    `,[id,`${disputeResolutionTypeLabel(resolutionType)}${resolutionNotes ? ` · ${resolutionNotes}` : ""}`,by]);
+
+    res.redirect(`/disputes/${id}`);
+  } catch(error) {
+    console.error("Save resolution error:", error);
+    res.status(500).send("Could not save dispute resolution.");
+  }
+});
+
 app.post("/disputes/:id/refund/request", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -16338,6 +16413,7 @@ app.post("/disputes/:id/refund/request", async (req, res) => {
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).send("Enter a valid refund amount.");
     const dispute = (await pool.query(`SELECT * FROM disputes WHERE id=$1`, [id])).rows[0];
     if (!dispute) return res.status(404).send("Dispute not found");
+    if (dispute.resolution_type !== "partial_refund") return res.status(400).send("Set the resolution type to Partial refund agreed before starting the refund process.");
     if (dispute.refund_requested_at) return res.status(400).send("A refund has already been requested for this dispute.");
     const by = currentAgentName(req) || "Unknown";
     const note = String(req.body.note || "").trim();
@@ -16474,6 +16550,7 @@ app.post("/disputes/save", async (req, res) => {
       status,
       req.body.complaint_summary || "",
       req.body.resolution_notes || "",
+      req.body.resolution_type || "",
       currentAgentName(req)
     ];
 
@@ -16491,10 +16568,11 @@ app.post("/disputes/save", async (req, res) => {
           status = $9,
           complaint_summary = $10,
           resolution_notes = $11,
-          updated_by = $12,
+          resolution_type = $12,
+          updated_by = $13,
           updated_at = NOW(),
           resolved_at = CASE WHEN $9 IN ('resolved', 'rejected', 'refund_processed') THEN COALESCE(resolved_at, NOW()) ELSE NULL END
-        WHERE id = $13
+        WHERE id = $14
       `, [...values, id]);
       res.redirect(`/disputes/${id}`);
       return;
@@ -16504,8 +16582,8 @@ app.post("/disputes/save", async (req, res) => {
       INSERT INTO disputes (
         job_id, customer_name, customer_phone, technician_id, complaint_type,
         disputed_amount, refund_amount, chargeback, status, complaint_summary,
-        resolution_notes, created_by, updated_by, resolved_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,
+        resolution_notes, resolution_type, created_by, updated_by, resolved_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,
         CASE WHEN $9 IN ('resolved', 'rejected', 'refund_processed') THEN NOW() ELSE NULL END
       )
       RETURNING id
