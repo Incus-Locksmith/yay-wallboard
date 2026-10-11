@@ -1,4 +1,4 @@
-// YDP Unified master + tech assignment/admin access fix (v106)
+// YDP Unified master + refund transaction reference (v107)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -16275,7 +16275,7 @@ app.get("/disputes/:id", async (req, res) => {
             </div>
             <form method="POST" action="/disputes/${dispute.id}/refund/complete" onsubmit="return confirm('Confirm that the refund has actually been completed? This will close the refund workflow.');">
               <div class="grid-2">
-                <div><label>Refund completion reference</label><input name="reference" placeholder="Bank reference / transaction reference"></div>
+                <div><label>Receipt / transaction number</label><input name="reference" required placeholder="Bank receipt, transaction number or payment reference"></div>
                 <div><label>Completion note</label><input name="note" placeholder="Optional note"></div>
               </div>
               <button class="button green" type="submit">Confirm refund completed</button>
@@ -16286,7 +16286,7 @@ app.get("/disputes/:id", async (req, res) => {
             <div style="padding:12px 14px;border:2px solid #22c55e;border-radius:8px;background:#f0fdf4;">
               <strong>✓ Refund completed</strong><br>
               ${money(dispute.refund_amount)} completed ${escapeHtml(formatDateTime(dispute.refund_completed_at))} by ${escapeHtml(dispute.refund_completed_by || "Unknown")}.
-              ${dispute.refund_completion_reference ? `<br>Reference: ${escapeHtml(dispute.refund_completion_reference)}` : ""}
+              ${dispute.refund_completion_reference ? `<br><strong>Receipt / transaction number:</strong> ${escapeHtml(dispute.refund_completion_reference)}` : ""}
               ${refundDocument ? `<br>Paperwork: <a href="/refund-documents/${refundDocument.id}/edit">${escapeHtml(refundDocument.document_number)}</a> · <a href="/refund-documents/${refundDocument.id}/pdf" target="_blank">PDF</a>` : ""}
             </div>
           ` : ""}
@@ -16431,10 +16431,14 @@ app.post("/disputes/:id/refund/complete", async (req, res) => {
     const by = currentAgentName(req) || "Unknown";
     const reference = String(req.body.reference || "").trim();
     const note = String(req.body.note || "").trim();
+    if (!reference) {
+      await client.query("ROLLBACK");
+      return res.status(400).send("Receipt / transaction number is required before a refund can be marked completed.");
+    }
     await client.query(`UPDATE disputes SET refund_completed_at=NOW(), refund_completed_by=$1, refund_completion_reference=$2, status='refund_processed', resolved_at=COALESCE(resolved_at,NOW()), updated_by=$1, updated_at=NOW() WHERE id=$3`, [by, reference, id]);
     await client.query(`UPDATE refund_documents SET status='Refund processed', bank_reference=CASE WHEN $1<>'' THEN $1 ELSE bank_reference END, notes=CASE WHEN $2<>'' THEN CONCAT(COALESCE(notes,''), CASE WHEN COALESCE(notes,'')<>'' THEN E'\\n' ELSE '' END, $2) ELSE notes END, updated_at=NOW() WHERE id=$3`, [reference, note, dispute.refund_document_id]);
-    await client.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'refund processed',$2,$3,NOW())`, [dispute.refund_document_id, `${money(dispute.refund_amount || 0)} refund completed${reference ? ` · Reference ${reference}` : ""}${note ? ` · ${note}` : ""}`, by]);
-    await client.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund completed',$2,$3,NOW())`, [id, `${money(dispute.refund_amount || 0)} completed${reference ? ` · Reference ${reference}` : ""}${note ? ` · ${note}` : ""}`, by]);
+    await client.query(`INSERT INTO refund_document_audit_log (refund_document_id,action_type,details,changed_by,created_at) VALUES ($1,'refund processed',$2,$3,NOW())`, [dispute.refund_document_id, `${money(dispute.refund_amount || 0)} refund completed · Receipt / transaction ${reference}${note ? ` · ${note}` : ""}`, by]);
+    await client.query(`INSERT INTO dispute_refund_audit_log (dispute_id,action_type,details,changed_by,created_at) VALUES ($1,'Refund completed',$2,$3,NOW())`, [id, `${money(dispute.refund_amount || 0)} completed · Receipt / transaction ${reference}${note ? ` · ${note}` : ""}`, by]);
     await client.query("COMMIT");
     res.redirect(`/disputes/${id}`);
   } catch (error) {
