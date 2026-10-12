@@ -1,4 +1,4 @@
-// YDP Unified master + refund rejection option (v109)
+// YDP Unified master + team dispute raising/admin-only dispute dashboard (v110)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -353,6 +353,19 @@ function requirePortalPermissions(req, res, next) {
       <!DOCTYPE html><html><head><title>Reporting access required</title><style>${sharedStyles()}</style></head>
       <body>${nav(req)}<h1>Reporting access required</h1><div class="panel"><p>Reports are available to Manager and Admin users.</p><a class="button" href="/call-wallboard">Back to portal</a></div></body></html>
     `);
+  }
+
+  if (path.startsWith("/disputes") && role !== "admin") {
+    const canRaiseNewDispute =
+      (req.method === "GET" && path === "/disputes/new") ||
+      (req.method === "POST" && path === "/disputes/save" && !String(req.body.id || "").trim());
+
+    if (!canRaiseNewDispute) {
+      return res.status(403).send(`
+        <!DOCTYPE html><html><head><title>Admin access required</title><style>${sharedStyles()}</style></head>
+        <body>${nav(req)}<h1>Admin access required</h1><div class="panel"><p>The Dispute Dashboard is only available to Admin users.</p><p>All team members can still raise a new dispute from the Dispatch Board.</p><a class="button" href="/jobs">Back to Dispatch Board</a></div></body></html>
+      `);
+    }
   }
 
   next();
@@ -2703,7 +2716,7 @@ function nav(req) {
         </div>
         ${canViewReports ? `<a class="side-link${active("/reports")}" href="/reports"><span class="side-dot dot-green"></span><span>Reports</span></a>` : ""}
         <a class="side-link${active("/payment-chasing")}" href="/payment-chasing"><span class="side-dot dot-amber"></span><span>Payment chasing</span></a>
-        <a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>
+        ${isAdmin ? `<a class="side-link${active("/disputes")}" href="/disputes"><span class="side-dot dot-red"></span><span>Disputes</span></a>` : ""}
 
         ${isAdmin ? `
           <div class="sidebar-label section-label">Admin</div>
@@ -8563,6 +8576,7 @@ app.get("/jobs", async (req, res) => {
     const customDateFrom = (req.query.date_from || "").trim();
     const customDateTo = (req.query.date_to || "").trim();
     const search = (req.query.search || "").trim();
+    const disputeRaised = req.query.dispute_raised === "1";
     const requestedKpiPeriod = (req.query.kpi_period || "today").trim().toLowerCase();
     const kpiPeriod = ["today", "week", "month"].includes(requestedKpiPeriod) ? requestedKpiPeriod : "today";
 
@@ -8780,7 +8794,7 @@ app.get("/jobs", async (req, res) => {
       { label: "Assigned", value: Number(counts.assigned || 0), className: "board-green", hrefStatus: "assigned" },
       { label: "Awaiting payment", value: Number(counts.awaiting_payment || 0), className: "board-amber", hrefStatus: "awaiting_payment" },
       { label: "Invoice sent to Acc Dept", value: Number(counts.invoiced_account || 0), className: "board-pink", hrefStatus: "invoiced_account" },
-      { label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" },
+      ...(isAdmin ? [{ label: "Disputes", value: openDisputesTotal, className: "board-orange", href: "/disputes" }] : []),
       { label: "Payment chase", value: paymentChaseTotal, className: "board-purple", href: "/payment-chasing" }
     ];
 
@@ -8823,7 +8837,10 @@ app.get("/jobs", async (req, res) => {
           <td><strong>${escapeHtml(job.customer_name || "—")}</strong><div class="small-muted">${customerPhone}</div></td>
           <td>${formatDateTime(job.created_at)}</td>
           <td>
-            <a class="view-button" href="/jobs/${job.id}/edit">View</a>
+            <div style="display:flex;gap:7px;flex-wrap:wrap;">
+              <a class="view-button" href="/jobs/${job.id}/edit">View</a>
+              <a class="view-button" style="background:#b45309;" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
+            </div>
           </td>
         </tr>
       `;
@@ -9021,6 +9038,7 @@ app.get("/jobs", async (req, res) => {
       <body>
         ${nav(req)}
         <main class="dispatch-board">
+          ${disputeRaised ? `<div style="margin-bottom:16px;padding:13px 16px;background:#ecfdf5;border:1px solid #86efac;border-radius:12px;color:#166534;font-weight:800;">✓ Dispute raised successfully. An Admin can now review it in the Dispute Dashboard.</div>` : ""}
           <div class="board-topbar">
             <div>
               <h1>Dispatch Board</h1>
@@ -16139,7 +16157,7 @@ app.get("/disputes/new", async (req, res) => {
             <h1>New dispute</h1>
             <div class="subtitle">Log a complaint, refund request, material-cost dispute or chargeback.</div>
           </div>
-          <a class="button secondary" href="/disputes">Back to disputes</a>
+          <a class="button secondary" href="/jobs">Back to Dispatch Board</a>
         </div>
 
         ${linkedJob ? disputeJobSnapshot(linkedJob) : `
@@ -16174,7 +16192,7 @@ app.get("/disputes/new", async (req, res) => {
           <div><label>Resolution notes</label><textarea name="resolution_notes" rows="5" placeholder="Refund agreed, email sent, bank chargeback notes, manager decision, etc."></textarea></div>
 
           <button type="submit">Save dispute</button>
-          <a class="button secondary" href="/disputes">Cancel</a>
+          <a class="button secondary" href="/jobs">Cancel</a>
         </form>
       </body>
       </html>
@@ -16533,7 +16551,7 @@ app.post("/disputes/:id/refund/paperwork", async (req, res) => {
     }
     const clientName = dispute.job_customer_name || dispute.customer_name || "Customer";
     const address = [dispute.address_line_1, dispute.address_line_2, dispute.address_line_3, dispute.town, dispute.county].filter(Boolean).join("\n");
-    const reason = String(dispute.complaint_summary || "Refund approved following dispute").trim().slice(0,1000);
+    const reason = "Partial refund as agreed";
     const by = currentAgentName(req) || "Unknown";
     const note = String(req.body.note || "").trim();
     const inserted = await client.query(`
@@ -16650,7 +16668,11 @@ app.post("/disputes/save", async (req, res) => {
       RETURNING id
     `, values);
 
-    res.redirect(`/disputes/${insert.rows[0].id}`);
+    if (currentUserRole(req) === "admin") {
+      res.redirect(`/disputes/${insert.rows[0].id}`);
+    } else {
+      res.redirect(`/jobs?dispute_raised=1`);
+    }
   } catch (error) {
     console.error("Save dispute error:", error);
     res.status(500).send("Save dispute error. Check Render logs.");
