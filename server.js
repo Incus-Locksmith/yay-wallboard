@@ -1,4 +1,4 @@
-// YDP Unified master + Yay call recordings (v112)
+// YDP Unified master + Yay API rate-limit handling (v113)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -1539,7 +1539,11 @@ async function yayApiRequest(method, path, body = null) {
   try { parsed = providerText ? JSON.parse(providerText) : null; } catch (_) {}
 
   if (!response.ok) {
-    throw new Error(`Yay API failed ${response.status}: ${providerText}`);
+    const error = new Error(`Yay API failed ${response.status}: ${providerText}`);
+    error.status = response.status;
+    error.retryAfter = response.headers.get("retry-after") || "";
+    error.providerText = providerText;
+    throw error;
   }
   return { text: providerText, json: parsed, status: response.status };
 }
@@ -1695,7 +1699,7 @@ async function getYaySipStatusesCached() {
   if (yaySipLiveCache.statuses.expiresAt > now) return yaySipLiveCache.statuses.rows;
   const result = await yayApiRequest("GET", "/voip/user-status");
   const rows = yayArrayFromResponse(result.json);
-  yaySipLiveCache.statuses = { rows, expiresAt: now + 20 * 1000 };
+  yaySipLiveCache.statuses = { rows, expiresAt: now + 60 * 1000 };
   return rows;
 }
 
@@ -1707,7 +1711,7 @@ async function getYayQueueAvailabilityCached(uuid) {
 
   const result = await yayApiRequest("GET", `/voip/user/${encodeURIComponent(uuid)}/availability`);
   const value = yayQueueAvailableFromPayload(result.json);
-  yaySipLiveCache.availability.set(uuid, { value, expiresAt: now + 60 * 1000 });
+  yaySipLiveCache.availability.set(uuid, { value, expiresAt: now + 3 * 60 * 1000 });
   return value;
 }
 
@@ -4737,6 +4741,24 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
 }
 
 
+const yayRecordingUrlCache = new Map();
+
+function yayRecordingCacheGet(uuid) {
+  const cached = yayRecordingUrlCache.get(uuid);
+  if (!cached) return "";
+  if (cached.expiresAt <= Date.now()) {
+    yayRecordingUrlCache.delete(uuid);
+    return "";
+  }
+  return cached.url || "";
+}
+
+function yayRecordingCacheSet(uuid, url) {
+  if (!uuid || !url) return;
+  // Keep only briefly because Yay recording URLs are temporary.
+  yayRecordingUrlCache.set(uuid, { url, expiresAt: Date.now() + 2 * 60 * 1000 });
+}
+
 function yayTemporaryAudioUrl(payload) {
   if (!payload) return "";
 
@@ -4799,14 +4821,20 @@ app.get("/calls/:uuid/recording", async (req, res) => {
 
     if (!call) return res.status(404).send("Call not found in the portal.");
 
-    const audioResponse = await yayApiRequest(
-      "GET",
-      `/voip/call/${encodeURIComponent(uuid)}/audio`
-    );
+    let temporaryUrl = yayRecordingCacheGet(uuid);
 
-    const temporaryUrl =
-      yayTemporaryAudioUrl(audioResponse.json) ||
-      yayTemporaryAudioUrl(audioResponse.text);
+    if (!temporaryUrl) {
+      const audioResponse = await yayApiRequest(
+        "GET",
+        `/voip/call/${encodeURIComponent(uuid)}/audio`
+      );
+
+      temporaryUrl =
+        yayTemporaryAudioUrl(audioResponse.json) ||
+        yayTemporaryAudioUrl(audioResponse.text);
+
+      if (temporaryUrl) yayRecordingCacheSet(uuid, temporaryUrl);
+    }
 
     if (!temporaryUrl) {
       console.error("Yay recording response did not contain a temporary URL:", audioResponse.json || audioResponse.text);
@@ -4845,6 +4873,38 @@ app.get("/calls/:uuid/recording", async (req, res) => {
     }
   } catch (error) {
     console.error("Yay call recording error:", error);
+
+    if (Number(error.status) === 429 || String(error.message || "").includes("429")) {
+      const retryAfter = String(error.retryAfter || "").trim();
+      const waitText = retryAfter
+        ? `Yay has asked us to wait approximately ${escapeHtml(retryAfter)} seconds before trying again.`
+        : "Yay has temporarily rate-limited API requests. Please wait a short while and try again.";
+
+      return res.status(429).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Yay temporarily busy</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>${sharedStyles()}</style>
+        </head>
+        <body>
+          ${nav(req)}
+          <h1>Call recording temporarily unavailable</h1>
+          <div class="panel">
+            <p><strong>The recording itself is not necessarily missing.</strong></p>
+            <p>${waitText}</p>
+            <p class="muted-note">The portal now reduces its background Yay API calls so this should happen less often.</p>
+            <div class="page-actions">
+              <a class="action-button" href="${escapeHtml(req.originalUrl)}">Try recording again</a>
+              <a class="action-button dark" href="/call-wallboard">Back to Call wallboard</a>
+            </div>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
     res.status(500).send(`Could not retrieve call recording: ${escapeHtml(error.message || "Unknown error")}`);
   }
 });
