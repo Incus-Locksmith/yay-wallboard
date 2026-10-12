@@ -1,4 +1,4 @@
-// YDP Unified master + team dispute raising/admin-only dispute dashboard (v110)
+// YDP Unified master + stronger live-call agent matching (v111)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -4479,6 +4479,82 @@ function wallboardApproxRings(answerSeconds) {
   return Math.max(1, Math.ceil((seconds + 0.01) / 6));
 }
 
+
+function wallboardNormaliseExtensionCandidate(value, knownExtensions = new Set()) {
+  if (value === null || value === undefined) return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+
+  // Exact extension is safest.
+  if (knownExtensions.has(raw)) return raw;
+
+  // Yay sometimes sends values such as "sip:1019@..." or "1019 - Elias".
+  const matches = raw.match(/\b\d{3,6}\b/g) || [];
+  for (const match of matches) {
+    if (knownExtensions.has(match)) return match;
+  }
+  return "";
+}
+
+function wallboardCallAgentExtension(call, wallboardAgents = {}) {
+  const knownExtensions = new Set(Object.keys(wallboardAgents).map(String));
+
+  // Inbound answered_by remains the strongest source.
+  const answeredBy = wallboardNormaliseExtensionCandidate(call?.answered_by, knownExtensions);
+  if (answeredBy) return answeredBy;
+
+  const raw = call?.raw_json && typeof call.raw_json === "object" ? call.raw_json : {};
+
+  // Prefer fields whose names clearly indicate a SIP user / agent / extension.
+  const preferredKeys = [
+    "extension", "extension_number", "ext", "agent_extension", "agent_ext",
+    "user_extension", "sip_extension", "answered_by", "answered_by_extension",
+    "user", "username", "sip_user", "from_user", "to_user",
+    "caller_user", "callee_user", "agent", "agent_id"
+  ];
+
+  function inspectObject(obj, depth = 0) {
+    if (!obj || typeof obj !== "object" || depth > 4) return "";
+
+    for (const key of preferredKeys) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const hit = wallboardNormaliseExtensionCandidate(obj[key], knownExtensions);
+        if (hit) return hit;
+      }
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      const keyLooksRelevant = /(extension|(^|_)ext($|_)|agent|answered|sip|user)/i.test(key);
+      if (keyLooksRelevant && (typeof value === "string" || typeof value === "number")) {
+        const hit = wallboardNormaliseExtensionCandidate(value, knownExtensions);
+        if (hit) return hit;
+      }
+    }
+
+    for (const value of Object.values(obj)) {
+      if (value && typeof value === "object") {
+        const hit = inspectObject(value, depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return "";
+  }
+
+  const rawHit = inspectObject(raw);
+  if (rawHit) return rawHit;
+
+  // For outbound calls only, an internal extension may appear directly as the
+  // source/destination party even when answered_by is blank.
+  if (String(call?.call_type || "").toLowerCase() === "outbound") {
+    for (const candidate of [call?.from_number, call?.to_number, raw?.from, raw?.to]) {
+      const hit = wallboardNormaliseExtensionCandidate(candidate, knownExtensions);
+      if (hit) return hit;
+    }
+  }
+
+  return "";
+}
+
 function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   const inboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "inbound");
   const outboundCalls = calls.filter(call => String(call.call_type || "").toLowerCase() === "outbound");
@@ -4556,7 +4632,7 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
   });
 
   answeredCalls.forEach(call => {
-    const ext = String(call.answered_by || "").trim();
+    const ext = wallboardCallAgentExtension(call, wallboardAgents);
     if (!agentStats[ext]) return;
     const agent = agentStats[ext];
     agent.answered += 1;
@@ -4570,15 +4646,28 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
     if (!agent.lastCallTime || (callTime && new Date(callTime) > new Date(agent.lastCallTime))) {
       agent.lastCallTime = callTime;
     }
-    if (!call.end_time) {
-      agent.status = "On Call";
-      const started = call.start_time || call.received_at;
-      agent.currentDuration = started ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000)) : 0;
+  });
+
+  // LIVE CALL EVIDENCE OVERRIDES Yay presence.
+  // This applies to inbound and outbound calls. If an active call can be tied to an
+  // extension, show that agent as On Call even when queue availability says Offline.
+  inProgressCalls.forEach(call => {
+    const ext = wallboardCallAgentExtension(call, wallboardAgents);
+    if (!ext || !agentStats[ext]) return;
+
+    const agent = agentStats[ext];
+    agent.status = "On Call";
+    const started = call.start_time || call.received_at || call.updated_at;
+    agent.currentDuration = started
+      ? Math.max(0, Math.floor((now - new Date(started).getTime()) / 1000))
+      : 0;
+
+    const callTime = call.start_time || call.received_at || call.updated_at;
+    if (!agent.lastCallTime || (callTime && new Date(callTime) > new Date(agent.lastCallTime))) {
+      agent.lastCallTime = callTime;
     }
   });
 
-  // An active outbound call may not carry answered_by. If Yay puts the extension in raw_json,
-  // retain the historic behaviour rather than guessing an agent here.
   const agents = Object.values(agentStats).map(agent => {
     const avgAnswerSeconds = agent.answerSpeedSamples
       ? Math.round(agent.totalAnswerSeconds / agent.answerSpeedSamples)
@@ -4600,7 +4689,7 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
     : 0;
 
   const recent = inboundCalls.slice(0, 12).map(call => {
-    const ext = String(call.answered_by || "").trim();
+    const ext = wallboardCallAgentExtension(call, wallboardAgents);
     let status = "Missed";
     if (!call.end_time && !ext && callAgeSeconds(call) <= waitingMaxSeconds) status = "Waiting";
     else if (ext) status = call.end_time ? "Answered" : "On Call";
