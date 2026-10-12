@@ -1,4 +1,4 @@
-// YDP Unified master + stronger live-call agent matching (v111)
+// YDP Unified master + Yay call recordings (v112)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -4698,6 +4698,7 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
       : null;
     return {
       id: call.id,
+      uuid: call.uuid || "",
       time: call.start_time || call.received_at,
       caller: call.from_number || "Unknown",
       status,
@@ -4734,6 +4735,119 @@ function wallboardSnapshotFromCalls(calls, wallboardAgents, yayPresence = {}) {
     recent
   };
 }
+
+
+function yayTemporaryAudioUrl(payload) {
+  if (!payload) return "";
+
+  const preferredKeys = [
+    "url", "audio_url", "audioUrl", "recording_url", "recordingUrl",
+    "download_url", "downloadUrl", "temporary_url", "temporaryUrl"
+  ];
+
+  function search(value, depth = 0) {
+    if (depth > 5 || value === null || value === undefined) return "";
+
+    if (typeof value === "string") {
+      const clean = value.trim();
+      return /^https?:\/\//i.test(clean) ? clean : "";
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = search(item, depth + 1);
+        if (found) return found;
+      }
+      return "";
+    }
+
+    if (typeof value === "object") {
+      for (const key of preferredKeys) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+          const found = search(value[key], depth + 1);
+          if (found) return found;
+        }
+      }
+      for (const child of Object.values(value)) {
+        const found = search(child, depth + 1);
+        if (found) return found;
+      }
+    }
+
+    return "";
+  }
+
+  return search(payload);
+}
+
+app.get("/calls/:uuid/recording", async (req, res) => {
+  try {
+    const uuid = String(req.params.uuid || "").trim();
+    const mode = String(req.query.mode || "play").toLowerCase();
+
+    if (!uuid || uuid.length > 120) {
+      return res.status(400).send("Invalid call UUID.");
+    }
+
+    // Only allow recordings for calls that already exist in our own call log.
+    const call = (await pool.query(`
+      SELECT uuid, call_type, from_number, to_number, start_time
+      FROM calls
+      WHERE uuid = $1
+      LIMIT 1
+    `, [uuid])).rows[0];
+
+    if (!call) return res.status(404).send("Call not found in the portal.");
+
+    const audioResponse = await yayApiRequest(
+      "GET",
+      `/voip/call/${encodeURIComponent(uuid)}/audio`
+    );
+
+    const temporaryUrl =
+      yayTemporaryAudioUrl(audioResponse.json) ||
+      yayTemporaryAudioUrl(audioResponse.text);
+
+    if (!temporaryUrl) {
+      console.error("Yay recording response did not contain a temporary URL:", audioResponse.json || audioResponse.text);
+      return res.status(404).send("No call recording is available for this call.");
+    }
+
+    if (mode !== "download") {
+      return res.redirect(temporaryUrl);
+    }
+
+    const recordingResponse = await fetch(temporaryUrl);
+    if (!recordingResponse.ok) {
+      throw new Error(`Recording download failed ${recordingResponse.status}`);
+    }
+
+    const contentType = recordingResponse.headers.get("content-type") || "audio/mpeg";
+    const extension =
+      contentType.includes("wav") ? "wav" :
+      contentType.includes("ogg") ? "ogg" :
+      contentType.includes("mp4") || contentType.includes("m4a") ? "m4a" :
+      "mp3";
+
+    const datePart = call.start_time
+      ? new Date(call.start_time).toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="call-${datePart}-${uuid.slice(0, 8)}.${extension}"`);
+    res.setHeader("Cache-Control", "no-store");
+
+    if (recordingResponse.body && typeof recordingResponse.body.pipe === "function") {
+      recordingResponse.body.pipe(res);
+    } else {
+      const buffer = await recordingResponse.buffer();
+      res.send(buffer);
+    }
+  } catch (error) {
+    console.error("Yay call recording error:", error);
+    res.status(500).send(`Could not retrieve call recording: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
 
 app.get("/api/call-wallboard/live", async (req, res) => {
   try {
@@ -4805,7 +4919,7 @@ app.get("/call-wallboard", async (req, res) => {
     }
 
     function wbRecentRows(recent) {
-      if (!recent.length) return `<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>`;
+      if (!recent.length) return `<tr><td colspan="7" class="empty-cell">No inbound calls yet today.</td></tr>`;
       return recent.map(call => `
         <tr>
           <td>${call.time ? escapeHtml(formatTimeOnly(call.time)) : "—"}</td>
@@ -4814,6 +4928,12 @@ app.get("/call-wallboard", async (req, res) => {
           <td>${escapeHtml(wbAnswerSpeed(call.answerSeconds, call.approxRings))}</td>
           <td>${call.status === "Waiting" ? "—" : wbSeconds(call.duration)}</td>
           <td>${escapeHtml(call.agent || "—")}</td>
+          <td>${call.uuid && call.status !== "Waiting" ? `
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <a class="recording-link" href="/calls/${encodeURIComponent(call.uuid)}/recording?mode=play" target="_blank">Play</a>
+              <a class="recording-link" href="/calls/${encodeURIComponent(call.uuid)}/recording?mode=download">Download</a>
+            </div>
+          ` : "—"}</td>
         </tr>
       `).join("");
     }
@@ -4894,6 +5014,8 @@ app.get("/call-wallboard", async (req, res) => {
           .panel{background:linear-gradient(180deg,rgba(8,31,53,.96),rgba(5,25,44,.96));border:1px solid var(--line);border-radius:15px;min-height:0;overflow:hidden}
           .panel-head{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line)}
           .panel-title{font-size:16px;font-weight:900}.panel-note{font-size:10px;color:#8fa8c0}
+          .recording-link{display:inline-block;padding:5px 8px;border-radius:7px;background:#123a5f;color:#dbeafe;text-decoration:none;font-size:10px;font-weight:800;border:1px solid rgba(102,184,255,.25)}
+          .recording-link:hover{background:#17507f;color:#fff}
           .agent-grid{padding:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;align-content:start}
           .agent-card{border:1px solid rgba(32,219,119,.38);background:linear-gradient(145deg,rgba(6,53,54,.45),rgba(8,31,53,.8));border-radius:13px;padding:11px;min-width:0}
           .agent-card.on-call{border-color:rgba(255,89,104,.55);background:linear-gradient(145deg,rgba(90,20,38,.34),rgba(8,31,53,.84))}
@@ -4960,7 +5082,7 @@ app.get("/call-wallboard", async (req, res) => {
             </div>
             <div class="panel">
               <div class="panel-head"><div class="panel-title">Live Queue / Recent Calls</div><div class="panel-note">Latest inbound activity</div></div>
-              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Answer Time</th><th>Duration</th><th>Agent</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
+              <div class="recent-wrap"><table><thead><tr><th>Time</th><th>Caller</th><th>Status</th><th>Answer Time</th><th>Duration</th><th>Agent</th><th>Recording</th></tr></thead><tbody id="recentRows">${wbRecentRows(snapshot.recent)}</tbody></table></div>
             </div>
           </section>
 
@@ -5033,15 +5155,22 @@ app.get("/call-wallboard", async (req, res) => {
             ).join("");
           }
           function renderRecent(recent){
-            if(!recent.length) return '<tr><td colspan="6" class="empty-cell">No inbound calls yet today.</td></tr>';
-            return recent.map(c =>
-              '<tr>'+
+            if(!recent.length) return '<tr><td colspan="7" class="empty-cell">No inbound calls yet today.</td></tr>';
+            return recent.map(c => {
+              const recording = c.uuid && c.status !== "Waiting"
+                ? '<div style="display:flex;gap:6px;flex-wrap:wrap;">'+
+                    '<a class="recording-link" target="_blank" href="/calls/'+encodeURIComponent(c.uuid)+'/recording?mode=play">Play</a>'+
+                    '<a class="recording-link" href="/calls/'+encodeURIComponent(c.uuid)+'/recording?mode=download">Download</a>'+
+                  '</div>'
+                : '—';
+              return '<tr>'+
                 '<td>'+timeOnly(c.time)+'</td><td>'+html(c.caller)+'</td>'+
                 '<td><span class="call-status '+html(c.status.toLowerCase().replace(/\\s+/g,"-"))+'">'+html(c.status)+'</span></td>'+
                 '<td>'+answerSpeed(c.answerSeconds,c.approxRings)+'</td>'+
                 '<td>'+(c.status==="Waiting" ? "—" : duration(c.duration))+'</td><td>'+html(c.agent || "—")+'</td>'+
-              '</tr>'
-            ).join("");
+                '<td>'+recording+'</td>'+
+              '</tr>';
+            }).join("");
           }
           function renderLeaders(agents){
             const ranked=[...agents].sort((a,b)=>b.answered-a.answered || a.name.localeCompare(b.name)).slice(0,5);
@@ -5119,6 +5248,7 @@ app.get("/call-wallboard/missed-calls", async (req, res) => {
         <td>${escapeHtml(call.answer_type || "—")}</td>
         <td>${formatSeconds(Number(call.duration_seconds || 0))}</td>
         <td><code>${escapeHtml(call.uuid || "—")}</code></td>
+        <td>${call.uuid ? `<a href="/calls/${encodeURIComponent(call.uuid)}/recording?mode=play" target="_blank">Play</a> · <a href="/calls/${encodeURIComponent(call.uuid)}/recording?mode=download">Download</a>` : "—"}</td>
       </tr>
     `).join("");
 
@@ -5146,9 +5276,10 @@ app.get("/call-wallboard/missed-calls", async (req, res) => {
               <th>Answer type</th>
               <th>Duration</th>
               <th>UUID</th>
+              <th>Recording</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="7">No missed inbound calls in the last 24 hours.</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="8">No missed inbound calls in the last 24 hours.</td></tr>`}</tbody>
         </table>
       </body>
       </html>
