@@ -1,4 +1,4 @@
-// YDP Unified master + Yay API rate-limit handling (v113)
+// YDP Unified master + jobs admin-scope fix (v114)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -8849,6 +8849,7 @@ app.get("/api/account-requests/pending", async (req, res) => {
 
 app.get("/jobs", async (req, res) => {
   try {
+    const isAdmin = currentUserRole(req) === "admin";
     const selectedStatus = (req.query.status || "active").trim();
     const selectedTechnician = (req.query.technician || "all").trim();
     const selectedCampaign = (req.query.campaign || "all").trim();
