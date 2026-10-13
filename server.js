@@ -1,4 +1,4 @@
-// YDP Unified master + jobs admin-scope fix (v114)
+// YDP Unified master + dual-company insurance reports (v116)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3034,6 +3034,45 @@ async function initDb() {
     );
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS refund_document_audit_idx ON refund_document_audit_log (refund_document_id, created_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS insurance_reports (
+      id SERIAL PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      report_date TEXT NOT NULL,
+      site_address TEXT,
+      bill_no TEXT,
+      scenario TEXT DEFAULT 'faulty_mechanism',
+      reason_attendance TEXT,
+      findings TEXT,
+      action_taken TEXT,
+      cause_condition TEXT,
+      pricing_insurance TEXT,
+      prepared_by TEXT DEFAULT 'Daniel van Her',
+      prepared_role TEXT DEFAULT 'Head of Operations',
+      company_key TEXT DEFAULT 'online',
+      company_name TEXT DEFAULT '24H Online Services Ltd',
+      status TEXT DEFAULT 'Draft',
+      created_by TEXT,
+      updated_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE insurance_reports ADD COLUMN IF NOT EXISTS company_key TEXT DEFAULT 'online';`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS insurance_reports_job_idx ON insurance_reports (job_id, created_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS insurance_report_audit_log (
+      id SERIAL PRIMARY KEY,
+      insurance_report_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      details TEXT,
+      changed_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS insurance_report_audit_idx ON insurance_report_audit_log (insurance_report_id, created_at DESC);`);
 
 
   await pool.query(`
@@ -6882,6 +6921,360 @@ app.post("/invoices/:id/edit", async (req, res) => {
   }
 });
 
+
+app.get("/jobs/:id/insurance-report/new", async (req, res) => {
+  try {
+    const jobId = Number(req.params.id);
+    const job = (await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.id = $1
+    `, [jobId])).rows[0];
+    if (!job) return res.status(404).send("Job not found");
+
+    const existing = (await pool.query(`
+      SELECT id FROM insurance_reports WHERE job_id=$1 ORDER BY updated_at DESC, id DESC LIMIT 1
+    `, [jobId])).rows[0];
+    if (existing) return res.redirect(`/insurance-reports/${existing.id}/edit`);
+
+    const invoice = (await pool.query(`
+      SELECT invoice_number, company_key, payment_method
+      FROM invoices
+      WHERE linked_job_id=$1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [jobId])).rows[0];
+
+    const companyKey = insuranceReportCompanyFromJob(job, invoice);
+    const selectedCompany = companies[companyKey] || companies.online;
+    const scenario = "faulty_mechanism";
+    const defaults = insuranceScenarioDefaults(scenario, job);
+    const now = new Date();
+    const reportDate = now.toISOString().slice(0,10);
+    const siteAddress = jobAddressPlain(job);
+
+    const inserted = await pool.query(`
+      INSERT INTO insurance_reports (
+        job_id, report_date, site_address, bill_no, scenario,
+        reason_attendance, findings, action_taken, cause_condition, pricing_insurance,
+        prepared_by, prepared_role, company_key, company_name, status,
+        created_by, updated_by, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Daniel van Her','Head of Operations',$11,$12,'Draft',$13,$13,NOW(),NOW())
+      RETURNING id
+    `, [
+      jobId, reportDate, siteAddress,
+      invoice?.invoice_number || job.job_number || jobNumber(job.id),
+      scenario,
+      defaults.reason_attendance, defaults.findings, defaults.action_taken,
+      defaults.cause_condition, defaults.pricing_insurance,
+      companyKey, selectedCompany.name,
+      currentAgentName(req) || "Unknown"
+    ]);
+
+    const reportId = inserted.rows[0].id;
+    await pool.query(`
+      INSERT INTO insurance_report_audit_log (insurance_report_id, action_type, details, changed_by, created_at)
+      VALUES ($1,'Created','Insurance report created from linked job',$2,NOW())
+    `, [reportId, currentAgentName(req) || "Unknown"]);
+
+    res.redirect(`/insurance-reports/${reportId}/edit`);
+  } catch (error) {
+    console.error("Create insurance report error:", error);
+    res.status(500).send(`Could not create insurance report: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.get("/insurance-reports/:id/edit", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const report = (await pool.query(`
+      SELECT r.*, j.job_number, j.customer_name, j.final_value, j.job_description,
+             j.address_line_1, j.address_line_2, j.address_line_3, j.town, j.county, j.postcode,
+             t.name AS technician_name
+      FROM insurance_reports r
+      JOIN jobs j ON j.id = r.job_id
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE r.id=$1
+    `, [id])).rows[0];
+
+    if (!report) return res.status(404).send("Insurance report not found");
+
+    const audit = (await pool.query(`
+      SELECT * FROM insurance_report_audit_log
+      WHERE insurance_report_id=$1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 30
+    `, [id])).rows;
+
+    const scenarioDefaults = {};
+    insuranceReportScenarios.forEach(item => {
+      scenarioDefaults[item.value] = insuranceScenarioDefaults(item.value, report);
+    });
+    const defaultsJson = JSON.stringify(scenarioDefaults).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Insurance Report ${escapeHtml(report.bill_no || report.job_number || "")}</title>
+        <style>
+          ${sharedStyles()}
+          .insurance-shell{max-width:1200px;margin:0 auto}
+          .insurance-note{background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;padding:14px 16px;border-radius:14px;margin-bottom:18px;line-height:1.5}
+          .report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+          .report-grid .wide{grid-column:1/-1}
+          .report-grid input,.report-grid select,.report-grid textarea{width:100%}
+          .report-grid textarea{min-height:125px;line-height:1.45}
+          @media(max-width:900px){.report-grid{grid-template-columns:1fr}.report-grid .wide{grid-column:auto}}
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <main class="insurance-shell">
+          <div class="topbar">
+            <div>
+              <h1>Insurance Report</h1>
+              <div class="subtitle">Linked to ${escapeHtml(report.job_number || jobNumber(report.job_id))} · ${escapeHtml(report.customer_name || "")} · ${(companies[report.company_key || "online"] || companies.online).name}</div>
+            </div>
+            <div class="page-actions">
+              <a class="action-button dark" href="/jobs/${report.job_id}/edit">Back to job</a>
+              <a class="action-button" href="/insurance-reports/${report.id}/pdf" target="_blank">View PDF</a>
+              <a class="action-button" href="/insurance-reports/${report.id}/pdf?download=1">Download PDF</a>
+            </div>
+          </div>
+
+          <div class="insurance-note">
+            <strong>Important:</strong> This report should describe what the locksmith actually observed and did. Review the wording before issuing it to a customer or insurer, particularly any statement about the cause of a fault or damage.
+          </div>
+
+          <form method="POST" action="/insurance-reports/${report.id}/save" class="panel">
+            <div class="report-grid">
+              <div><label>Date</label><input type="date" name="report_date" value="${escapeHtml(report.report_date || "")}" required></div>
+              <div><label>Bill / invoice no.</label><input name="bill_no" value="${escapeHtml(report.bill_no || "")}"></div>
+
+              <div class="wide"><label>Site address</label><textarea name="site_address" rows="3">${escapeHtml(report.site_address || "")}</textarea></div>
+
+              <div>
+                <label>Report scenario</label>
+                <select id="insuranceScenario" name="scenario">${insuranceScenarioOptions(report.scenario || "faulty_mechanism")}</select>
+              </div>
+              <div>
+                <label>Insurance report company</label>
+                <select id="insuranceCompany" name="company_key" onchange="syncInsuranceCompanyName()">${insuranceReportCompanyOptions(report.company_key || "online")}</select>
+                <div class="muted" style="margin-top:5px;">Card → 24H Online Services Ltd · Bank transfer → 24H Locksmiths Ltd · Cash can be either.</div>
+              </div>
+              <div><label>Status</label><select name="status">${insuranceReportStatusOptions(report.status || "Draft")}</select></div>
+
+              <div class="wide"><label>Reason for attendance</label><textarea id="reason_attendance" name="reason_attendance">${escapeHtml(report.reason_attendance || "")}</textarea></div>
+              <div class="wide"><label>Locksmith findings</label><textarea id="findings" name="findings">${escapeHtml(report.findings || "")}</textarea></div>
+              <div class="wide"><label>Action taken / work required</label><textarea id="action_taken" name="action_taken">${escapeHtml(report.action_taken || "")}</textarea></div>
+              <div class="wide"><label>Cause / condition identified</label><textarea id="cause_condition" name="cause_condition">${escapeHtml(report.cause_condition || "")}</textarea></div>
+              <div class="wide"><label>Pricing / insurance explanation</label><textarea id="pricing_insurance" name="pricing_insurance">${escapeHtml(report.pricing_insurance || "")}</textarea></div>
+
+              <div><label>Prepared by</label><input name="prepared_by" value="${escapeHtml(report.prepared_by || "Daniel van Her")}"></div>
+              <div><label>Role</label><input name="prepared_role" value="${escapeHtml(report.prepared_role || "Head of Operations")}"></div>
+              <div class="wide"><label>On behalf of</label><input id="insuranceCompanyName" name="company_name" value="${escapeHtml(report.company_name || (companies[report.company_key || "online"] || companies.online).name)}"></div>
+            </div>
+
+            <div class="page-actions" style="margin-top:16px;">
+              <button type="submit">Save insurance report</button>
+              <button type="button" class="secondary-button" onclick="applyInsuranceTemplate()">Replace wording with selected scenario template</button>
+            </div>
+          </form>
+
+          <div class="panel">
+            <h2>Linked job information</h2>
+            <div class="grid-3">
+              <div><strong>Technician</strong><br>${escapeHtml(report.technician_name || "Unassigned")}</div>
+              <div><strong>Job value inc VAT</strong><br>${money(report.final_value || 0)}</div>
+              <div><strong>Job no.</strong><br>${escapeHtml(report.job_number || jobNumber(report.job_id))}</div>
+            </div>
+            ${report.job_description ? `<p><strong>Original job description</strong><br>${escapeHtml(report.job_description)}</p>` : ""}
+          </div>
+
+          ${audit.length ? `
+            <div class="panel">
+              <h2>Report audit trail</h2>
+              ${audit.map(row => `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(row.action_type)}</strong> · ${escapeHtml(formatDateTime(row.created_at))} · ${escapeHtml(row.changed_by || "Unknown")}<br><span class="muted">${escapeHtml(row.details || "")}</span></div>`).join("")}
+            </div>
+          ` : ""}
+        </main>
+
+        <script>
+          const insuranceTemplates = ${defaultsJson};
+          const insuranceCompanies = ${JSON.stringify({online: companies.online.name, locksmiths: companies.locksmiths.name})};
+          function syncInsuranceCompanyName(){
+            const key = document.getElementById("insuranceCompany")?.value || "online";
+            const input = document.getElementById("insuranceCompanyName");
+            if(input) input.value = insuranceCompanies[key] || insuranceCompanies.online;
+          }
+          function applyInsuranceTemplate(){
+            const scenario = document.getElementById("insuranceScenario").value;
+            const template = insuranceTemplates[scenario] || {};
+            if(!confirm("Replace the five narrative sections with the selected template wording?")) return;
+            ["reason_attendance","findings","action_taken","cause_condition","pricing_insurance"].forEach(id => {
+              const el = document.getElementById(id);
+              if(el) el.value = template[id] || "";
+            });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Insurance report edit error:", error);
+    res.status(500).send(`Could not load insurance report: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.post("/insurance-reports/:id/save", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const by = currentAgentName(req) || "Unknown";
+    const allowedScenarios = new Set(insuranceReportScenarios.map(item => item.value));
+    const scenario = allowedScenarios.has(req.body.scenario) ? req.body.scenario : "custom";
+    const companyKey = companies[req.body.company_key] ? req.body.company_key : "online";
+    const selectedCompany = companies[companyKey] || companies.online;
+    const status = ["Draft","Ready to issue","Issued"].includes(req.body.status) ? req.body.status : "Draft";
+
+    await pool.query(`
+      UPDATE insurance_reports SET
+        report_date=$1, site_address=$2, bill_no=$3, scenario=$4,
+        reason_attendance=$5, findings=$6, action_taken=$7, cause_condition=$8,
+        pricing_insurance=$9, prepared_by=$10, prepared_role=$11, company_key=$12, company_name=$13,
+        status=$14, updated_by=$15, updated_at=NOW()
+      WHERE id=$16
+    `, [
+      req.body.report_date || new Date().toISOString().slice(0,10),
+      req.body.site_address || "",
+      req.body.bill_no || "",
+      scenario,
+      req.body.reason_attendance || "",
+      req.body.findings || "",
+      req.body.action_taken || "",
+      req.body.cause_condition || "",
+      req.body.pricing_insurance || "",
+      req.body.prepared_by || "Daniel van Her",
+      req.body.prepared_role || "Head of Operations",
+      companyKey,
+      req.body.company_name || selectedCompany.name,
+      status,
+      by,
+      id
+    ]);
+
+    await pool.query(`
+      INSERT INTO insurance_report_audit_log (insurance_report_id, action_type, details, changed_by, created_at)
+      VALUES ($1,'Updated',$2,$3,NOW())
+    `, [id, `Report saved · status ${status}`, by]);
+
+    res.redirect(`/insurance-reports/${id}/edit?saved=1`);
+  } catch (error) {
+    console.error("Insurance report save error:", error);
+    res.status(500).send(`Could not save insurance report: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.get("/insurance-reports/:id/pdf", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const report = (await pool.query(`
+      SELECT r.*, j.job_number, j.customer_name
+      FROM insurance_reports r
+      JOIN jobs j ON j.id=r.job_id
+      WHERE r.id=$1
+    `, [id])).rows[0];
+    if (!report) return res.status(404).send("Insurance report not found");
+
+    const download = req.query.download === "1";
+    const filename = `insurance-report-${String(report.bill_no || report.job_number || id).replace(/[^a-z0-9_-]+/gi,"-")}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `${download ? "attachment" : "inline"}; filename="${filename}"`);
+
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    doc.pipe(res);
+
+    const companyKey = companies[report.company_key] ? report.company_key : "online";
+    const company = companies[companyKey] || companies.online;
+    const logoPath = path.join(__dirname, company.logo);
+
+    // Simple branded header inspired by the supplied template.
+    doc.save();
+    doc.lineWidth(11).strokeColor("#54c6a2").moveTo(0, 55).bezierCurveTo(110, 90, 230, 15, 430, 35).bezierCurveTo(500, 40, 555, 70, 595, 92).stroke();
+    doc.lineWidth(7).strokeColor("#111111").moveTo(0, 72).bezierCurveTo(115, 105, 245, 30, 435, 49).stroke();
+    doc.restore();
+
+    try {
+      doc.image(logoPath, 390, 72, { width: 150 });
+    } catch (_) {
+      doc.font("Helvetica-Bold").fontSize(15).text(company.displayName, 375, 82, { width: 165, align: "right" });
+    }
+
+    let y = 128;
+    doc.fillColor("#111111").font("Helvetica-Bold").fontSize(10)
+      .text(`Date:`, 50, y).font("Helvetica").text(pdfText(report.report_date), 115, y)
+      .font("Helvetica-Bold").text(`Site Address:`, 50, y + 18).font("Helvetica").text(pdfText(report.site_address), 115, y + 18, { width: 420 })
+      .font("Helvetica-Bold").text(`Bill No:`, 50, y + 52).font("Helvetica").text(pdfText(report.bill_no), 115, y + 52);
+
+    y += 88;
+    doc.font("Helvetica-Bold").fontSize(11).text("To Whom It May Concern:", 50, y);
+    y += 28;
+
+    const sections = [
+      report.reason_attendance,
+      report.findings,
+      report.action_taken,
+      report.cause_condition,
+      report.pricing_insurance
+    ].filter(value => String(value || "").trim());
+
+    doc.font("Helvetica").fontSize(10.5);
+    sections.forEach(section => {
+      const clean = pdfText(section);
+      const height = doc.heightOfString(clean, { width: 495, lineGap: 2 });
+      if (y + height > 650) {
+        doc.addPage();
+        y = 60;
+      }
+      doc.text(clean, 50, y, { width: 495, lineGap: 2 });
+      y += height + 18;
+    });
+
+    if (y > 650) {
+      doc.addPage();
+      y = 70;
+    } else {
+      y = Math.max(y + 35, 610);
+    }
+
+    doc.font("Helvetica").fontSize(10)
+      .text("Regards,", 50, y)
+      .text(pdfText(report.prepared_by || "Daniel van Her"), 50, y + 16)
+      .text(pdfText(report.prepared_role || "Head of Operations"), 50, y + 32);
+
+    doc.text(`On behalf of | ${pdfText(report.company_name || company.name)}`, 50, y + 76);
+
+    const footerY = 760;
+    doc.moveTo(0, footerY - 15).lineTo(595, footerY - 15).lineWidth(10).strokeColor("#54c6a2").stroke();
+    doc.fillColor("#4b5563").font("Helvetica").fontSize(8.5)
+      .text(`REG: ${company.reg}`, 50, footerY)
+      .text(`VAT: ${company.vat}`, 50, footerY + 13)
+      .text(`Tel: ${company.tel}`, 235, footerY)
+      .text(company.footer, 370, footerY, { width: 175, align: "right" });
+
+    doc.end();
+
+    await pool.query(`
+      INSERT INTO insurance_report_audit_log (insurance_report_id, action_type, details, changed_by, created_at)
+      VALUES ($1,$2,$3,$4,NOW())
+    `, [id, download ? "PDF downloaded" : "PDF viewed", filename, currentAgentName(req) || "Unknown"]);
+  } catch (error) {
+    console.error("Insurance report PDF error:", error);
+    if (!res.headersSent) res.status(500).send(`Could not generate insurance report PDF: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
 app.get("/invoices/:id/pdf", async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [req.params.id]);
@@ -8782,6 +9175,100 @@ function importedHistoryCard(job) {
 }
 
 
+
+const insuranceReportScenarios = [
+  { value: "faulty_mechanism", label: "Faulty lock / mechanism" },
+  { value: "lost_stolen_keys", label: "Lost / stolen keys" },
+  { value: "burglary_damage", label: "Burglary / forced entry damage" },
+  { value: "internal_lock_failure", label: "Lock failed internally" },
+  { value: "door_mechanism_fault", label: "Door / mechanism fault" },
+  { value: "custom", label: "Other / custom" }
+];
+
+function insuranceScenarioOptions(selected = "faulty_mechanism") {
+  return insuranceReportScenarios.map(item =>
+    `<option value="${escapeHtml(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+  ).join("");
+}
+
+function insuranceScenarioDefaults(scenario, job = {}) {
+  const locksmithName = job.technician_name || "the locksmith";
+  const address = jobAddressPlain(job) || "the above address";
+
+  const defaults = {
+    faulty_mechanism: {
+      reason_attendance: `The locksmith attended ${address} to gain entry and investigate a reported lock fault.`,
+      findings: `On inspection, the locksmith identified that the lock / locking mechanism was not functioning correctly. The lock was preventing the door from opening or closing as expected.`,
+      action_taken: `The locksmith explained the required procedure on site. Where non-destructive entry was not possible, the lock was opened using the method considered necessary by the attending locksmith and a suitable replacement was installed where required.`,
+      cause_condition: `The attending locksmith identified a fault within the lock or associated mechanism. Any statement about the precise cause should reflect the technician's actual findings and evidence from the job.`,
+      pricing_insurance: `The locksmith explained the work and pricing once the required workload had been assessed. Any emergency or out-of-hours premium should reflect the actual booking. Replacement parts were selected to provide a suitable like-for-like or appropriate security replacement where possible.`
+    },
+    lost_stolen_keys: {
+      reason_attendance: `The locksmith attended ${address} after the customer reported that keys had been lost or stolen and access / security was required.`,
+      findings: `The attending locksmith assessed the existing lock and the security risk arising from the missing keys.`,
+      action_taken: `The locksmith completed the work necessary to restore access and / or secure the property. Locks or cylinders were replaced where required.`,
+      cause_condition: `This report records the circumstances reported by the customer and the locksmith's observations on attendance.`,
+      pricing_insurance: `The locksmith explained the required work and pricing on site once the scope had been assessed. Any replacement parts and emergency attendance charges should reflect the actual job record.`
+    },
+    burglary_damage: {
+      reason_attendance: `The locksmith attended ${address} following reported forced entry / burglary-related damage.`,
+      findings: `The attending locksmith inspected the affected door, lock and associated security components and recorded the visible damage relevant to the locksmith works.`,
+      action_taken: `The locksmith carried out the work required to restore access and / or make the property secure, including replacement of damaged locking components where necessary.`,
+      cause_condition: `The report should describe only damage observed by the locksmith and information reported by the customer. It does not determine criminal liability or the wider cause of loss.`,
+      pricing_insurance: `The locksmith explained the necessary emergency work and pricing on site after assessing the damage. Parts and labour reflect the work required to restore security.`
+    },
+    internal_lock_failure: {
+      reason_attendance: `The locksmith attended ${address} because the customer was unable to operate the lock despite having the key.`,
+      findings: `The locksmith identified an internal failure or malfunction affecting the operation of the lock.`,
+      action_taken: `The locksmith gained access using the method required by the condition of the lock and replaced or repaired the failed component where necessary.`,
+      cause_condition: `The report should record the technician's observed fault. Do not state a specific underlying cause unless it was established during attendance.`,
+      pricing_insurance: `The required work and pricing were explained once the fault and workload had been assessed. Replacement parts were selected to restore the lock / door to an appropriate working condition.`
+    },
+    door_mechanism_fault: {
+      reason_attendance: `The locksmith attended ${address} to investigate a door or locking-mechanism fault.`,
+      findings: `Inspection identified a fault affecting the operation of the door, lock or multipoint mechanism.`,
+      action_taken: `The locksmith carried out the repair, adjustment, opening procedure or replacement considered necessary to restore operation and security.`,
+      cause_condition: `The report should reflect the actual defect identified on site and should not attribute a cause that was not observed or established.`,
+      pricing_insurance: `The locksmith explained the required work and pricing after inspection. Labour and parts reflect the work undertaken to restore operation and security.`
+    },
+    custom: {
+      reason_attendance: "",
+      findings: "",
+      action_taken: "",
+      cause_condition: "",
+      pricing_insurance: ""
+    }
+  };
+  return defaults[scenario] || defaults.custom;
+}
+
+
+function insuranceReportCompanyOptions(selected = "online") {
+  return [
+    { value: "online", label: "24H Online Services Ltd" },
+    { value: "locksmiths", label: "24H Locksmiths Ltd" }
+  ].map(item =>
+    `<option value="${item.value}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+  ).join("");
+}
+
+function insuranceReportCompanyFromJob(job = {}, invoice = null) {
+  if (invoice?.company_key && companies[invoice.company_key]) return invoice.company_key;
+
+  const payment = String(job.payment_method || job.expected_payment_method || "").toLowerCase();
+  if (payment.includes("bank transfer")) return "locksmiths";
+  if (payment.includes("card")) return "online";
+
+  // Cash belongs to either company, so do not infer from Cash alone.
+  return "online";
+}
+
+function insuranceReportStatusOptions(selected = "Draft") {
+  return ["Draft", "Ready to issue", "Issued"].map(value =>
+    `<option ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`
+  ).join("");
+}
+
 function jobAddressPlain(job) {
   return [
     job.address_line_1,
@@ -10390,6 +10877,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
       LIMIT 30
     `, [id])).rows;
     const stripeDefaultAmount = stripeOutstandingAmount(job);
+    const insuranceReport = (await pool.query(`
+      SELECT id, status, updated_at
+      FROM insurance_reports
+      WHERE job_id = $1
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `, [id])).rows[0] || null;
 
     const isImportedJob = Boolean(job.is_imported);
     const activityItems = [
@@ -10494,6 +10988,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
               <a class="action-button blue" href="/jobs/${job.id}/summary">Technician summary</a>
               <a class="action-button red" href="/jobs/${job.id}/close">Close / payment</a>
               <a class="action-button orange" href="/disputes/new?job_id=${job.id}">Raise dispute</a>
+              <a class="action-button blue" href="${insuranceReport ? `/insurance-reports/${insuranceReport.id}/edit` : `/jobs/${job.id}/insurance-report/new`}">${insuranceReport ? "Insurance report" : "Create insurance report"}</a>
               <a class="action-button dark" href="/jobs">Back to Dispatch Board</a>
             </div>
           </div>
