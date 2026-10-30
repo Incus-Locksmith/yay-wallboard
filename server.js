@@ -1,4 +1,4 @@
-// YDP Unified master + dated/downloadable daily operations report (v120)
+// YDP Unified master + daily operations date normalisation fix (v121)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -8493,7 +8493,7 @@ app.get("/reports/management", async (req, res) => {
 
         <div class="page-actions">
           <a class="action-button dark" href="/reports">Back to Reports</a>
-          <a class="action-button" href="/reports/daily-operations.pdf?date=${escapeHtml(String(report.report_date).slice(0,10))}">Download Report PDF</a>
+          <a class="action-button" href="/reports/daily-operations.pdf?date=${escapeHtml(normaliseReportDate(report.report_date))}">Download Report PDF</a>
           ${reportPeriodLinks(selectedRange.range).replaceAll('/reports?', '/reports/management?')}
         </div>
 
@@ -8830,9 +8830,41 @@ function dailyReportDateValue(value = null) {
   return dateInputValue(yesterday);
 }
 
+function normaliseReportDate(value) {
+  if (!value) return "";
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const year = value.getUTCFullYear();
+    const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(value.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  const raw = String(value).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+  const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    const year = parsed.getUTCFullYear();
+    const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  return "";
+}
+
 function dailyReportDisplayDate(value) {
-  if (!value) return "—";
-  const date = new Date(`${String(value).slice(0,10)}T12:00:00Z`);
+  const normalised = normaliseReportDate(value);
+  if (!normalised) return "—";
+
+  const [year, month, day] = normalised.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
   return date.toLocaleDateString("en-GB", {
     timeZone: "Europe/London",
     day: "numeric",
@@ -9093,7 +9125,7 @@ app.get("/reports/daily-operations", async (req, res) => {
     `)).rows;
 
     const metricLink = (value, metric) =>
-      `<a href="/reports/daily-operations/jobs?date=${encodeURIComponent(String(report.report_date).slice(0,10))}&metric=${encodeURIComponent(metric)}"><strong>${Number(value || 0)}</strong></a>`;
+      `<a href="/reports/daily-operations/jobs?date=${encodeURIComponent(normaliseReportDate(report.report_date))}&metric=${encodeURIComponent(metric)}"><strong>${Number(value || 0)}</strong></a>`;
 
     res.send(`
       <!DOCTYPE html>
@@ -9112,7 +9144,7 @@ app.get("/reports/daily-operations", async (req, res) => {
           <a class="action-button dark" href="/reports">Back to Reports</a>
           ${currentUserRole(req) === "admin" ? `
             <form method="POST" action="/reports/daily-operations/recalculate" style="display:inline;" onsubmit="return confirm('Recalculate this daily snapshot from the current job records?');">
-              <input type="hidden" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}">
+              <input type="hidden" name="date" value="${escapeHtml(normaliseReportDate(report.report_date))}">
               <button type="submit" class="action-button amber">Recalculate</button>
             </form>
           ` : ""}
@@ -9120,7 +9152,7 @@ app.get("/reports/daily-operations", async (req, res) => {
 
         <div class="panel">
           <form method="GET" action="/reports/daily-operations" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
-            <div><label>Report date</label><input type="date" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}"></div>
+            <div><label>Report date</label><input type="date" name="date" value="${escapeHtml(normaliseReportDate(report.report_date))}"></div>
             <button type="submit">View date</button>
           </form>
           <p class="muted">The date selector can be used for any day represented in the portal, including imported Keys Portal history.</p>
@@ -9153,7 +9185,7 @@ app.get("/reports/daily-operations", async (req, res) => {
             <tbody>
               ${history.map(row => `
                 <tr>
-                  <td><a href="/reports/daily-operations?date=${escapeHtml(String(row.report_date).slice(0,10))}">${escapeHtml(dailyReportDisplayDate(row.report_date))}</a></td>
+                  <td><a href="/reports/daily-operations?date=${escapeHtml(normaliseReportDate(row.report_date))}">${escapeHtml(dailyReportDisplayDate(row.report_date))}</a></td>
                   <td>${Number(row.jobs_booked || 0)}</td>
                   <td>${Number(row.closed_jobs || 0)}</td>
                   <td>${Number(row.cancelled || 0)}</td>
