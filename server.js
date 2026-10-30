@@ -1,4 +1,4 @@
-// YDP Unified master + daily operations date normalisation fix (v121)
+// YDP Unified master + cancellation reporting by technician (v122)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -9067,6 +9067,7 @@ app.get("/reports", async (req, res) => {
 
         <div class="page-actions">
           <a class="action-button" href="/reports/management?range=this_month">Management Report</a>
+          <a class="action-button" href="/reports/cancellations">Cancellation Report</a>
           <a class="action-button amber" href="/reports/jobs.csv?range=this_week">Download jobs CSV</a>
           <a class="action-button dark" href="/reports/invoices.csv">Invoices CSV</a>
           <a class="action-button dark" href="/reports/calls.csv">Calls CSV</a>
@@ -9396,6 +9397,189 @@ app.post("/reports/daily-operations/recalculate", async (req, res) => {
   } catch (error) {
     console.error("Daily operations recalculation error:", error);
     res.status(500).send(`Could not recalculate daily report: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+
+function cancellationReportRange(query = {}) {
+  const nowParts = londonDateParts();
+  const today = makeDate(nowParts.year, nowParts.month, nowParts.day);
+  const defaultFrom = startOfWeekMonday(today);
+  const defaultToExclusive = addDays(defaultFrom, 7);
+
+  const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+  const fromValue = validDate(query.from) ? String(query.from) : dateInputValue(defaultFrom);
+  const toValue = validDate(query.to) ? String(query.to) : dateInputValue(addDays(defaultToExclusive, -1));
+
+  const start = new Date(`${fromValue}T00:00:00Z`);
+  const end = addDays(new Date(`${toValue}T00:00:00Z`), 1);
+
+  return { fromValue, toValue, start, end };
+}
+
+function shortReportDate(value) {
+  const normalised = normaliseReportDate(value);
+  if (!normalised) return "";
+  const [year, month, day] = normalised.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12)).toLocaleDateString("en-GB", {
+    timeZone: "Europe/London",
+    day: "numeric",
+    month: "short",
+    year: "numeric"
+  });
+}
+
+app.get("/reports/cancellations", async (req, res) => {
+  try {
+    const range = cancellationReportRange(req.query);
+
+    const result = await pool.query(`
+      SELECT
+        COALESCE(t.name, 'Unassigned') AS technician_name,
+        t.id AS technician_id,
+        COUNT(*)::int AS total_cancels,
+        COUNT(*) FILTER (WHERE j.status = 'cancelled_onsite')::int AS onsite_cancels,
+        COUNT(*) FILTER (WHERE j.status = 'cancelled_before_arrival')::int AS not_onsite_cancels
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.status IN ('cancelled_onsite', 'cancelled_before_arrival')
+        AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
+        AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
+      GROUP BY COALESCE(t.name, 'Unassigned'), t.id
+      ORDER BY total_cancels DESC, technician_name ASC
+    `, [range.start, range.end]);
+
+    const rows = result.rows;
+    const totalCancels = rows.reduce((sum, row) => sum + Number(row.total_cancels || 0), 0);
+    const totalOnsite = rows.reduce((sum, row) => sum + Number(row.onsite_cancels || 0), 0);
+    const totalNotOnsite = rows.reduce((sum, row) => sum + Number(row.not_onsite_cancels || 0), 0);
+
+    const body = rows.map(row => {
+      const techParam = row.technician_id ? String(row.technician_id) : "unassigned";
+      const detailUrl = `/reports/cancellations/jobs?from=${encodeURIComponent(range.fromValue)}&to=${encodeURIComponent(range.toValue)}&tech=${encodeURIComponent(techParam)}`;
+      return `
+        <tr>
+          <td><strong>${escapeHtml(row.technician_name)}</strong></td>
+          <td><a href="${detailUrl}"><strong>${Number(row.total_cancels || 0)}</strong></a></td>
+          <td><a href="${detailUrl}&type=onsite">${Number(row.onsite_cancels || 0)}</a></td>
+          <td><a href="${detailUrl}&type=not_onsite">${Number(row.not_onsite_cancels || 0)}</a></td>
+        </tr>
+      `;
+    }).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Cancellation Report</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Cancellation Report</h1>
+        <div class="subtitle">Job cancellations by technician, split between cancelled on site and cancelled before arrival / not on site.</div>
+
+        <div class="page-actions">
+          <a class="action-button dark" href="/reports">Back to Reports</a>
+        </div>
+
+        <div class="panel">
+          <form method="GET" action="/reports/cancellations" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+            <div><label>From</label><input type="date" name="from" value="${escapeHtml(range.fromValue)}"></div>
+            <div><label>To</label><input type="date" name="to" value="${escapeHtml(range.toValue)}"></div>
+            <button type="submit">Run report</button>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Job Cancels ${escapeHtml(shortReportDate(range.fromValue))} – ${escapeHtml(shortReportDate(range.toValue))}</h2>
+          <table>
+            <thead>
+              <tr><th>Technician</th><th>Total cancels</th><th>On site</th><th>Not on site</th></tr>
+            </thead>
+            <tbody>
+              ${body || `<tr><td colspan="4" class="muted">No cancelled jobs found for this period.</td></tr>`}
+              <tr>
+                <td><strong>TOTAL</strong></td>
+                <td><strong>${totalCancels}</strong></td>
+                <td><strong>${totalOnsite}</strong></td>
+                <td><strong>${totalNotOnsite}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="muted">Click a number to see the underlying cancelled jobs. Date range uses the job's cancellation/closure timestamp.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Cancellation report error:", error);
+    res.status(500).send(`Cancellation report error: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.get("/reports/cancellations/jobs", async (req, res) => {
+  try {
+    const range = cancellationReportRange(req.query);
+    const tech = String(req.query.tech || "");
+    const type = String(req.query.type || "");
+
+    let statusWhere = `j.status IN ('cancelled_onsite','cancelled_before_arrival')`;
+    if (type === "onsite") statusWhere = `j.status = 'cancelled_onsite'`;
+    if (type === "not_onsite") statusWhere = `j.status = 'cancelled_before_arrival'`;
+
+    const params = [range.start, range.end];
+    let techWhere = "";
+    if (tech === "unassigned") {
+      techWhere = "AND j.assigned_technician_id IS NULL";
+    } else if (/^\d+$/.test(tech)) {
+      params.push(Number(tech));
+      techWhere = `AND j.assigned_technician_id = $${params.length}`;
+    }
+
+    const result = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE ${statusWhere}
+        AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $1
+        AND COALESCE(j.closed_at, j.updated_at, j.created_at) < $2
+        ${techWhere}
+      ORDER BY COALESCE(j.closed_at, j.updated_at, j.created_at) ASC, j.id ASC
+    `, params);
+
+    const rows = result.rows.map(job => `
+      <tr>
+        <td>${escapeHtml(formatDateTime(job.closed_at || job.updated_at || job.created_at))}</td>
+        <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong></a></td>
+        <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+        <td>${escapeHtml(job.customer_name || "-")}</td>
+        <td>${escapeHtml(job.postcode || "-")}</td>
+        <td>${job.status === "cancelled_onsite" ? "On site" : "Not on site"}</td>
+        <td>${job.is_imported ? "Imported" : "Live"}</td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Cancelled Jobs</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Cancelled Jobs</h1>
+        <div class="subtitle">${escapeHtml(shortReportDate(range.fromValue))} – ${escapeHtml(shortReportDate(range.toValue))}</div>
+        <div class="page-actions">
+          <a class="action-button dark" href="/reports/cancellations?from=${escapeHtml(range.fromValue)}&to=${escapeHtml(range.toValue)}">Back to Cancellation Report</a>
+        </div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>Cancelled</th><th>Job</th><th>Technician</th><th>Customer</th><th>Postcode</th><th>Cancel type</th><th>Source</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="7" class="muted">No matching cancelled jobs found.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Cancellation report jobs error:", error);
+    res.status(500).send(`Cancellation report jobs error: ${escapeHtml(error.message || "Unknown error")}`);
   }
 });
 
