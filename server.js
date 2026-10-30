@@ -1,4 +1,4 @@
-// YDP Unified master + dual-company insurance reports (v116)
+// YDP Unified master + automated daily operations report (v117)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3570,6 +3570,26 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS quotations_status_idx ON quotations (status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS quotations_created_at_idx ON quotations (created_at);`);
 
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS daily_operations_reports (
+      id SERIAL PRIMARY KEY,
+      report_date DATE NOT NULL UNIQUE,
+      jobs_booked INTEGER DEFAULT 0,
+      scheduled INTEGER DEFAULT 0,
+      open_jobs INTEGER DEFAULT 0,
+      closed_jobs INTEGER DEFAULT 0,
+      billing INTEGER DEFAULT 0,
+      hold_jobs INTEGER DEFAULT 0,
+      cancelled INTEGER DEFAULT 0,
+      completed INTEGER DEFAULT 0,
+      fantastic_jobs INTEGER DEFAULT 0,
+      account_jobs INTEGER DEFAULT 0,
+      generated_at TIMESTAMP DEFAULT NOW(),
+      generated_by TEXT DEFAULT 'Automatic daily snapshot'
+    );
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_operations_reports_date_unique ON daily_operations_reports (report_date);`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS disputes (
@@ -8801,6 +8821,153 @@ app.get("/reports/detail", async (req, res) => {
   }
 });
 
+
+function dailyReportDateValue(value = null) {
+  if (value && /^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
+  const parts = londonDateParts();
+  const yesterday = addDays(makeDate(parts.year, parts.month, parts.day), -1);
+  return dateInputValue(yesterday);
+}
+
+function dailyReportDisplayDate(value) {
+  if (!value) return "—";
+  const date = new Date(`${String(value).slice(0,10)}T12:00:00Z`);
+  return date.toLocaleDateString("en-GB", {
+    timeZone: "Europe/London",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  });
+}
+
+async function calculateDailyOperationsReport(reportDate) {
+  const date = dailyReportDateValue(reportDate);
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = addDays(start, 1);
+
+  const result = await pool.query(`
+    SELECT
+      COUNT(*)::int AS jobs_booked,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(status, '') = 'scheduled'
+      )::int AS scheduled,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(status, '') IN ('open', 'assigned', 'account_pending_review')
+      )::int AS open_jobs,
+
+      COUNT(*) FILTER (
+        WHERE closed_at IS NOT NULL
+           OR COALESCE(status, '') IN (
+             'closed','fully_paid','fully_paid_private','awaiting_payment',
+             'awaiting_balance','invoiced_account','sent_to_pm','disputed',
+             'cancelled_before_arrival','cancelled_onsite'
+           )
+      )::int AS closed_jobs,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(status, '') = 'invoiced_account'
+      )::int AS billing,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(status, '') = 'sent_to_pm'
+      )::int AS hold_jobs,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(status, '') IN ('cancelled_before_arrival','cancelled_onsite')
+      )::int AS cancelled,
+
+      COUNT(*) FILTER (
+        WHERE (
+          closed_at IS NOT NULL
+          OR COALESCE(status, '') IN (
+            'closed','fully_paid','fully_paid_private','awaiting_payment',
+            'awaiting_balance','invoiced_account','sent_to_pm','disputed'
+          )
+        )
+        AND COALESCE(status, '') NOT IN ('cancelled_before_arrival','cancelled_onsite')
+      )::int AS completed,
+
+      COUNT(*) FILTER (
+        WHERE UPPER(COALESCE(source_campaign, '')) = 'FANTASTIC'
+      )::int AS fantastic_jobs,
+
+      COUNT(*) FILTER (
+        WHERE COALESCE(account_job, FALSE) = TRUE
+          AND UPPER(COALESCE(source_campaign, '')) <> 'FANTASTIC'
+      )::int AS account_jobs
+
+    FROM jobs
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND COALESCE(is_imported, FALSE) = FALSE
+  `, [start, end]);
+
+  return { report_date: date, ...(result.rows[0] || {}) };
+}
+
+async function saveDailyOperationsReport(reportDate, generatedBy = "Automatic daily snapshot", force = false) {
+  const date = dailyReportDateValue(reportDate);
+
+  if (!force) {
+    const existing = (await pool.query(
+      `SELECT * FROM daily_operations_reports WHERE report_date = $1`,
+      [date]
+    )).rows[0];
+    if (existing) return existing;
+  }
+
+  const report = await calculateDailyOperationsReport(date);
+
+  const saved = await pool.query(`
+    INSERT INTO daily_operations_reports (
+      report_date, jobs_booked, scheduled, open_jobs, closed_jobs, billing,
+      hold_jobs, cancelled, completed, fantastic_jobs, account_jobs,
+      generated_at, generated_by
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),$12)
+    ON CONFLICT (report_date) DO UPDATE SET
+      jobs_booked = EXCLUDED.jobs_booked,
+      scheduled = EXCLUDED.scheduled,
+      open_jobs = EXCLUDED.open_jobs,
+      closed_jobs = EXCLUDED.closed_jobs,
+      billing = EXCLUDED.billing,
+      hold_jobs = EXCLUDED.hold_jobs,
+      cancelled = EXCLUDED.cancelled,
+      completed = EXCLUDED.completed,
+      fantastic_jobs = EXCLUDED.fantastic_jobs,
+      account_jobs = EXCLUDED.account_jobs,
+      generated_at = NOW(),
+      generated_by = EXCLUDED.generated_by
+    RETURNING *
+  `, [
+    report.report_date,
+    report.jobs_booked || 0,
+    report.scheduled || 0,
+    report.open_jobs || 0,
+    report.closed_jobs || 0,
+    report.billing || 0,
+    report.hold_jobs || 0,
+    report.cancelled || 0,
+    report.completed || 0,
+    report.fantastic_jobs || 0,
+    report.account_jobs || 0,
+    generatedBy
+  ]);
+
+  return saved.rows[0];
+}
+
+async function ensureYesterdayDailyReport() {
+  try {
+    const date = dailyReportDateValue();
+    await saveDailyOperationsReport(date, "Automatic daily snapshot", false);
+  } catch (error) {
+    console.error("Automatic daily operations report error:", error);
+  }
+}
+
 app.get("/reports", async (req, res) => {
   try {
     const nowParts = londonDateParts();
@@ -8808,7 +8975,8 @@ app.get("/reports", async (req, res) => {
     const weekStart = startOfWeekMonday(today);
     const tomorrow = addDays(today, 1);
 
-    const [paidWeek, awaiting, disputed, chargebacks, refundsAwaitingApproval] = await Promise.all([
+    const dailyReportDate = dailyReportDateValue();
+    const [paidWeek, awaiting, disputed, chargebacks, refundsAwaitingApproval, dailyOps] = await Promise.all([
       pool.query(`
         SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(final_value, 0)), 0)::numeric AS value
         FROM jobs
@@ -8845,7 +9013,8 @@ app.get("/reports", async (req, res) => {
           AND refund_approved_at IS NULL
           AND refund_rejected_at IS NULL
           AND refund_completed_at IS NULL
-      `)
+      `),
+      pool.query(`SELECT * FROM daily_operations_reports WHERE report_date = $1`, [dailyReportDate])
     ]);
 
     const paidRow = paidWeek.rows[0] || {};
@@ -8853,6 +9022,7 @@ app.get("/reports", async (req, res) => {
     const disputedRow = disputed.rows[0] || {};
     const chargebackRow = chargebacks.rows[0] || {};
     const refundApprovalRow = refundsAwaitingApproval.rows[0] || {};
+    const dailyOpsRow = dailyOps.rows[0] || await saveDailyOperationsReport(dailyReportDate, "Generated on Reports view", false);
 
     res.send(`
       <!DOCTYPE html>
@@ -8876,6 +9046,7 @@ app.get("/reports", async (req, res) => {
           ${managementReportCard("Disputed", money(disputedRow.value || 0), `${Number(disputedRow.count || 0)} disputed record${Number(disputedRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=disputed", "")}
           ${managementReportCard("Chargebacks", money(chargebackRow.value || 0), `${Number(chargebackRow.count || 0)} chargeback record${Number(chargebackRow.count || 0) === 1 ? "" : "s"}`, "/reports/detail?type=chargebacks", "")}
           ${managementReportCard("Refunds requiring approval", money(refundApprovalRow.value || 0), `${Number(refundApprovalRow.count || 0)} refund request${Number(refundApprovalRow.count || 0) === 1 ? "" : "s"} waiting for approval`, "/reports/detail?type=refund_approval", "amber")}
+          ${managementReportCard("Daily Operations Report", Number(dailyOpsRow.jobs_booked || 0), `${dailyReportDisplayDate(dailyOpsRow.report_date)} · ${Number(dailyOpsRow.completed || 0)} completed`, `/reports/daily-operations?date=${escapeHtml(String(dailyOpsRow.report_date).slice(0,10))}`, "")}
         </div>
 
         <div class="panel">
@@ -8888,6 +9059,7 @@ app.get("/reports", async (req, res) => {
               <tr><td><strong>Disputed</strong></td><td>Jobs marked disputed or linked to an open dispute case.</td><td>Click to review dispute value, job and technician.</td></tr>
               <tr><td><strong>Chargebacks</strong></td><td>Open dispute records where chargeback has been raised.</td><td>Click to view chargeback cases.</td></tr>
               <tr><td><strong>Refunds requiring approval</strong></td><td>Refunds requested from a dispute that have not yet been approved.</td><td>Click to approve the refund and review 90-day refund patterns by technician and postcode.</td></tr>
+              <tr><td><strong>Daily Operations Report</strong></td><td>Saved snapshot of the previous day's booked, scheduled, open, closed, billing, hold, cancelled, completed, Fantastic and account jobs.</td><td>Generated automatically and available by date.</td></tr>
             </tbody>
           </table>
         </div>
@@ -8897,6 +9069,111 @@ app.get("/reports", async (req, res) => {
   } catch (error) {
     console.error("Reports overview error:", error);
     res.status(500).send(`Reports overview error: ${escapeHtml(error.message)}. Check Render logs.`);
+  }
+});
+
+
+app.get("/reports/daily-operations", async (req, res) => {
+  try {
+    const date = dailyReportDateValue(req.query.date);
+    let report = (await pool.query(
+      `SELECT * FROM daily_operations_reports WHERE report_date=$1`,
+      [date]
+    )).rows[0];
+
+    if (!report) {
+      report = await saveDailyOperationsReport(date, "Generated on first view", false);
+    }
+
+    const history = (await pool.query(`
+      SELECT *
+      FROM daily_operations_reports
+      ORDER BY report_date DESC
+      LIMIT 31
+    `)).rows;
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Daily Operations Report</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>Daily Operations Report</h1>
+        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}.</div>
+
+        <div class="page-actions">
+          <a class="action-button dark" href="/reports">Back to Reports</a>
+          ${currentUserRole(req) === "admin" ? `
+            <form method="POST" action="/reports/daily-operations/recalculate" style="display:inline;" onsubmit="return confirm('Recalculate this daily snapshot from the current job records?');">
+              <input type="hidden" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}">
+              <button type="submit" class="action-button amber">Recalculate</button>
+            </form>
+          ` : ""}
+        </div>
+
+        <div class="panel">
+          <form method="GET" action="/reports/daily-operations" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+            <div><label>Report date</label><input type="date" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}"></div>
+            <button type="submit">View date</button>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>${escapeHtml(dailyReportDisplayDate(report.report_date))}</h2>
+          <table>
+            <tbody>
+              <tr><td><strong>Jobs booked (inc cancelled, scheduled, billing and Hold)</strong></td><td><strong>${Number(report.jobs_booked || 0)}</strong></td></tr>
+              <tr><td>Scheduled</td><td>${Number(report.scheduled || 0)}</td></tr>
+              <tr><td>Open</td><td>${Number(report.open_jobs || 0)}</td></tr>
+              <tr><td>Closed</td><td>${Number(report.closed_jobs || 0)}</td></tr>
+              <tr><td>Billing</td><td>${Number(report.billing || 0)}</td></tr>
+              <tr><td>Hold</td><td>${Number(report.hold_jobs || 0)}</td></tr>
+              <tr><td>Canceled</td><td>${Number(report.cancelled || 0)}</td></tr>
+              <tr><td>Completed</td><td>${Number(report.completed || 0)}</td></tr>
+              <tr><td>Fantastic jobs</td><td>${Number(report.fantastic_jobs || 0)}</td></tr>
+              <tr><td>Account jobs</td><td>${Number(report.account_jobs || 0)}</td></tr>
+            </tbody>
+          </table>
+          <p class="muted">Generated ${escapeHtml(formatDateTime(report.generated_at))} · ${escapeHtml(report.generated_by || "Automatic daily snapshot")}</p>
+        </div>
+
+        <div class="panel">
+          <h2>Recent daily reports</h2>
+          <table>
+            <thead><tr><th>Date</th><th>Booked</th><th>Closed</th><th>Cancelled</th><th>Completed</th><th>Fantastic</th><th>Account</th></tr></thead>
+            <tbody>
+              ${history.map(row => `
+                <tr>
+                  <td><a href="/reports/daily-operations?date=${escapeHtml(String(row.report_date).slice(0,10))}">${escapeHtml(dailyReportDisplayDate(row.report_date))}</a></td>
+                  <td>${Number(row.jobs_booked || 0)}</td>
+                  <td>${Number(row.closed_jobs || 0)}</td>
+                  <td>${Number(row.cancelled || 0)}</td>
+                  <td>${Number(row.completed || 0)}</td>
+                  <td>${Number(row.fantastic_jobs || 0)}</td>
+                  <td>${Number(row.account_jobs || 0)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Daily operations report error:", error);
+    res.status(500).send(`Daily operations report error: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.post("/reports/daily-operations/recalculate", async (req, res) => {
+  try {
+    if (currentUserRole(req) !== "admin") return res.status(403).send("Admin access required.");
+    const date = dailyReportDateValue(req.body.date);
+    await saveDailyOperationsReport(date, currentAgentName(req) || "Admin recalculation", true);
+    res.redirect(`/reports/daily-operations?date=${encodeURIComponent(date)}`);
+  } catch (error) {
+    console.error("Daily operations recalculation error:", error);
+    res.status(500).send(`Could not recalculate daily report: ${escapeHtml(error.message || "Unknown error")}`);
   }
 });
 
@@ -17515,6 +17792,10 @@ initDb()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Keys247 app running on port ${PORT}`);
+
+      // Ensure yesterday's report exists shortly after startup, then re-check periodically.
+      setTimeout(() => ensureYesterdayDailyReport(), 5000);
+      setInterval(() => ensureYesterdayDailyReport(), 15 * 60 * 1000);
     });
   })
   .catch(error => {
