@@ -1,4 +1,4 @@
-// YDP Unified master + automated daily operations drilldown report (v118)
+// YDP Unified master + daily operations including imported history (v119)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -8901,7 +8901,6 @@ async function calculateDailyOperationsReport(reportDate) {
     FROM jobs
     WHERE created_at >= $1
       AND created_at < $2
-      AND COALESCE(is_imported, FALSE) = FALSE
   `, [start, end]);
 
   return { report_date: date, ...(result.rows[0] || {}) };
@@ -9102,7 +9101,7 @@ app.get("/reports/daily-operations", async (req, res) => {
       <body>
         ${nav(req)}
         <h1>Daily Operations Report</h1>
-        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}. You can view any date held in the portal.</div>
+        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}. Live and imported jobs are included.</div>
 
         <div class="page-actions">
           <a class="action-button dark" href="/reports">Back to Reports</a>
@@ -9119,7 +9118,7 @@ app.get("/reports/daily-operations", async (req, res) => {
             <div><label>Report date</label><input type="date" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}"></div>
             <button type="submit">View date</button>
           </form>
-          <p class="muted">The date selector can be used for any day that has live job data in this portal. Imported historic Keys Portal jobs remain excluded from this operational report.</p>
+          <p class="muted">The date selector can be used for any day represented in the portal, including imported Keys Portal history.</p>
         </div>
 
         <div class="panel">
@@ -9198,7 +9197,6 @@ app.get("/reports/daily-operations/jobs", async (req, res) => {
       LEFT JOIN technicians t ON t.id = j.assigned_technician_id
       WHERE j.created_at >= $1
         AND j.created_at < $2
-        AND COALESCE(j.is_imported, FALSE) = FALSE
         AND ${config.where}
       ORDER BY j.created_at ASC, j.id ASC
     `, [start, end]);
@@ -9212,6 +9210,7 @@ app.get("/reports/daily-operations/jobs", async (req, res) => {
         <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
         <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
         <td>${escapeHtml(job.source_campaign || "-")}</td>
+        <td>${job.is_imported ? '<span class="pill">Imported</span>' : 'Live'}</td>
       </tr>
     `).join("");
 
@@ -9236,8 +9235,8 @@ app.get("/reports/daily-operations/jobs", async (req, res) => {
 
         <div class="panel">
           <table>
-            <thead><tr><th>Booked</th><th>Job</th><th>Customer</th><th>Postcode</th><th>Technician</th><th>Status</th><th>Campaign</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="7" class="muted">No jobs found for this metric.</td></tr>`}</tbody>
+            <thead><tr><th>Booked</th><th>Job</th><th>Customer</th><th>Postcode</th><th>Technician</th><th>Status</th><th>Campaign</th><th>Source</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="8" class="muted">No jobs found for this metric.</td></tr>`}</tbody>
           </table>
         </div>
       </body>
