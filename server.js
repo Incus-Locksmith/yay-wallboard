@@ -1,4 +1,4 @@
-// YDP Unified master + daily operations including imported history (v119)
+// YDP Unified master + dated/downloadable daily operations report (v120)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -8493,6 +8493,7 @@ app.get("/reports/management", async (req, res) => {
 
         <div class="page-actions">
           <a class="action-button dark" href="/reports">Back to Reports</a>
+          <a class="action-button" href="/reports/daily-operations.pdf?date=${escapeHtml(String(report.report_date).slice(0,10))}">Download Report PDF</a>
           ${reportPeriodLinks(selectedRange.range).replaceAll('/reports?', '/reports/management?')}
         </div>
 
@@ -9101,7 +9102,11 @@ app.get("/reports/daily-operations", async (req, res) => {
       <body>
         ${nav(req)}
         <h1>Daily Operations Report</h1>
-        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}. Live and imported jobs are included.</div>
+        <div class="subtitle">Live and imported jobs are included.</div>
+        <div class="panel" style="margin-top:14px;">
+          <div class="muted">REPORT DATE</div>
+          <div class="big-total">${escapeHtml(dailyReportDisplayDate(report.report_date))}</div>
+        </div>
 
         <div class="page-actions">
           <a class="action-button dark" href="/reports">Back to Reports</a>
@@ -9245,6 +9250,108 @@ app.get("/reports/daily-operations/jobs", async (req, res) => {
   } catch (error) {
     console.error("Daily operations jobs drilldown error:", error);
     res.status(500).send(`Could not load daily operations jobs: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+
+app.get("/reports/daily-operations.pdf", async (req, res) => {
+  try {
+    const date = dailyReportDateValue(req.query.date);
+    let report = (await pool.query(
+      `SELECT * FROM daily_operations_reports WHERE report_date=$1`,
+      [date]
+    )).rows[0];
+
+    if (!report) {
+      report = await saveDailyOperationsReport(date, "Generated for PDF download", false);
+    }
+
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const filename = `daily-operations-report-${date}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    doc.pipe(res);
+
+    doc.font("Helvetica-Bold").fontSize(22).text("Daily Operations Report", { align: "center" });
+    doc.moveDown(0.4);
+    doc.font("Helvetica").fontSize(10).text("24H Online Services / Locksmith Operations", { align: "center" });
+
+    doc.moveDown(1.2);
+    doc.roundedRect(50, doc.y, 495, 62, 8).stroke();
+    const dateBoxY = doc.y + 14;
+    doc.font("Helvetica").fontSize(9).text("REPORT DATE", 70, dateBoxY);
+    doc.font("Helvetica-Bold").fontSize(17).text(
+      dailyReportDisplayDate(report.report_date),
+      70,
+      dateBoxY + 18,
+      { width: 455 }
+    );
+
+    doc.y = dateBoxY + 72;
+    doc.font("Helvetica").fontSize(10);
+
+    const rows = [
+      ["Jobs booked (inc cancelled, scheduled, billing and Hold)", report.jobs_booked],
+      ["Scheduled", report.scheduled],
+      ["Open", report.open_jobs],
+      ["Closed", report.closed_jobs],
+      ["Billing", report.billing],
+      ["Hold", report.hold_jobs],
+      ["Canceled", report.cancelled],
+      ["Completed", report.completed],
+      ["Fantastic jobs", report.fantastic_jobs],
+      ["Account jobs", report.account_jobs]
+    ];
+
+    const tableX = 70;
+    const labelWidth = 355;
+    const valueWidth = 90;
+    const rowHeight = 28;
+
+    rows.forEach(([label, value], index) => {
+      const y = doc.y;
+      if (y + rowHeight > 760) {
+        doc.addPage();
+        doc.y = 60;
+      }
+
+      if (index === 0) doc.font("Helvetica-Bold");
+      else doc.font("Helvetica");
+
+      doc.rect(tableX, doc.y, labelWidth, rowHeight).stroke();
+      doc.rect(tableX + labelWidth, doc.y, valueWidth, rowHeight).stroke();
+
+      doc.fontSize(10).text(String(label), tableX + 10, doc.y + 8, {
+        width: labelWidth - 20,
+        height: rowHeight - 10
+      });
+
+      doc.font("Helvetica-Bold").fontSize(11).text(
+        String(Number(value || 0)),
+        tableX + labelWidth,
+        doc.y + 8,
+        { width: valueWidth, align: "center" }
+      );
+
+      doc.y = y + rowHeight;
+    });
+
+    doc.moveDown(1.4);
+    doc.font("Helvetica").fontSize(9).text(
+      `Generated: ${formatDateTime(report.generated_at)} | Source: ${report.generated_by || "Automatic daily snapshot"}`
+    );
+    doc.moveDown(0.5);
+    doc.text("This report includes live and imported Keys Portal jobs held in the portal for the selected date.");
+
+    doc.end();
+  } catch (error) {
+    console.error("Daily operations PDF error:", error);
+    if (!res.headersSent) {
+      res.status(500).send(`Could not create Daily Operations PDF: ${escapeHtml(error.message || "Unknown error")}`);
+    } else {
+      res.end();
+    }
   }
 });
 
