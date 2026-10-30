@@ -1,4 +1,4 @@
-// YDP Unified master + automated daily operations report (v117)
+// YDP Unified master + automated daily operations drilldown report (v118)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -9089,8 +9089,11 @@ app.get("/reports/daily-operations", async (req, res) => {
       SELECT *
       FROM daily_operations_reports
       ORDER BY report_date DESC
-      LIMIT 31
+      LIMIT 365
     `)).rows;
+
+    const metricLink = (value, metric) =>
+      `<a href="/reports/daily-operations/jobs?date=${encodeURIComponent(String(report.report_date).slice(0,10))}&metric=${encodeURIComponent(metric)}"><strong>${Number(value || 0)}</strong></a>`;
 
     res.send(`
       <!DOCTYPE html>
@@ -9099,7 +9102,7 @@ app.get("/reports/daily-operations", async (req, res) => {
       <body>
         ${nav(req)}
         <h1>Daily Operations Report</h1>
-        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}.</div>
+        <div class="subtitle">Saved daily snapshot for ${escapeHtml(dailyReportDisplayDate(report.report_date))}. You can view any date held in the portal.</div>
 
         <div class="page-actions">
           <a class="action-button dark" href="/reports">Back to Reports</a>
@@ -9116,24 +9119,26 @@ app.get("/reports/daily-operations", async (req, res) => {
             <div><label>Report date</label><input type="date" name="date" value="${escapeHtml(String(report.report_date).slice(0,10))}"></div>
             <button type="submit">View date</button>
           </form>
+          <p class="muted">The date selector can be used for any day that has live job data in this portal. Imported historic Keys Portal jobs remain excluded from this operational report.</p>
         </div>
 
         <div class="panel">
           <h2>${escapeHtml(dailyReportDisplayDate(report.report_date))}</h2>
           <table>
             <tbody>
-              <tr><td><strong>Jobs booked (inc cancelled, scheduled, billing and Hold)</strong></td><td><strong>${Number(report.jobs_booked || 0)}</strong></td></tr>
-              <tr><td>Scheduled</td><td>${Number(report.scheduled || 0)}</td></tr>
-              <tr><td>Open</td><td>${Number(report.open_jobs || 0)}</td></tr>
-              <tr><td>Closed</td><td>${Number(report.closed_jobs || 0)}</td></tr>
-              <tr><td>Billing</td><td>${Number(report.billing || 0)}</td></tr>
-              <tr><td>Hold</td><td>${Number(report.hold_jobs || 0)}</td></tr>
-              <tr><td>Canceled</td><td>${Number(report.cancelled || 0)}</td></tr>
-              <tr><td>Completed</td><td>${Number(report.completed || 0)}</td></tr>
-              <tr><td>Fantastic jobs</td><td>${Number(report.fantastic_jobs || 0)}</td></tr>
-              <tr><td>Account jobs</td><td>${Number(report.account_jobs || 0)}</td></tr>
+              <tr><td><strong>Jobs booked (inc cancelled, scheduled, billing and Hold)</strong></td><td>${metricLink(report.jobs_booked, "booked")}</td></tr>
+              <tr><td>Scheduled</td><td>${metricLink(report.scheduled, "scheduled")}</td></tr>
+              <tr><td>Open</td><td>${metricLink(report.open_jobs, "open")}</td></tr>
+              <tr><td>Closed</td><td>${metricLink(report.closed_jobs, "closed")}</td></tr>
+              <tr><td>Billing</td><td>${metricLink(report.billing, "billing")}</td></tr>
+              <tr><td>Hold</td><td>${metricLink(report.hold_jobs, "hold")}</td></tr>
+              <tr><td>Canceled</td><td>${metricLink(report.cancelled, "cancelled")}</td></tr>
+              <tr><td>Completed</td><td>${metricLink(report.completed, "completed")}</td></tr>
+              <tr><td>Fantastic jobs</td><td>${metricLink(report.fantastic_jobs, "fantastic")}</td></tr>
+              <tr><td>Account jobs</td><td>${metricLink(report.account_jobs, "account")}</td></tr>
             </tbody>
           </table>
+          <p class="muted">Click any number to see the jobs behind it. If Open is not zero, review those jobs before finalising the report.</p>
           <p class="muted">Generated ${escapeHtml(formatDateTime(report.generated_at))} · ${escapeHtml(report.generated_by || "Automatic daily snapshot")}</p>
         </div>
 
@@ -9162,6 +9167,85 @@ app.get("/reports/daily-operations", async (req, res) => {
   } catch (error) {
     console.error("Daily operations report error:", error);
     res.status(500).send(`Daily operations report error: ${escapeHtml(error.message || "Unknown error")}`);
+  }
+});
+
+app.get("/reports/daily-operations/jobs", async (req, res) => {
+  try {
+    const date = dailyReportDateValue(req.query.date);
+    const metric = String(req.query.metric || "open").toLowerCase();
+    const start = new Date(`${date}T00:00:00Z`);
+    const end = addDays(start, 1);
+
+    const metricMap = {
+      booked: { title: "Jobs booked", where: "TRUE" },
+      scheduled: { title: "Scheduled", where: "COALESCE(j.status,'') = 'scheduled'" },
+      open: { title: "Open", where: "COALESCE(j.status,'') IN ('open','assigned','account_pending_review')" },
+      closed: { title: "Closed", where: `(j.closed_at IS NOT NULL OR COALESCE(j.status,'') IN ('closed','fully_paid','fully_paid_private','awaiting_payment','awaiting_balance','invoiced_account','sent_to_pm','disputed','cancelled_before_arrival','cancelled_onsite'))` },
+      billing: { title: "Billing", where: "COALESCE(j.status,'') = 'invoiced_account'" },
+      hold: { title: "Hold", where: "COALESCE(j.status,'') = 'sent_to_pm'" },
+      cancelled: { title: "Canceled", where: "COALESCE(j.status,'') IN ('cancelled_before_arrival','cancelled_onsite')" },
+      completed: { title: "Completed", where: `((j.closed_at IS NOT NULL OR COALESCE(j.status,'') IN ('closed','fully_paid','fully_paid_private','awaiting_payment','awaiting_balance','invoiced_account','sent_to_pm','disputed')) AND COALESCE(j.status,'') NOT IN ('cancelled_before_arrival','cancelled_onsite'))` },
+      fantastic: { title: "Fantastic jobs", where: "UPPER(COALESCE(j.source_campaign,'')) = 'FANTASTIC'" },
+      account: { title: "Account jobs", where: "COALESCE(j.account_job,FALSE) = TRUE AND UPPER(COALESCE(j.source_campaign,'')) <> 'FANTASTIC'" }
+    };
+
+    const config = metricMap[metric] || metricMap.open;
+
+    const result = await pool.query(`
+      SELECT j.*, t.name AS technician_name
+      FROM jobs j
+      LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+      WHERE j.created_at >= $1
+        AND j.created_at < $2
+        AND COALESCE(j.is_imported, FALSE) = FALSE
+        AND ${config.where}
+      ORDER BY j.created_at ASC, j.id ASC
+    `, [start, end]);
+
+    const rows = result.rows.map(job => `
+      <tr>
+        <td>${escapeHtml(formatDateTime(job.created_at))}</td>
+        <td><a href="/jobs/${job.id}/edit"><strong>${escapeHtml(job.job_number || jobNumber(job.id))}</strong></a></td>
+        <td>${escapeHtml(job.customer_name || "-")}</td>
+        <td>${escapeHtml(job.postcode || "-")}</td>
+        <td>${escapeHtml(job.technician_name || "Unassigned")}</td>
+        <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span></td>
+        <td>${escapeHtml(job.source_campaign || "-")}</td>
+      </tr>
+    `).join("");
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>${escapeHtml(config.title)} · Daily Operations</title><style>${sharedStyles()}</style></head>
+      <body>
+        ${nav(req)}
+        <h1>${escapeHtml(config.title)} · ${escapeHtml(dailyReportDisplayDate(date))}</h1>
+        <div class="subtitle">${result.rows.length} job${result.rows.length === 1 ? "" : "s"} behind this figure.</div>
+
+        <div class="page-actions">
+          <a class="action-button dark" href="/reports/daily-operations?date=${escapeHtml(date)}">Back to Daily Report</a>
+        </div>
+
+        ${metric === "open" && result.rows.length ? `
+          <div class="panel">
+            <strong>Action required:</strong> these jobs are still open. Click the job number, update or close it, then return to the daily report and use <strong>Recalculate</strong>.
+          </div>
+        ` : ""}
+
+        <div class="panel">
+          <table>
+            <thead><tr><th>Booked</th><th>Job</th><th>Customer</th><th>Postcode</th><th>Technician</th><th>Status</th><th>Campaign</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="7" class="muted">No jobs found for this metric.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Daily operations jobs drilldown error:", error);
+    res.status(500).send(`Could not load daily operations jobs: ${escapeHtml(error.message || "Unknown error")}`);
   }
 });
 
