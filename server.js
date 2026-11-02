@@ -1,4 +1,4 @@
-// YDP Unified master + technician £10k performance dashboard (v131)
+// YDP Unified master + bilingual Romanian technician £10k streak dashboard (v132)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14629,25 +14629,25 @@ app.get('/tech-workspace/:token', async (req, res) => {
         <div class="panel" style="border-left:6px solid #16a34a;">
           <div class="job-head">
             <div>
-              <h2 style="margin:0;">Your £10,000 run</h2>
-              <div class="job-sub">From ${escapeHtml(formatDate(performance.startValue))} to today. At £10,000 your percentage changes from 30% to 20%.</div>
+              <h2 style="margin:0;">Your £10,000 run<br><span class="job-sub">Perioada ta de £10.000</span></h2>
+              <div class="job-sub">From ${escapeHtml(formatDate(performance.startValue))} to today. At £10,000 your percentage changes from 30% to 20%.<br><span class="job-sub">De la ${escapeHtml(formatDate(performance.startValue))} până astăzi. La £10.000, procentul tău se schimbă de la 30% la 20%.</span></div>
             </div>
-            <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached' : 'In progress'}</span>
+            <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached / £10k atins' : 'In progress / În desfășurare'}</span>
           </div>
           <div class="summary-grid" style="margin-top:14px;">
-            <div class="metric"><div class="label">Income as at today</div><div class="value">${money(performance.income)}</div></div>
-            <div class="metric"><div class="label">Avg £ per job</div><div class="value">${money(performance.avgPerJob)}</div></div>
-            <div class="metric"><div class="label">Forecast jobs to £10,000</div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
-            <div class="metric"><div class="label">Total materials used</div><div class="value">${money(performance.materials)}</div></div>
+            <div class="metric"><div class="label">Income as at today<br><span class="job-sub">Venit până astăzi</span></div><div class="value">${money(performance.income)}</div></div>
+            <div class="metric"><div class="label">Avg £ per job<br><span class="job-sub">Media £ per lucrare</span></div><div class="value">${money(performance.avgPerJob)}</div></div>
+            <div class="metric"><div class="label">Forecast jobs to £10,000<br><span class="job-sub">Lucrări estimate până la £10.000</span></div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
+            <div class="metric"><div class="label">Total materials used<br><span class="job-sub">Total materiale folosite</span></div><div class="value">${money(performance.materials)}</div></div>
           </div>
           <table style="margin-top:14px;">
             <tbody>
-              <tr><td>Number of jobs (cancelled / hold / closed)</td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
-              <tr><td>Number of jobs cancelled onsite</td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
-              <tr><td>Number of jobs disputed (including resolved)</td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
-              <tr><td>Number of disputed jobs that led to a refund</td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
-              <tr><td>Number of jobs with a chargeback</td><td>${techPerformanceLink(token, 'chargeback', 'Chargebacks', performance.chargebacks.length)}</td></tr>
-              <tr><td>Number of recalls from your jobs</td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
+              <tr><td>Number of jobs (cancelled / hold / closed)<br><span class="job-sub">Număr lucrări (anulate / în așteptare / închise)</span></td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
+              <tr><td>Number of jobs cancelled onsite<br><span class="job-sub">Lucrări anulate la locație</span></td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
+              <tr><td>Number of jobs disputed (including resolved)<br><span class="job-sub">Lucrări contestate (inclusiv rezolvate)</span></td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
+              <tr><td>Number of disputed jobs that led to a refund<br><span class="job-sub">Lucrări contestate care au dus la rambursare</span></td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
+              <tr><td>Number of jobs with a chargeback<br><span class="job-sub">Lucrări cu chargeback</span></td><td>${techPerformanceLink(token, 'chargeback', 'Chargebacks', performance.chargebacks.length)}</td></tr>
+              <tr><td>Number of recalls from your jobs<br><span class="job-sub">Reveniri / recall din lucrările tale</span></td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -17153,9 +17153,9 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <div>
-              <label>£10k run start date</label>
+              <label>£10k 30-day streak start date</label>
               <input type="date" name="performance_run_start_date" value="${escapeHtml(dateInputValue(tech.performance_run_start_date))}">
-              <div class="help">Start date for this technician's current consecutive-day £10,000 performance run.</div>
+              <div class="help">Start date for this technician's current 30-day £10,000 streak. Weekly payroll does not reset this streak.</div>
             </div>
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
