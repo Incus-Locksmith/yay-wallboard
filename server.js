@@ -1,4 +1,4 @@
-// YDP Unified master + team-access Job Count Report from wallboard (v124)
+// YDP Unified master + WhatsApp-ready Job Count Report (v125)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -9133,6 +9133,20 @@ app.get("/reports/daily-operations", async (req, res) => {
     const metricLink = (value, metric) =>
       `<a href="/reports/daily-operations/jobs?date=${encodeURIComponent(normaliseReportDate(report.report_date))}&metric=${encodeURIComponent(metric)}"><strong>${Number(value || 0)}</strong></a>`;
 
+    const whatsappJobCountMessage = [
+      `Date: ${dailyReportDisplayDate(report.report_date)}`,
+      `Jobs booked (inc canceled, scheduled, billing and Hold): ${Number(report.jobs_booked || 0)}`,
+      `Scheduled: ${Number(report.scheduled || 0)}`,
+      `Open: ${Number(report.open_jobs || 0)}`,
+      `Closed: ${Number(report.closed_jobs || 0)}`,
+      `Billing: ${Number(report.billing || 0)}`,
+      `Hold: ${Number(report.hold_jobs || 0)}`,
+      `Canceled: ${Number(report.cancelled || 0)}`,
+      `Completed: ${Number(report.completed || 0)}`,
+      `Fantastic jobs: ${Number(report.fantastic_jobs || 0)}`,
+      `Account jobs: ${Number(report.account_jobs || 0)}`
+    ].join("\n");
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -9164,6 +9178,36 @@ app.get("/reports/daily-operations", async (req, res) => {
           </form>
           <p class="muted">The date selector can be used for any day represented in the portal, including imported Keys Portal history.</p>
         </div>
+
+        <div class="panel">
+          <h2>WhatsApp message</h2>
+          <textarea id="whatsappJobCountReport" readonly style="width:100%;min-height:245px;font-family:inherit;white-space:pre-wrap;">${escapeHtml(whatsappJobCountMessage)}</textarea>
+          <div class="page-actions" style="margin-top:10px;">
+            <button type="button" onclick="copyJobCountReport()">Copy WhatsApp Message</button>
+          </div>
+          <div id="copyJobCountStatus" class="muted"></div>
+        </div>
+
+        <script>
+          async function copyJobCountReport() {
+            const box = document.getElementById("whatsappJobCountReport");
+            const status = document.getElementById("copyJobCountStatus");
+            try {
+              if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(box.value);
+              } else {
+                box.focus();
+                box.select();
+                document.execCommand("copy");
+              }
+              status.textContent = "Copied — ready to paste into WhatsApp.";
+            } catch (error) {
+              box.focus();
+              box.select();
+              status.textContent = "Select the text above and copy it manually.";
+            }
+          }
+        </script>
 
         <div class="panel">
           <h2>${escapeHtml(dailyReportDisplayDate(report.report_date))}</h2>
