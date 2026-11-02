@@ -1,4 +1,4 @@
-// YDP Unified master + Yay SMS confirm flow fix (v127)
+// YDP Unified master + Chromebook responsive layout fix (v128)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10131,6 +10131,146 @@ app.get("/api/account-requests/pending", async (req, res) => {
   }
 });
 
+
+function chromebookResponsiveStyles() {
+  return `
+    <style>
+      /* Chromebook / smaller laptop layout only */
+      @media (max-width: 1366px) and (min-width: 901px) {
+        body {
+          overflow-x: hidden;
+        }
+
+        .app-shell,
+        .layout,
+        .main-layout,
+        .page-shell {
+          min-width: 0 !important;
+          width: 100% !important;
+        }
+
+        aside,
+        .sidebar,
+        .side-nav {
+          width: 230px !important;
+          min-width: 230px !important;
+        }
+
+        main,
+        .main,
+        .main-content,
+        .content {
+          min-width: 0 !important;
+          width: auto !important;
+        }
+
+        .container,
+        .page,
+        .page-content,
+        .content-wrap {
+          max-width: none !important;
+          min-width: 0 !important;
+        }
+
+        .filter-row,
+        .filters,
+        .filter-bar,
+        .jobs-filters {
+          display: grid !important;
+          grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(135px, 1fr)) auto !important;
+          gap: 10px !important;
+          align-items: center !important;
+        }
+
+        .filter-row input,
+        .filter-row select,
+        .filters input,
+        .filters select,
+        .filter-bar input,
+        .filter-bar select,
+        .jobs-filters input,
+        .jobs-filters select {
+          min-width: 0 !important;
+          width: 100% !important;
+        }
+
+        .dispatch-grid,
+        .jobs-layout,
+        .orders-layout {
+          grid-template-columns: minmax(0, 1fr) 300px !important;
+          gap: 18px !important;
+        }
+
+        .panel,
+        .card {
+          min-width: 0 !important;
+        }
+
+        .table-wrap,
+        .table-scroll,
+        .orders-table-wrap {
+          overflow-x: auto !important;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        table {
+          max-width: 100% !important;
+        }
+
+        .technician-availability,
+        .tech-availability,
+        .availability-pills {
+          gap: 6px !important;
+        }
+
+        .tech-pill,
+        .availability-pill {
+          font-size: 12px !important;
+          padding: 7px 9px !important;
+        }
+
+        .metric-grid {
+          gap: 10px !important;
+        }
+
+        .metric-card {
+          min-width: 0 !important;
+        }
+      }
+
+      /* Narrower Chromebooks / resized browser windows */
+      @media (max-width: 1100px) and (min-width: 701px) {
+        aside,
+        .sidebar,
+        .side-nav {
+          width: 205px !important;
+          min-width: 205px !important;
+        }
+
+        .filter-row,
+        .filters,
+        .filter-bar,
+        .jobs-filters {
+          grid-template-columns: 1fr 1fr 1fr !important;
+        }
+
+        .dispatch-grid,
+        .jobs-layout,
+        .orders-layout {
+          grid-template-columns: 1fr !important;
+        }
+
+        .control-panel,
+        .today-control-panel,
+        .right-panel {
+          width: 100% !important;
+          max-width: none !important;
+        }
+      }
+    </style>
+  `;
+}
+
 app.get("/jobs", async (req, res) => {
   try {
     const isAdmin = currentUserRole(req) === "admin";
@@ -10467,7 +10607,7 @@ app.get("/jobs", async (req, res) => {
       <head>
         <title>Dispatch Board</title>
         <style>
-          ${sharedStyles()}
+          ${sharedStyles()}${chromebookResponsiveStyles()}
           .dispatch-board {
             width: 100%;
             max-width: 1680px;
