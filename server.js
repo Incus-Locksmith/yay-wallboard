@@ -1,4 +1,4 @@
-// YDP Unified master + bilingual Romanian technician £10k streak dashboard (v132)
+// YDP Unified master + technician Work Record page with weekly closings (v134)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14133,6 +14133,7 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
     <div class="tabs">
       <a class="tab ${active === 'jobs' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}">Active jobs</a>
       <a class="tab ${active === 'disputes' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/disputes">${escapeHtml(disputeLabel)}</a>
+      <a class="tab ${active === 'record' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/work-record">Your Work Record<br><span style="font-size:11px;">Evidența ta de lucru</span></a>
       <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
       <a class="tab" href="/tech-checkin/${escapeHtml(token)}">Status check-in</a>
       <a class="tab" href="/tech-workspace/${escapeHtml(token)}/logout">Lock dashboard</a>
@@ -14424,6 +14425,17 @@ async function technicianPerformanceData(tech) {
   const forecastJobs = income >= 10000 ? 0 : (avgPerJob > 0 ? Math.ceil(remaining / avgPerJob) : null);
   const materials = jobs.reduce((sum, j) => sum + Number(j.materials_cost || 0), 0);
 
+  const streakStart = new Date(`${startValue}T00:00:00`);
+  const streakEnd = new Date(streakStart);
+  streakEnd.setDate(streakEnd.getDate() + 29);
+
+  const todayStart = new Date();
+  todayStart.setHours(0,0,0,0);
+
+  const elapsedMs = todayStart.getTime() - streakStart.getTime();
+  const dayOfStreak = Math.min(30, Math.max(1, Math.floor(elapsedMs / 86400000) + 1));
+  const streakComplete = todayStart > streakEnd;
+
   const countableStatuses = new Set([
     'closed','fully_paid','fully_paid_private','awaiting_payment','awaiting_balance',
     'invoiced_account','sent_to_pm','disputed','cancelled_before_arrival','cancelled_onsite'
@@ -14468,6 +14480,9 @@ async function technicianPerformanceData(tech) {
 
   return {
     startValue,
+    streakEnd,
+    dayOfStreak,
+    streakComplete,
     income,
     avgPerJob,
     forecastJobs,
@@ -14537,7 +14552,6 @@ app.get('/tech-workspace/:token', async (req, res) => {
     }
 
     const openDisputes = await getOpenDisputesForTechnician(tech);
-    const performance = await technicianPerformanceData(tech);
     const disputeNotice = openDisputes.length ? `
       <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
         <h2 style="margin-top:0;">Dispute alert</h2>
@@ -14626,31 +14640,6 @@ app.get('/tech-workspace/:token', async (req, res) => {
       <div class="wrap">
         ${technicianWorkspaceTabs(token, 'jobs', openDisputes.length)}
         ${disputeNotice}
-        <div class="panel" style="border-left:6px solid #16a34a;">
-          <div class="job-head">
-            <div>
-              <h2 style="margin:0;">Your £10,000 run<br><span class="job-sub">Perioada ta de £10.000</span></h2>
-              <div class="job-sub">From ${escapeHtml(formatDate(performance.startValue))} to today. At £10,000 your percentage changes from 30% to 20%.<br><span class="job-sub">De la ${escapeHtml(formatDate(performance.startValue))} până astăzi. La £10.000, procentul tău se schimbă de la 30% la 20%.</span></div>
-            </div>
-            <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached / £10k atins' : 'In progress / În desfășurare'}</span>
-          </div>
-          <div class="summary-grid" style="margin-top:14px;">
-            <div class="metric"><div class="label">Income as at today<br><span class="job-sub">Venit până astăzi</span></div><div class="value">${money(performance.income)}</div></div>
-            <div class="metric"><div class="label">Avg £ per job<br><span class="job-sub">Media £ per lucrare</span></div><div class="value">${money(performance.avgPerJob)}</div></div>
-            <div class="metric"><div class="label">Forecast jobs to £10,000<br><span class="job-sub">Lucrări estimate până la £10.000</span></div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
-            <div class="metric"><div class="label">Total materials used<br><span class="job-sub">Total materiale folosite</span></div><div class="value">${money(performance.materials)}</div></div>
-          </div>
-          <table style="margin-top:14px;">
-            <tbody>
-              <tr><td>Number of jobs (cancelled / hold / closed)<br><span class="job-sub">Număr lucrări (anulate / în așteptare / închise)</span></td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
-              <tr><td>Number of jobs cancelled onsite<br><span class="job-sub">Lucrări anulate la locație</span></td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
-              <tr><td>Number of jobs disputed (including resolved)<br><span class="job-sub">Lucrări contestate (inclusiv rezolvate)</span></td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
-              <tr><td>Number of disputed jobs that led to a refund<br><span class="job-sub">Lucrări contestate care au dus la rambursare</span></td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
-              <tr><td>Number of jobs with a chargeback<br><span class="job-sub">Lucrări cu chargeback</span></td><td>${techPerformanceLink(token, 'chargeback', 'Chargebacks', performance.chargebacks.length)}</td></tr>
-              <tr><td>Number of recalls from your jobs<br><span class="job-sub">Reveniri / recall din lucrările tale</span></td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
-            </tbody>
-          </table>
-        </div>
         <h1>Your active jobs</h1>
         <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}">
           <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Postcode">
@@ -14671,6 +14660,238 @@ app.get('/tech-workspace/:token', async (req, res) => {
 
 
 
+
+
+function startOfMondayWeek(dateValue) {
+  const date = new Date(dateValue);
+  date.setHours(0,0,0,0);
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - day + 1);
+  return date;
+}
+
+async function technicianWeeklyClosingHistory(tech, weeks = 8) {
+  const today = new Date();
+  const currentWeekStart = startOfMondayWeek(today);
+  const firstWeekStart = new Date(currentWeekStart);
+  firstWeekStart.setDate(firstWeekStart.getDate() - ((weeks - 1) * 7));
+
+  const rows = (await pool.query(`
+    SELECT j.*
+    FROM jobs j
+    WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (
+      SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)
+    ))
+      AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= $3
+      AND COALESCE(j.status,'') IN (
+        'closed','fully_paid','fully_paid_private','awaiting_payment',
+        'awaiting_balance','invoiced_account','sent_to_pm','disputed',
+        'cancelled_before_arrival','cancelled_onsite'
+      )
+    ORDER BY COALESCE(j.closed_at, j.updated_at, j.created_at) ASC
+  `, [tech.id, tech.name, firstWeekStart])).rows;
+
+  const buckets = [];
+  for (let i = 0; i < weeks; i += 1) {
+    const start = new Date(firstWeekStart);
+    start.setDate(firstWeekStart.getDate() + (i * 7));
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    end.setHours(23,59,59,999);
+
+    const weekRows = rows.filter(job => {
+      const stamp = new Date(job.closed_at || job.updated_at || job.created_at);
+      return stamp >= start && stamp <= end;
+    });
+
+    const cancelledRows = weekRows.filter(job =>
+      ['cancelled_before_arrival','cancelled_onsite'].includes(String(job.status || ''))
+    );
+    const closedRows = weekRows.filter(job =>
+      !['cancelled_before_arrival','cancelled_onsite'].includes(String(job.status || ''))
+    );
+    const onsiteCancelled = cancelledRows.filter(job => job.status === 'cancelled_onsite');
+
+    buckets.push({
+      start,
+      end,
+      closings: closedRows.length,
+      cancelled: cancelledRows.length,
+      onsiteCancelled: onsiteCancelled.length,
+      income: closedRows.reduce((sum, job) => sum + Number(job.final_value || 0), 0),
+      materials: weekRows.reduce((sum, job) => sum + Number(job.materials_cost || 0), 0)
+    });
+  }
+
+  return buckets.reverse();
+}
+
+app.get('/tech-workspace/:token/work-record', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
+    const performance = await technicianPerformanceData(tech);
+    const weekly = await technicianWeeklyClosingHistory(tech, 8);
+
+    const weeklyRows = weekly.map(week => {
+      const weekStart = dateInputValue(week.start);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(formatDate(week.start))} – ${escapeHtml(formatDate(week.end))}</strong></td>
+          <td><a href="/tech-workspace/${escapeHtml(token)}/work-record/week?start=${escapeHtml(weekStart)}"><strong>${week.closings}</strong></a></td>
+          <td>${week.cancelled}</td>
+          <td>${week.onsiteCancelled}</td>
+          <td class="money">${money(week.income)}</td>
+          <td class="money">${money(week.materials)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Work record / Evidență</div>
+      </div>
+
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'record', openDisputeCount)}
+
+        <h1>Your Work Record</h1>
+        <div class="job-sub" style="margin-bottom:18px;">Evidența ta de lucru</div>
+
+        <div class="panel" style="border-left:6px solid #16a34a;">
+          <div class="job-head">
+            <div>
+              <h2 style="margin:0;">30-Day £10,000 Period<br><span class="job-sub">Perioadă consecutivă de 30 de zile pentru £10.000</span></h2>
+              <div class="job-sub">
+                ${escapeHtml(formatDate(performance.startValue))} – ${escapeHtml(formatDate(performance.streakEnd))} · Day ${performance.dayOfStreak} of 30
+                <br><span class="job-sub">${escapeHtml(formatDate(performance.startValue))} – ${escapeHtml(formatDate(performance.streakEnd))} · Ziua ${performance.dayOfStreak} din 30</span>
+                <br>At £10,000 your percentage changes from 30% to 20%.
+                <br><span class="job-sub">La £10.000, procentul tău se schimbă de la 30% la 20%.</span>
+              </div>
+            </div>
+            <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached / £10k atins' : 'In progress / În desfășurare'}</span>
+          </div>
+
+          <div class="summary-grid" style="margin-top:14px;">
+            <div class="metric"><div class="label">Running total to today<br><span class="job-sub">Total acumulat până astăzi</span></div><div class="value">${money(performance.income)}</div></div>
+            <div class="metric"><div class="label">Avg £ per job<br><span class="job-sub">Media £ per lucrare</span></div><div class="value">${money(performance.avgPerJob)}</div></div>
+            <div class="metric"><div class="label">Forecast jobs to £10,000<br><span class="job-sub">Lucrări estimate până la £10.000</span></div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
+            <div class="metric"><div class="label">30-day progress<br><span class="job-sub">Progres în perioada de 30 de zile</span></div><div class="value">${performance.dayOfStreak}/30</div></div>
+            <div class="metric"><div class="label">Total materials used<br><span class="job-sub">Total materiale folosite</span></div><div class="value">${money(performance.materials)}</div></div>
+          </div>
+
+          <table style="margin-top:14px;">
+            <tbody>
+              <tr><td>Number of jobs (cancelled / hold / closed)<br><span class="job-sub">Număr lucrări (anulate / în așteptare / închise)</span></td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
+              <tr><td>Number of jobs cancelled onsite<br><span class="job-sub">Lucrări anulate la locație</span></td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
+              <tr><td>Number of jobs disputed (including resolved)<br><span class="job-sub">Lucrări contestate (inclusiv rezolvate)</span></td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
+              <tr><td>Number of disputed jobs that led to a refund<br><span class="job-sub">Lucrări contestate care au dus la rambursare</span></td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
+              <tr><td>Number of jobs with a chargeback<br><span class="job-sub">Lucrări cu chargeback</span></td><td>${techPerformanceLink(token, 'chargeback', 'Chargebacks', performance.chargebacks.length)}</td></tr>
+              <tr><td>Number of recalls from your jobs<br><span class="job-sub">Reveniri / recall din lucrările tale</span></td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <h2>Week-to-week closings</h2>
+          <div class="job-sub">Închideri săptămână de săptămână</div>
+          <p class="job-sub">Last 8 Monday–Sunday weeks. Weekly payroll does not reset the 30-day £10,000 period.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>Week</th>
+                <th>Closings</th>
+                <th>Cancelled</th>
+                <th>Cancelled onsite</th>
+                <th>Income</th>
+                <th>Materials</th>
+              </tr>
+            </thead>
+            <tbody>${weeklyRows || `<tr><td colspan="6">No closing history yet.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Your Work Record', body));
+  } catch (error) {
+    console.error('Technician work record error:', error);
+    res.status(500).send('Could not load your work record. Check Render logs.');
+  }
+});
+
+app.get('/tech-workspace/:token/work-record/week', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+
+    const startValue = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || ''))
+      ? String(req.query.start)
+      : dateInputValue(startOfMondayWeek(new Date()));
+
+    const start = new Date(`${startValue}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    end.setHours(23,59,59,999);
+
+    const rows = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (
+        SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)
+      ))
+        AND COALESCE(j.closed_at, j.updated_at, j.created_at) BETWEEN $3 AND $4
+        AND COALESCE(j.status,'') IN (
+          'closed','fully_paid','fully_paid_private','awaiting_payment',
+          'awaiting_balance','invoiced_account','sent_to_pm','disputed',
+          'cancelled_before_arrival','cancelled_onsite'
+        )
+      ORDER BY COALESCE(j.closed_at, j.updated_at, j.created_at) DESC
+    `, [tech.id, tech.name, start, end])).rows;
+
+    const bodyRows = rows.map(job => `
+      <tr>
+        <td>${escapeHtml(job.job_number || jobNumber(job.id))}</td>
+        <td>${escapeHtml(job.postcode || '—')}</td>
+        <td>${escapeHtml(jobStatusLabel(job.status))}</td>
+        <td class="money">${money(job.final_value || 0)}</td>
+        <td class="money">${money(job.materials_cost || 0)}</td>
+        <td>${formatDateTime(job.closed_at || job.updated_at || job.created_at)}</td>
+      </tr>
+    `).join('');
+
+    res.send(technicianPortalShell('Weekly Closings', `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Weekly closings</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'record', (await getOpenDisputesForTechnician(tech)).length)}
+        <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/work-record">Back to Work Record</a>
+        <h1>${escapeHtml(formatDate(start))} – ${escapeHtml(formatDate(end))}</h1>
+        <div class="job-sub">Weekly closing detail / Detalii închideri săptămânale</div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>Job</th><th>Postcode</th><th>Status</th><th>Income</th><th>Materials</th><th>Closed/Updated</th></tr></thead>
+            <tbody>${bodyRows || `<tr><td colspan="6">No jobs for this week.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `));
+  } catch (error) {
+    console.error('Weekly closings detail error:', error);
+    res.status(500).send('Could not load weekly closing detail. Check Render logs.');
+  }
+});
 
 app.get('/tech-workspace/:token/performance/jobs', async (req, res) => {
   try {
@@ -14707,7 +14928,7 @@ app.get('/tech-workspace/:token/performance/jobs', async (req, res) => {
         <div class="topbar"><div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div><div class="live">● Performance</div></div>
         <div class="wrap">
           ${technicianWorkspaceTabs(token, 'jobs', (await getOpenDisputesForTechnician(tech)).length)}
-          <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to workspace</a>
+          <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/work-record">Back to Work Record</a>
           <h1>${escapeHtml(title)}</h1>
           <div class="panel">
             <table><thead><tr><th>Job</th><th>Postcode</th><th>Customer</th><th>Dispute status</th><th>Value</th></tr></thead>
@@ -14736,7 +14957,7 @@ app.get('/tech-workspace/:token/performance/jobs', async (req, res) => {
       <div class="topbar"><div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div><div class="live">● Performance</div></div>
       <div class="wrap">
         ${technicianWorkspaceTabs(token, 'jobs', (await getOpenDisputesForTechnician(tech)).length)}
-        <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to workspace</a>
+        <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/work-record">Back to Work Record</a>
         <h1>${escapeHtml(title)}</h1>
         <div class="panel">
           <table><thead><tr><th>Job</th><th>Postcode</th><th>Customer</th><th>Status</th><th>Income</th><th>Materials</th><th>Date</th></tr></thead>
@@ -17153,9 +17374,9 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <div>
-              <label>£10k 30-day streak start date</label>
+              <label>£10k 30-day period start date</label>
               <input type="date" name="performance_run_start_date" value="${escapeHtml(dateInputValue(tech.performance_run_start_date))}">
-              <div class="help">Start date for this technician's current 30-day £10,000 streak. Weekly payroll does not reset this streak.</div>
+              <div class="help">Start date for this technician's current consecutive 30-day £10,000 period. Weekly payroll does not reset this period.</div>
             </div>
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
