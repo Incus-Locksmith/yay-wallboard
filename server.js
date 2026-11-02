@@ -1,4 +1,4 @@
-// YDP Unified master + cancellation reporting by technician (v122)
+// YDP Unified master + team-access Job Count Report from wallboard (v124)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -348,10 +348,12 @@ function requirePortalPermissions(req, res, next) {
     `);
   }
 
-  if (path.startsWith("/reports") && !["manager", "admin"].includes(role)) {
+  const isTeamJobCountReport = path.startsWith("/reports/daily-operations");
+
+  if (path.startsWith("/reports") && !isTeamJobCountReport && !["manager", "admin"].includes(role)) {
     return res.status(403).send(`
       <!DOCTYPE html><html><head><title>Reporting access required</title><style>${sharedStyles()}</style></head>
-      <body>${nav(req)}<h1>Reporting access required</h1><div class="panel"><p>Reports are available to Manager and Admin users.</p><a class="button" href="/call-wallboard">Back to portal</a></div></body></html>
+      <body>${nav(req)}<h1>Reporting access required</h1><div class="panel"><p>Reports are available to Manager and Admin users.</p><p>The Daily Job Count Report is available to all logged-in team members from the Call Wallboard.</p><a class="button" href="/call-wallboard">Back to portal</a></div></body></html>
     `);
   }
 
@@ -5118,6 +5120,8 @@ app.get("/call-wallboard", async (req, res) => {
           .live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);margin-left:8px}
           .portal-link{position:fixed;right:16px;bottom:14px;z-index:20;background:rgba(4,19,34,.82);color:#a9c1da;border:1px solid rgba(148,163,184,.2);padding:8px 11px;border-radius:10px;text-decoration:none;font-size:11px;opacity:.45;transition:.2s}
           .portal-link:hover{opacity:1;color:white}
+          .job-count-link{position:fixed;right:16px;bottom:54px;z-index:21;background:#16a34a;color:white;border:1px solid rgba(255,255,255,.24);padding:10px 14px;border-radius:10px;text-decoration:none;font-size:12px;font-weight:900;box-shadow:0 8px 24px rgba(0,0,0,.28);transition:.2s}
+          .job-count-link:hover{background:#22c55e;color:white;transform:translateY(-1px)}
           .kpis{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
           .kpi{background:linear-gradient(180deg,rgba(12,39,66,.96),rgba(7,29,50,.96));border:1px solid var(--line);border-radius:15px;padding:12px 12px;min-width:0;box-shadow:0 12px 30px rgba(0,0,0,.16)}
           .kpi-label{color:#c1d0df;font-size:12px;font-weight:800;white-space:nowrap}
@@ -5221,6 +5225,7 @@ app.get("/call-wallboard", async (req, res) => {
             </div>
           </section>
         </main>
+        <a class="job-count-link" href="/reports/daily-operations">Job Count Report</a>
         <a class="portal-link" href="/jobs">Back to Portal</a>
 
         <script>
@@ -9131,10 +9136,10 @@ app.get("/reports/daily-operations", async (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html>
-      <head><title>Daily Operations Report</title><style>${sharedStyles()}</style></head>
+      <head><title>Job Count Report</title><style>${sharedStyles()}</style></head>
       <body>
         ${nav(req)}
-        <h1>Daily Operations Report</h1>
+        <h1>Job Count Report</h1>
         <div class="subtitle">Live and imported jobs are included.</div>
         <div class="panel" style="margin-top:14px;">
           <div class="muted">REPORT DATE</div>
@@ -9142,7 +9147,8 @@ app.get("/reports/daily-operations", async (req, res) => {
         </div>
 
         <div class="page-actions">
-          <a class="action-button dark" href="/reports">Back to Reports</a>
+          <a class="action-button dark" href="/call-wallboard">Back to Wallboard</a>
+          ${["manager", "admin"].includes(currentUserRole(req)) ? `<a class="action-button dark" href="/reports">All Reports</a>` : ""}
           ${currentUserRole(req) === "admin" ? `
             <form method="POST" action="/reports/daily-operations/recalculate" style="display:inline;" onsubmit="return confirm('Recalculate this daily snapshot from the current job records?');">
               <input type="hidden" name="date" value="${escapeHtml(normaliseReportDate(report.report_date))}">
@@ -9262,7 +9268,8 @@ app.get("/reports/daily-operations/jobs", async (req, res) => {
         <div class="subtitle">${result.rows.length} job${result.rows.length === 1 ? "" : "s"} behind this figure.</div>
 
         <div class="page-actions">
-          <a class="action-button dark" href="/reports/daily-operations?date=${escapeHtml(date)}">Back to Daily Report</a>
+          <a class="action-button dark" href="/reports/daily-operations?date=${escapeHtml(date)}">Back to Job Count Report</a>
+          <a class="action-button dark" href="/call-wallboard">Wallboard</a>
         </div>
 
         ${metric === "open" && result.rows.length ? `
@@ -9454,6 +9461,21 @@ app.get("/reports/cancellations", async (req, res) => {
     const totalOnsite = rows.reduce((sum, row) => sum + Number(row.onsite_cancels || 0), 0);
     const totalNotOnsite = rows.reduce((sum, row) => sum + Number(row.not_onsite_cancels || 0), 0);
 
+    const whatsappLines = [
+      `Job Cancels ${shortReportDate(range.fromValue)} – ${shortReportDate(range.toValue)}`,
+      "",
+      ...rows.map(row => {
+        const total = Number(row.total_cancels || 0);
+        const onsite = Number(row.onsite_cancels || 0);
+        const notOnsite = Number(row.not_onsite_cancels || 0);
+        const cancelWord = total === 1 ? "cancel" : "cancels";
+        return `${row.technician_name} – ${total} ${cancelWord}: ${onsite} on site, ${notOnsite} not on site`;
+      }),
+      "",
+      `TOTAL – ${totalCancels} ${totalCancels === 1 ? "cancel" : "cancels"}: ${totalOnsite} on site, ${totalNotOnsite} not on site`
+    ];
+    const whatsappMessage = whatsappLines.join("\n");
+
     const body = rows.map(row => {
       const techParam = row.technician_id ? String(row.technician_id) : "unassigned";
       const detailUrl = `/reports/cancellations/jobs?from=${encodeURIComponent(range.fromValue)}&to=${encodeURIComponent(range.toValue)}&tech=${encodeURIComponent(techParam)}`;
@@ -9487,6 +9509,36 @@ app.get("/reports/cancellations", async (req, res) => {
             <button type="submit">Run report</button>
           </form>
         </div>
+
+        <div class="panel">
+          <h2>WhatsApp message</h2>
+          <textarea id="whatsappCancelReport" readonly style="width:100%;min-height:260px;font-family:inherit;white-space:pre-wrap;">${escapeHtml(whatsappMessage)}</textarea>
+          <div class="page-actions" style="margin-top:10px;">
+            <button type="button" onclick="copyCancellationReport()">Copy WhatsApp Message</button>
+          </div>
+          <div id="copyCancelStatus" class="muted"></div>
+        </div>
+
+        <script>
+          async function copyCancellationReport() {
+            const box = document.getElementById("whatsappCancelReport");
+            const status = document.getElementById("copyCancelStatus");
+            try {
+              if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(box.value);
+              } else {
+                box.focus();
+                box.select();
+                document.execCommand("copy");
+              }
+              status.textContent = "Copied — ready to paste into WhatsApp.";
+            } catch (error) {
+              box.focus();
+              box.select();
+              status.textContent = "Select the text above and copy it manually.";
+            }
+          }
+        </script>
 
         <div class="panel">
           <h2>Job Cancels ${escapeHtml(shortReportDate(range.fromValue))} – ${escapeHtml(shortReportDate(range.toValue))}</h2>
