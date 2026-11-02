@@ -1,4 +1,4 @@
-// YDP Unified master + compact Recent Jobs strip on Dispatch Board (v126)
+// YDP Unified master + Yay SMS confirm flow fix (v127)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -1790,30 +1790,48 @@ async function sendYaySms(to, message, campaignName = "Portal SMS") {
   }
 
   const recipient = normaliseYaySmsRecipient(to);
-  const sendOn = yayFutureSendOn(2);
+  if (!/^\+[1-9]\d{7,14}$/.test(recipient)) {
+    throw new Error(`Invalid SMS recipient after normalisation: ${recipient || "blank"}`);
+  }
 
-  // Yay's campaign confirm endpoint has returned 404 for a newly-created draft campaign in live testing.
-  // To avoid creating a draft that cannot be confirmed, create the campaign as non-draft so Yay queues it directly.
-  // send_on still has to be in the future, so we use a safe fifteen-minute buffer.
+  // Yay requires a campaign to be created, then confirmed before it is queued for sending.
+  // Keep send_on a few minutes ahead to avoid provider clock-boundary rejection.
+  const sendOn = yayFutureSendOn(5);
   const payload = {
     campaign_name: campaignName,
     message_content: message,
     caller_id_uuid: String(process.env.YAY_SMS_CALLER_ID_UUID || "").trim(),
     send_on: sendOn,
-    is_draft: false,
+    is_draft: true,
     recipients: [{ phone_number: recipient }]
   };
 
   const created = await yayApiRequest("POST", "/voip/text-message/campaign", payload);
-  const campaignUuid = created.json?.result?.uuid || created.json?.uuid || "";
+  const campaignUuid = String(
+    created.json?.result?.uuid ||
+    created.json?.result?.campaign_uuid ||
+    created.json?.uuid ||
+    created.json?.campaign_uuid ||
+    ""
+  ).trim();
+
+  if (!campaignUuid) {
+    throw new Error(`Yay created the SMS campaign but returned no campaign UUID: ${created.text || "empty response"}`);
+  }
+
+  const confirmed = await yayApiRequest(
+    "POST",
+    `/voip/text-message/campaign/${encodeURIComponent(campaignUuid)}/confirm`
+  );
 
   return {
     status: "queued",
     providerResponse: JSON.stringify({
       send_on: sendOn,
       campaign_uuid: campaignUuid,
-      note: "Created with is_draft=false so Yay queues the campaign directly.",
-      created: created.json || created.text
+      recipient,
+      created: created.json || created.text,
+      confirmed: confirmed.json || confirmed.text
     }).slice(0, 1600)
   };
 }
@@ -12328,7 +12346,10 @@ app.post("/jobs/:id/send-sms", async (req, res) => {
     `, [id, to, smsType, template.name, message, status, providerResponse, currentAgentName(req) || "Unknown"]);
 
     await addJobAuditEntry(id, "sms_sent", "SMS", "—", `${template.name} to ${to}: ${status}`, currentAgentName(req) || "Unknown");
-    res.redirect(`/jobs/${id}/edit#sms-card`);
+    if (status === "failed" || status === "not_sent") {
+      return res.redirect(`/jobs/${id}/edit?sms_error=1#sms-card`);
+    }
+    res.redirect(`/jobs/${id}/edit?sms_sent=1#sms-card`);
   } catch (error) {
     console.error("Send SMS route error:", error);
     res.status(500).send("Could not send/log SMS. Check Render logs.");
