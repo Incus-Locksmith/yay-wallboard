@@ -1,4 +1,4 @@
-// YDP Unified master + Chromebook full-width dispatch layout (v130)
+// YDP Unified master + technician £10k performance dashboard (v131)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -2952,6 +2952,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS return_to_work_date DATE;`);
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS performance_run_start_date DATE;`);
   const techPinRows = (await pool.query(`SELECT id FROM technicians WHERE technician_pin IS NULL OR technician_pin = ''`)).rows;
   for (const row of techPinRows) {
     await pool.query(`UPDATE technicians SET technician_pin = $1 WHERE id = $2`, [makeTechnicianPin(), row.id]);
@@ -14141,6 +14142,7 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
 
 
 async function ensureTechnicianWorkspaceSchema() {
+  await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS performance_run_start_date DATE;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS checkin_token TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS technician_pin TEXT;`);
   await pool.query(`ALTER TABLE technicians ADD COLUMN IF NOT EXISTS return_to_work_date DATE;`);
@@ -14389,6 +14391,101 @@ app.get('/tech-workspace/:token/logout', async (req, res) => {
   res.redirect(`/tech-workspace/${encodeURIComponent(req.params.token)}`);
 });
 
+
+function technicianRunStartDate(tech) {
+  if (tech && tech.performance_run_start_date) {
+    const value = dateInputValue(tech.performance_run_start_date);
+    if (value) return value;
+  }
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+async function technicianPerformanceData(tech) {
+  const startValue = technicianRunStartDate(tech);
+  const start = new Date(`${startValue}T00:00:00`);
+  const end = new Date();
+  end.setHours(23,59,59,999);
+
+  const jobMatch = `(j.assigned_technician_id = $1 OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)))`;
+
+  const jobs = (await pool.query(`
+    SELECT j.*
+    FROM jobs j
+    WHERE ${jobMatch}
+      AND COALESCE(j.closed_at, j.updated_at, j.created_at) BETWEEN $3 AND $4
+  `, [tech.id, tech.name, start, end])).rows;
+
+  const incomeStatuses = new Set(['closed','fully_paid','fully_paid_private','awaiting_payment','awaiting_balance','invoiced_account','sent_to_pm','disputed']);
+  const incomeJobs = jobs.filter(j => incomeStatuses.has(String(j.status || '')) && Number(j.final_value || 0) > 0);
+  const income = incomeJobs.reduce((sum, j) => sum + Number(j.final_value || 0), 0);
+  const avgPerJob = incomeJobs.length ? income / incomeJobs.length : 0;
+  const remaining = Math.max(0, 10000 - income);
+  const forecastJobs = income >= 10000 ? 0 : (avgPerJob > 0 ? Math.ceil(remaining / avgPerJob) : null);
+  const materials = jobs.reduce((sum, j) => sum + Number(j.materials_cost || 0), 0);
+
+  const countableStatuses = new Set([
+    'closed','fully_paid','fully_paid_private','awaiting_payment','awaiting_balance',
+    'invoiced_account','sent_to_pm','disputed','cancelled_before_arrival','cancelled_onsite'
+  ]);
+  const countedJobs = jobs.filter(j => countableStatuses.has(String(j.status || '')));
+  const onsiteCancels = jobs.filter(j => j.status === 'cancelled_onsite');
+
+  const disputes = (await pool.query(`
+    SELECT DISTINCT d.*, j.job_number, j.postcode, j.customer_name, j.assigned_technician_id
+    FROM disputes d
+    LEFT JOIN jobs j ON j.id = d.job_id
+    WHERE (
+      d.technician_id = $1
+      OR j.assigned_technician_id = $1
+      OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2))
+    )
+      AND COALESCE(d.created_at, j.created_at) BETWEEN $3 AND $4
+  `, [tech.id, tech.name, start, end])).rows;
+
+  const refundedDisputes = disputes.filter(d =>
+    d.refund_completed_at ||
+    Number(d.refund_amount || 0) > 0 ||
+    String(d.resolution_type || '') === 'partial_refund' ||
+    ['refund_agreed','refund_paperwork_raised','refund_processed'].includes(String(d.status || ''))
+  );
+  const chargebacks = disputes.filter(d => d.chargeback === true || String(d.status || '') === 'chargeback_raised');
+
+  const recalls = (await pool.query(`
+    SELECT j.*
+    FROM jobs j
+    WHERE (
+      UPPER(COALESCE(j.source_campaign,'')) = 'RECALL'
+      OR UPPER(COALESCE(j.job_type,'')) LIKE 'RECALL%'
+    )
+      AND (
+        LOWER(COALESCE(j.original_technician_name,'')) = LOWER($1)
+        OR j.assigned_technician_id = $2
+        OR j.assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($1))
+      )
+      AND COALESCE(j.created_at, j.updated_at) BETWEEN $3 AND $4
+  `, [tech.name, tech.id, start, end])).rows;
+
+  return {
+    startValue,
+    income,
+    avgPerJob,
+    forecastJobs,
+    materials,
+    countedJobs,
+    onsiteCancels,
+    disputes,
+    refundedDisputes,
+    chargebacks,
+    recalls,
+    incomeJobs
+  };
+}
+
+function techPerformanceLink(token, metric, label, count) {
+  return `<a href="/tech-workspace/${escapeHtml(token)}/performance/jobs?metric=${encodeURIComponent(metric)}"><strong>${escapeHtml(String(count))}</strong></a>`;
+}
+
 app.get('/tech-workspace/:token', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
@@ -14440,6 +14537,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
     }
 
     const openDisputes = await getOpenDisputesForTechnician(tech);
+    const performance = await technicianPerformanceData(tech);
     const disputeNotice = openDisputes.length ? `
       <div class="panel" style="border-left:6px solid #f97316;background:#fff7ed;">
         <h2 style="margin-top:0;">Dispute alert</h2>
@@ -14528,6 +14626,31 @@ app.get('/tech-workspace/:token', async (req, res) => {
       <div class="wrap">
         ${technicianWorkspaceTabs(token, 'jobs', openDisputes.length)}
         ${disputeNotice}
+        <div class="panel" style="border-left:6px solid #16a34a;">
+          <div class="job-head">
+            <div>
+              <h2 style="margin:0;">Your £10,000 run</h2>
+              <div class="job-sub">From ${escapeHtml(formatDate(performance.startValue))} to today. At £10,000 your percentage changes from 30% to 20%.</div>
+            </div>
+            <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached' : 'In progress'}</span>
+          </div>
+          <div class="summary-grid" style="margin-top:14px;">
+            <div class="metric"><div class="label">Income as at today</div><div class="value">${money(performance.income)}</div></div>
+            <div class="metric"><div class="label">Avg £ per job</div><div class="value">${money(performance.avgPerJob)}</div></div>
+            <div class="metric"><div class="label">Forecast jobs to £10,000</div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
+            <div class="metric"><div class="label">Total materials used</div><div class="value">${money(performance.materials)}</div></div>
+          </div>
+          <table style="margin-top:14px;">
+            <tbody>
+              <tr><td>Number of jobs (cancelled / hold / closed)</td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
+              <tr><td>Number of jobs cancelled onsite</td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
+              <tr><td>Number of jobs disputed (including resolved)</td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
+              <tr><td>Number of disputed jobs that led to a refund</td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
+              <tr><td>Number of jobs with a chargeback</td><td>${techPerformanceLink(token, 'chargeback', 'Chargebacks', performance.chargebacks.length)}</td></tr>
+              <tr><td>Number of recalls from your jobs</td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
+            </tbody>
+          </table>
+        </div>
         <h1>Your active jobs</h1>
         <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}">
           <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Postcode">
@@ -14547,6 +14670,85 @@ app.get('/tech-workspace/:token', async (req, res) => {
 });
 
 
+
+
+app.get('/tech-workspace/:token/performance/jobs', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+
+    const performance = await technicianPerformanceData(tech);
+    const metric = String(req.query.metric || 'jobs');
+    let title = 'Jobs';
+    let rows = [];
+
+    if (metric === 'cancelled_onsite') {
+      title = 'Cancelled onsite';
+      rows = performance.onsiteCancels;
+    } else if (metric === 'recall') {
+      title = 'Recalls from your jobs';
+      rows = performance.recalls;
+    } else if (metric === 'disputed' || metric === 'refund' || metric === 'chargeback') {
+      const disputeRows = metric === 'refund' ? performance.refundedDisputes : metric === 'chargeback' ? performance.chargebacks : performance.disputes;
+      title = metric === 'refund' ? 'Disputes that led to a refund' : metric === 'chargeback' ? 'Jobs with a chargeback' : 'Disputed jobs';
+      const body = disputeRows.map(d => `
+        <tr>
+          <td>${escapeHtml(d.job_number || (d.job_id ? jobNumber(d.job_id) : `Dispute ${d.id}`))}</td>
+          <td>${escapeHtml(d.postcode || '—')}</td>
+          <td>${escapeHtml(d.customer_name || '—')}</td>
+          <td>${escapeHtml(disputeStatusLabel(d.status))}</td>
+          <td>${money(d.refund_amount || d.disputed_amount || 0)}</td>
+        </tr>
+      `).join('');
+      return res.send(technicianPortalShell(title, `
+        <div class="topbar"><div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div><div class="live">● Performance</div></div>
+        <div class="wrap">
+          ${technicianWorkspaceTabs(token, 'jobs', (await getOpenDisputesForTechnician(tech)).length)}
+          <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to workspace</a>
+          <h1>${escapeHtml(title)}</h1>
+          <div class="panel">
+            <table><thead><tr><th>Job</th><th>Postcode</th><th>Customer</th><th>Dispute status</th><th>Value</th></tr></thead>
+            <tbody>${body || `<tr><td colspan="5">No records in this run.</td></tr>`}</tbody></table>
+          </div>
+        </div>
+      `));
+    } else {
+      title = 'Jobs (cancelled / hold / closed)';
+      rows = performance.countedJobs;
+    }
+
+    const body = rows.map(job => `
+      <tr>
+        <td>${escapeHtml(job.job_number || jobNumber(job.id))}</td>
+        <td>${escapeHtml(job.postcode || '—')}</td>
+        <td>${escapeHtml(job.customer_name || '—')}</td>
+        <td>${escapeHtml(jobStatusLabel(job.status))}</td>
+        <td>${money(job.final_value || 0)}</td>
+        <td>${money(job.materials_cost || 0)}</td>
+        <td>${formatDateTime(job.closed_at || job.updated_at || job.created_at)}</td>
+      </tr>
+    `).join('');
+
+    res.send(technicianPortalShell(title, `
+      <div class="topbar"><div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div><div class="live">● Performance</div></div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs', (await getOpenDisputesForTechnician(tech)).length)}
+        <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Back to workspace</a>
+        <h1>${escapeHtml(title)}</h1>
+        <div class="panel">
+          <table><thead><tr><th>Job</th><th>Postcode</th><th>Customer</th><th>Status</th><th>Income</th><th>Materials</th><th>Date</th></tr></thead>
+          <tbody>${body || `<tr><td colspan="7">No jobs in this run.</td></tr>`}</tbody></table>
+        </div>
+      </div>
+    `));
+  } catch (error) {
+    console.error('Technician performance drilldown error:', error);
+    res.status(500).send('Could not load technician performance jobs. Check Render logs.');
+  }
+});
 
 app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
   const token = req.params.token;
@@ -16950,6 +17152,11 @@ app.get("/technicians/edit", async (req, res) => {
             </label>
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
+            <div>
+              <label>£10k run start date</label>
+              <input type="date" name="performance_run_start_date" value="${escapeHtml(dateInputValue(tech.performance_run_start_date))}">
+              <div class="help">Start date for this technician's current consecutive-day £10,000 performance run.</div>
+            </div>
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
             <textarea name="notes" placeholder="Notes">${escapeHtml(tech.notes)}</textarea>
@@ -16971,7 +17178,7 @@ app.get("/technicians/edit", async (req, res) => {
 app.post("/technicians/save", async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
-    const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, return_to_work_date, skills, notes } = req.body;
+    const { id, name, phone, base_postcode, current_postcode, status, priority, available_from, return_to_work_date, performance_run_start_date, skills, notes } = req.body;
     const isSubcontractor = req.body.is_subcontractor === "1" || req.body.is_subcontractor === "on";
     const technicianPin = String(req.body.technician_pin || '').replace(/\D/g, '').slice(0, 4) || makeTechnicianPin();
     const agentName = currentAgentName(req);
@@ -16980,18 +17187,18 @@ app.post("/technicians/save", async (req, res) => {
       await pool.query(`
         UPDATE technicians
         SET name = $1, phone = $2, base_postcode = $3, current_postcode = $4,
-            status = $5, priority = $6, available_from = $7, return_to_work_date = $8, skills = $9,
-            notes = $10, technician_pin = $11, is_subcontractor = $12, updated_by = $13, updated_at = NOW()
-        WHERE id = $14
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, technicianPin, isSubcontractor, agentName, id]);
+            status = $5, priority = $6, available_from = $7, return_to_work_date = $8, performance_run_start_date = $9, skills = $10,
+            notes = $11, technician_pin = $12, is_subcontractor = $13, updated_by = $14, updated_at = NOW()
+        WHERE id = $15
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, performance_run_start_date || null, skills, notes, technicianPin, isSubcontractor, agentName, id]);
     } else {
       await pool.query(`
         INSERT INTO technicians (
           name, phone, base_postcode, current_postcode, status, priority,
-          available_from, return_to_work_date, skills, notes, is_subcontractor, updated_by, checkin_token, technician_pin, updated_at
+          available_from, return_to_work_date, performance_run_start_date, skills, notes, is_subcontractor, updated_by, checkin_token, technician_pin, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, skills, notes, isSubcontractor, agentName, makeCheckinToken(), technicianPin]);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+      `, [name, compactPhone(phone), compactPostcode(base_postcode), compactPostcode(current_postcode), status, priority || "Normal", available_from, return_to_work_date || null, performance_run_start_date || null, skills, notes, isSubcontractor, agentName, makeCheckinToken(), technicianPin]);
     }
 
     res.redirect("/technicians");
