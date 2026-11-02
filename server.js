@@ -1,4 +1,4 @@
-// YDP Unified master + Chromebook CSS injection fix (v129)
+// YDP Unified master + Chromebook full-width dispatch layout (v130)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10151,8 +10151,8 @@ function chromebookResponsiveStyles() {
         aside,
         .sidebar,
         .side-nav {
-          width: 230px !important;
-          min-width: 230px !important;
+          width: 220px !important;
+          min-width: 220px !important;
         }
 
         main,
@@ -10171,33 +10171,61 @@ function chromebookResponsiveStyles() {
           min-width: 0 !important;
         }
 
+        /* Filters: allow two neat rows instead of clipping */
         .filter-row,
         .filters,
         .filter-bar,
         .jobs-filters {
           display: grid !important;
-          grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(135px, 1fr)) auto !important;
+          grid-template-columns: minmax(260px, 2fr) repeat(3, minmax(150px, 1fr)) !important;
           gap: 10px !important;
           align-items: center !important;
         }
 
         .filter-row input,
         .filter-row select,
+        .filter-row button,
         .filters input,
         .filters select,
+        .filters button,
         .filter-bar input,
         .filter-bar select,
+        .filter-bar button,
         .jobs-filters input,
-        .jobs-filters select {
+        .jobs-filters select,
+        .jobs-filters button {
           min-width: 0 !important;
           width: 100% !important;
+          box-sizing: border-box !important;
         }
 
+        /* Main dispatch area: jobs full width, control panel below */
         .dispatch-grid,
         .jobs-layout,
-        .orders-layout {
-          grid-template-columns: minmax(0, 1fr) 300px !important;
+        .orders-layout,
+        .board-content-grid,
+        .dispatch-content-grid {
+          display: grid !important;
+          grid-template-columns: 1fr !important;
           gap: 18px !important;
+        }
+
+        .control-panel,
+        .today-control-panel,
+        .right-panel,
+        .board-side-panel {
+          width: 100% !important;
+          max-width: none !important;
+          grid-column: 1 / -1 !important;
+        }
+
+        .live-orders,
+        .orders-panel,
+        .jobs-panel,
+        .board-main-panel {
+          width: 100% !important;
+          max-width: none !important;
+          grid-column: 1 / -1 !important;
         }
 
         .panel,
@@ -10212,7 +10240,10 @@ function chromebookResponsiveStyles() {
           -webkit-overflow-scrolling: touch;
         }
 
+        .dispatch-table,
+        .jobs-table,
         table {
+          width: 100% !important;
           max-width: 100% !important;
         }
 
@@ -10242,32 +10273,20 @@ function chromebookResponsiveStyles() {
         aside,
         .sidebar,
         .side-nav {
-          width: 205px !important;
-          min-width: 205px !important;
+          width: 195px !important;
+          min-width: 195px !important;
         }
 
         .filter-row,
         .filters,
         .filter-bar,
         .jobs-filters {
-          grid-template-columns: 1fr 1fr 1fr !important;
-        }
-
-        .dispatch-grid,
-        .jobs-layout,
-        .orders-layout {
-          grid-template-columns: 1fr !important;
-        }
-
-        .control-panel,
-        .today-control-panel,
-        .right-panel {
-          width: 100% !important;
-          max-width: none !important;
+          grid-template-columns: 1fr 1fr !important;
         }
       }
   `;
 }
+
 
 app.get("/jobs", async (req, res) => {
   try {
