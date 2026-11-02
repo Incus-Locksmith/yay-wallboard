@@ -1,4 +1,4 @@
-// YDP Unified master + WhatsApp-ready Job Count Report (v125)
+// YDP Unified master + compact Recent Jobs strip on Dispatch Board (v126)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10193,7 +10193,7 @@ app.get("/jobs", async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, disputesMetricResult, paymentChaseMetricResult, accountPendingMetricResult, periodMetricsResult] = await Promise.all([
+    const [jobsResult, countsResult, closedTodayResult, techniciansResult, campaignsResult, revenueResult, recentResult, recentCreatedResult, disputesMetricResult, paymentChaseMetricResult, accountPendingMetricResult, periodMetricsResult] = await Promise.all([
       pool.query(`
         SELECT j.*, t.name AS technician_name
         FROM jobs j
@@ -10242,6 +10242,14 @@ app.get("/jobs", async (req, res) => {
         LEFT JOIN technicians t ON t.id = j.assigned_technician_id
         ORDER BY COALESCE(j.updated_at, j.created_at) DESC
         LIMIT 8
+      `),
+      pool.query(`
+        SELECT j.id, j.job_number, j.status, j.postcode, j.customer_name, j.created_at, t.name AS technician_name
+        FROM jobs j
+        LEFT JOIN technicians t ON t.id = j.assigned_technician_id
+        WHERE COALESCE(j.is_imported, FALSE) = FALSE
+        ORDER BY j.created_at DESC
+        LIMIT 6
       `),
       pool.query(`
         SELECT COUNT(*)::int AS count
@@ -10368,6 +10376,17 @@ app.get("/jobs", async (req, res) => {
         <span class="tech-name">${escapeHtml(tech.name)}</span>
         <span class="tech-status">${escapeHtml(tech.status || "Unknown")}</span>
       </div>
+    `).join("");
+
+    const recentCreatedJobs = recentCreatedResult.rows.map((job, index) => `
+      <a class="recent-job-chip ${index === 0 ? "is-new" : ""}" href="/jobs/${job.id}/edit">
+        ${index === 0 ? `<span class="recent-new-badge">NEW</span>` : ""}
+        <span class="recent-job-number">${escapeHtml(job.job_number || jobNumber(job.id))}</span>
+        <span class="recent-job-customer">${escapeHtml(job.customer_name || "No customer name")}</span>
+        <span class="recent-job-postcode">${escapeHtml(job.postcode || "No postcode")}</span>
+        <span class="recent-job-tech">${escapeHtml(job.technician_name || "Unassigned")}</span>
+        <span class="recent-job-view">View</span>
+      </a>
     `).join("");
 
     const rows = jobsResult.rows.map(job => {
@@ -10526,6 +10545,22 @@ app.get("/jobs", async (req, res) => {
           .tech-grey { background: #94a3b8; }
           .tech-name { color: #111827; font-size: 13px; font-weight: 900; }
           .tech-status { color: #64748b; font-size: 12px; }
+          .recent-jobs-strip { background:#fff; border:1px solid #e5e7eb; border-radius:20px; padding:14px 16px; margin-bottom:20px; box-shadow:0 10px 24px rgba(17,24,39,0.04); }
+          .recent-jobs-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }
+          .recent-jobs-title { color:#667085; font-size:13px; font-weight:900; text-transform:uppercase; letter-spacing:.04em; }
+          .recent-jobs-hint { color:#94a3b8; font-size:11px; }
+          .recent-jobs-row { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; }
+          .recent-job-chip { position:relative; display:grid; grid-template-columns:auto 1fr auto; grid-template-areas:"num customer view" "postcode tech view"; gap:2px 10px; align-items:center; min-width:0; padding:10px 12px; border:1px solid #e5e7eb; border-radius:12px; background:#f8fafc; color:#25313a; text-decoration:none; }
+          .recent-job-chip:hover { background:#f1f5f9; border-color:#cbd5e1; }
+          .recent-job-chip.is-new { border-color:#86efac; background:#f0fdf4; }
+          .recent-new-badge { position:absolute; top:-8px; left:10px; background:#15803d; color:#fff; border-radius:999px; padding:2px 7px; font-size:9px; font-weight:900; letter-spacing:.04em; }
+          .recent-job-number { grid-area:num; font-size:12px; font-weight:900; color:#111827; white-space:nowrap; }
+          .recent-job-customer { grid-area:customer; font-size:12px; font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+          .recent-job-postcode { grid-area:postcode; font-size:11px; color:#64748b; white-space:nowrap; }
+          .recent-job-tech { grid-area:tech; font-size:11px; color:#64748b; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+          .recent-job-view { grid-area:view; align-self:center; background:#25313a; color:#fff; border-radius:8px; padding:6px 8px; font-size:10px; font-weight:900; }
+          @media (max-width: 1100px) { .recent-jobs-row { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+          @media (max-width: 700px) { .recent-jobs-row { grid-template-columns:1fr; } .recent-jobs-hint { display:none; } }
           .board-filter-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: 18px; margin-bottom: 20px; box-shadow: 0 10px 24px rgba(17,24,39,0.04); }
           .board-filters { display: grid; grid-template-columns: minmax(260px, 1.6fr) minmax(150px, .9fr) minmax(150px, .9fr) minmax(150px, .9fr) minmax(150px, .9fr) auto; gap: 14px; align-items: center; }
           .custom-date-range { display: none; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(180px, 240px)); gap: 14px; align-items: end; padding-top: 4px; }
@@ -10650,6 +10685,14 @@ app.get("/jobs", async (req, res) => {
           <section class="tech-strip">
             <div class="tech-strip-title">Technician availability</div>
             <div class="tech-chip-row">${technicianStrip || `<span class="muted">No active technicians found.</span>`}</div>
+          </section>
+
+          <section class="recent-jobs-strip">
+            <div class="recent-jobs-head">
+              <div class="recent-jobs-title">Recent jobs</div>
+              <div class="recent-jobs-hint">Last 6 jobs created · click any job to reopen it</div>
+            </div>
+            <div class="recent-jobs-row">${recentCreatedJobs || `<span class="muted">No recent jobs found.</span>`}</div>
           </section>
 
           <section class="board-filter-panel">
