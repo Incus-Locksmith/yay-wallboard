@@ -1,4 +1,4 @@
-// YDP Unified master + Chromebook responsive layout fix (v128)
+// YDP Unified master + Chromebook CSS injection fix (v129)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10134,7 +10134,6 @@ app.get("/api/account-requests/pending", async (req, res) => {
 
 function chromebookResponsiveStyles() {
   return `
-    <style>
       /* Chromebook / smaller laptop layout only */
       @media (max-width: 1366px) and (min-width: 901px) {
         body {
@@ -10267,7 +10266,6 @@ function chromebookResponsiveStyles() {
           max-width: none !important;
         }
       }
-    </style>
   `;
 }
 
