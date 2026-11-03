@@ -1,4 +1,4 @@
-// YDP Unified master + technician Work Record page with weekly closings (v134)
+// YDP Unified master + technician-specific workspace links (v138)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -11841,7 +11841,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
     const summary = jobTechnicianSummary(job);
     const customerTel = phoneHref(job.customer_phone);
     const payerTel = phoneHref(job.offsite_payment ? job.bill_payer_phone : job.customer_phone);
-    const techWorkspaceUrl = job.technician_token ? `/tech-workspace` : "";
+    const techWorkspaceUrl = job.technician_token ? `/tech-workspace/${encodeURIComponent(job.technician_token)}` : "";
     const auditRows = (await pool.query(`
       SELECT * FROM job_audit_log
       WHERE job_id = $1
@@ -14398,12 +14398,37 @@ function technicianRunStartDate(tech) {
     const value = dateInputValue(tech.performance_run_start_date);
     if (value) return value;
   }
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+  return null;
 }
 
 async function technicianPerformanceData(tech) {
   const startValue = technicianRunStartDate(tech);
+
+  if (!startValue) {
+    return {
+      configured: false,
+      startValue: null,
+      streakEnd: null,
+      dayOfStreak: null,
+      daysRemaining: null,
+      streakComplete: false,
+      income: 0,
+      avgPerJob: 0,
+      forecastJobs: null,
+      materials: 0,
+      countedJobs: [],
+      closedJobs: [],
+      cancelledJobs: [],
+      holdJobs: [],
+      onsiteCancels: [],
+      disputes: [],
+      refundedDisputes: [],
+      chargebacks: [],
+      recalls: [],
+      incomeJobs: []
+    };
+  }
+
   const start = new Date(`${startValue}T00:00:00`);
   const end = new Date();
   end.setHours(23,59,59,999);
@@ -14434,6 +14459,7 @@ async function technicianPerformanceData(tech) {
 
   const elapsedMs = todayStart.getTime() - streakStart.getTime();
   const dayOfStreak = Math.min(30, Math.max(1, Math.floor(elapsedMs / 86400000) + 1));
+  const daysRemaining = Math.max(0, 30 - dayOfStreak);
   const streakComplete = todayStart > streakEnd;
 
   const countableStatuses = new Set([
@@ -14441,6 +14467,21 @@ async function technicianPerformanceData(tech) {
     'invoiced_account','sent_to_pm','disputed','cancelled_before_arrival','cancelled_onsite'
   ]);
   const countedJobs = jobs.filter(j => countableStatuses.has(String(j.status || '')));
+
+  const closedStatuses = new Set([
+    'closed','fully_paid','fully_paid_private','awaiting_payment',
+    'awaiting_balance','invoiced_account','sent_to_pm','disputed'
+  ]);
+  const closedJobs = jobs.filter(j => closedStatuses.has(String(j.status || '')));
+
+  const cancelledJobs = jobs.filter(j =>
+    ['cancelled_before_arrival','cancelled_onsite'].includes(String(j.status || ''))
+  );
+
+  const holdJobs = jobs.filter(j =>
+    ['hold','on_hold'].includes(String(j.status || ''))
+  );
+
   const onsiteCancels = jobs.filter(j => j.status === 'cancelled_onsite');
 
   const disputes = (await pool.query(`
@@ -14479,15 +14520,20 @@ async function technicianPerformanceData(tech) {
   `, [tech.name, tech.id, start, end])).rows;
 
   return {
+    configured: true,
     startValue,
     streakEnd,
     dayOfStreak,
+    daysRemaining,
     streakComplete,
     income,
     avgPerJob,
     forecastJobs,
     materials,
     countedJobs,
+    closedJobs,
+    cancelledJobs,
+    holdJobs,
     onsiteCancels,
     disputes,
     refundedDisputes,
@@ -14765,14 +14811,31 @@ app.get('/tech-workspace/:token/work-record', async (req, res) => {
         <div class="job-sub" style="margin-bottom:18px;">Evidența ta de lucru</div>
 
         <div class="panel" style="border-left:6px solid #16a34a;">
+          ${performance.configured ? `
           <div class="job-head">
             <div>
-              <h2 style="margin:0;">30-Day £10,000 Period<br><span class="job-sub">Perioadă consecutivă de 30 de zile pentru £10.000</span></h2>
-              <div class="job-sub">
-                ${escapeHtml(formatDate(performance.startValue))} – ${escapeHtml(formatDate(performance.streakEnd))} · Day ${performance.dayOfStreak} of 30
-                <br><span class="job-sub">${escapeHtml(formatDate(performance.startValue))} – ${escapeHtml(formatDate(performance.streakEnd))} · Ziua ${performance.dayOfStreak} din 30</span>
-                <br>At £10,000 your percentage changes from 30% to 20%.
-                <br><span class="job-sub">La £10.000, procentul tău se schimbă de la 30% la 20%.</span>
+              <h2 style="margin:0;">Your Current 30-Day Streak<br><span class="job-sub">Perioada ta actuală de 30 de zile consecutive</span></h2>
+              <div class="job-sub" style="margin-top:7px;line-height:1.6;">
+                <strong>Started:</strong> ${escapeHtml(formatDate(performance.startValue))}
+                &nbsp;·&nbsp; <strong>Day ${performance.dayOfStreak} of 30</strong>
+                &nbsp;·&nbsp; <strong>${performance.daysRemaining} day${performance.daysRemaining === 1 ? '' : 's'} remaining</strong>
+                <br>
+                <span class="job-sub">
+                  <strong>Început:</strong> ${escapeHtml(formatDate(performance.startValue))}
+                  &nbsp;·&nbsp; <strong>Ziua ${performance.dayOfStreak} din 30</strong>
+                  &nbsp;·&nbsp; <strong>${performance.daysRemaining} ${performance.daysRemaining === 1 ? 'zi rămasă' : 'zile rămase'}</strong>
+                </span>
+                <br>
+                <strong>30-day finish:</strong> ${escapeHtml(formatDate(performance.streakEnd))}
+                <br><span class="job-sub"><strong>Finalul celor 30 de zile:</strong> ${escapeHtml(formatDate(performance.streakEnd))}</span>
+                <div style="margin-top:8px;padding:8px 10px;background:#f8fafc;border-radius:9px;border:1px solid #dbe3ec;">
+                  <strong>This is not a calendar month.</strong> It is 30 consecutive days from your individual start date.
+                  <br><span class="job-sub"><strong>Nu este o lună calendaristică.</strong> Sunt 30 de zile consecutive de la data ta individuală de început.</span>
+                </div>
+                <div style="margin-top:7px;">
+                  At £10,000 your percentage changes from 30% to 20%.
+                  <br><span class="job-sub">La £10.000, procentul tău se schimbă de la 30% la 20%.</span>
+                </div>
               </div>
             </div>
             <span class="pill ${performance.income >= 10000 ? 'job-closed' : 'job-assigned'}">${performance.income >= 10000 ? '£10k reached / £10k atins' : 'In progress / În desfășurare'}</span>
@@ -14782,13 +14845,15 @@ app.get('/tech-workspace/:token/work-record', async (req, res) => {
             <div class="metric"><div class="label">Running total to today<br><span class="job-sub">Total acumulat până astăzi</span></div><div class="value">${money(performance.income)}</div></div>
             <div class="metric"><div class="label">Avg £ per job<br><span class="job-sub">Media £ per lucrare</span></div><div class="value">${money(performance.avgPerJob)}</div></div>
             <div class="metric"><div class="label">Forecast jobs to £10,000<br><span class="job-sub">Lucrări estimate până la £10.000</span></div><div class="value">${performance.forecastJobs === null ? '—' : performance.forecastJobs}</div></div>
-            <div class="metric"><div class="label">30-day progress<br><span class="job-sub">Progres în perioada de 30 de zile</span></div><div class="value">${performance.dayOfStreak}/30</div></div>
+            <div class="metric"><div class="label">Streak progress<br><span class="job-sub">Progresul perioadei consecutive</span></div><div class="value">${performance.dayOfStreak}/30</div></div>
             <div class="metric"><div class="label">Total materials used<br><span class="job-sub">Total materiale folosite</span></div><div class="value">${money(performance.materials)}</div></div>
           </div>
 
           <table style="margin-top:14px;">
             <tbody>
-              <tr><td>Number of jobs (cancelled / hold / closed)<br><span class="job-sub">Număr lucrări (anulate / în așteptare / închise)</span></td><td>${techPerformanceLink(token, 'jobs', 'Jobs', performance.countedJobs.length)}</td></tr>
+              <tr><td>Number of closed jobs<br><span class="job-sub">Număr lucrări închise</span></td><td>${techPerformanceLink(token, 'closed', 'Closed jobs', performance.closedJobs.length)}</td></tr>
+              <tr><td>Number of cancelled jobs<br><span class="job-sub">Număr lucrări anulate</span></td><td>${techPerformanceLink(token, 'cancelled', 'Cancelled jobs', performance.cancelledJobs.length)}</td></tr>
+              <tr><td>Number of jobs on hold<br><span class="job-sub">Număr lucrări în așteptare</span></td><td>${techPerformanceLink(token, 'hold', 'Jobs on hold', performance.holdJobs.length)}</td></tr>
               <tr><td>Number of jobs cancelled onsite<br><span class="job-sub">Lucrări anulate la locație</span></td><td>${techPerformanceLink(token, 'cancelled_onsite', 'Cancelled onsite', performance.onsiteCancels.length)}</td></tr>
               <tr><td>Number of jobs disputed (including resolved)<br><span class="job-sub">Lucrări contestate (inclusiv rezolvate)</span></td><td>${techPerformanceLink(token, 'disputed', 'Disputed', performance.disputes.length)}</td></tr>
               <tr><td>Number of disputed jobs that led to a refund<br><span class="job-sub">Lucrări contestate care au dus la rambursare</span></td><td>${techPerformanceLink(token, 'refund', 'Refunds', performance.refundedDisputes.length)}</td></tr>
@@ -14796,6 +14861,19 @@ app.get('/tech-workspace/:token/work-record', async (req, res) => {
               <tr><td>Number of recalls from your jobs<br><span class="job-sub">Reveniri / recall din lucrările tale</span></td><td>${techPerformanceLink(token, 'recall', 'Recalls', performance.recalls.length)}</td></tr>
             </tbody>
           </table>
+
+          ` : `
+            <div class="job-head">
+              <div>
+                <h2 style="margin:0;">30-Day £10,000 Streak<br><span class="job-sub">Perioadă consecutivă de 30 de zile pentru £10.000</span></h2>
+                <div class="job-sub" style="margin-top:8px;line-height:1.6;">
+                  <strong>30-day start date not set.</strong> The office must enter the technician's actual streak start date before these figures can be calculated.
+                  <br><span class="job-sub"><strong>Data de început pentru cele 30 de zile nu este setată.</strong> Biroul trebuie să introducă data reală de început înainte ca aceste cifre să poată fi calculate.</span>
+                </div>
+              </div>
+              <span class="pill job-assigned">Start date required / Data necesară</span>
+            </div>
+          `}
         </div>
 
         <div class="panel">
@@ -14906,7 +14984,16 @@ app.get('/tech-workspace/:token/performance/jobs', async (req, res) => {
     let title = 'Jobs';
     let rows = [];
 
-    if (metric === 'cancelled_onsite') {
+    if (metric === 'closed') {
+      title = 'Closed jobs';
+      rows = performance.closedJobs;
+    } else if (metric === 'cancelled') {
+      title = 'Cancelled jobs';
+      rows = performance.cancelledJobs;
+    } else if (metric === 'hold') {
+      title = 'Jobs on hold';
+      rows = performance.holdJobs;
+    } else if (metric === 'cancelled_onsite') {
       title = 'Cancelled onsite';
       rows = performance.onsiteCancels;
     } else if (metric === 'recall') {
@@ -17243,7 +17330,7 @@ app.get("/technicians", async (req, res) => {
               <button type="submit">Edit</button>
             </form>
             <br><br>
-            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace" target="_blank">Workspace link</a><div class="audit">PIN: ${escapeHtml(tech.technician_pin || '')}</div>
+            <a href="/tech-checkin/${escapeHtml(tech.checkin_token || "")}" target="_blank">Check-in link</a><br><a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Workspace link</a><div class="audit">PIN: ${escapeHtml(tech.technician_pin || '')}</div>
           </td>
         </tr>
       `;
@@ -17349,12 +17436,12 @@ app.get("/technicians/edit", async (req, res) => {
           <h2>Technician Workspace Link</h2>
           <div class="help">This is the technician's active jobs, close-job and income summary portal. The link now also requires the private PIN below, so another technician cannot open this dashboard from the link alone.</div>
           <br>
-          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace`}">
+          <input class="copy-input" readonly value="${`${req.protocol}://${req.get("host")}/tech-workspace/${tech.checkin_token || ""}`}">
           <br><br>
           <label>Private workspace PIN</label>
           <input class="copy-input" readonly value="${escapeHtml(tech.technician_pin || '')}">
           <br><br>
-          <a href="/tech-workspace" target="_blank">Open technician workspace</a>
+          <a href="/tech-workspace/${escapeHtml(tech.checkin_token || "")}" target="_blank">Open technician workspace</a>
         </div>
 
         <div class="panel">
@@ -17374,9 +17461,9 @@ app.get("/technicians/edit", async (req, res) => {
             <input name="available_from" value="${escapeHtml(tech.available_from)}" placeholder="Available from">
             <input type="date" name="return_to_work_date" value="${escapeHtml(dateInputValue(tech.return_to_work_date))}" title="Return to work date">
             <div>
-              <label>£10k 30-day period start date</label>
+              <label>Actual £10k 30-day streak start date</label>
               <input type="date" name="performance_run_start_date" value="${escapeHtml(dateInputValue(tech.performance_run_start_date))}">
-              <div class="help">Start date for this technician's current consecutive 30-day £10,000 period. Weekly payroll does not reset this period.</div>
+              <div class="help">Enter the technician's REAL current 30-day £10,000 streak start date. Do not use the 1st of the month unless the streak actually began then. Weekly payroll does not reset this period.</div>
             </div>
             <input name="skills" value="${escapeHtml(tech.skills)}" placeholder="Skills">
             <button type="submit">Save Changes</button>
