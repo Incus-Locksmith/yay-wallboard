@@ -1,4 +1,4 @@
-// YDP Unified master + dispatch KPI cleanup (v148)
+// YDP Unified master + Dispatcher Activity removed from main board (v149)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10711,9 +10711,6 @@ app.get("/jobs", async (req, res) => {
     const accountPendingTotal = Number(accountPendingMetricResult.rows[0]?.count || 0);
     const periodMetrics = periodMetricsResult.rows[0] || {};
 
-    const dispatcherActivity = await getDispatcherActivityToday();
-    const dispatcherActivityHtml = dispatcherActivityCardsHtml(dispatcherActivity);
-
     const periodLabel = kpiPeriod === "week" ? "This week" : (kpiPeriod === "month" ? "This month" : "Today");
     const money = value => `£${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -10975,71 +10972,6 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
           .feed-dot.job-cancelled-onsite { background: #4b5563; }
 
-          .dispatcher-activity-section {
-            margin: 18px 0;
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-            padding: 16px;
-          }
-          .dispatcher-activity-head {
-            display:flex;
-            justify-content:space-between;
-            align-items:flex-end;
-            gap:12px;
-            margin-bottom:12px;
-          }
-          .dispatcher-activity-title {
-            font-size:16px;
-            font-weight:900;
-            color:#111827;
-          }
-          .dispatcher-activity-hint {
-            font-size:12px;
-            color:#667085;
-          }
-          .dispatcher-activity-grid {
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
-            gap:12px;
-          }
-          .dispatcher-activity-card {
-            border:1px solid #dbe3ec;
-            border-radius:14px;
-            padding:13px 14px;
-            background:#f8fafc;
-            min-width:0;
-          }
-          .dispatcher-activity-name {
-            font-weight:900;
-            font-size:15px;
-            color:#111827;
-            margin-bottom:10px;
-          }
-          .dispatcher-activity-metrics {
-            display:grid;
-            grid-template-columns:1fr 1fr;
-            gap:8px;
-          }
-          .dispatcher-activity-metrics div {
-            background:#ffffff;
-            border:1px solid #e5e7eb;
-            border-radius:10px;
-            padding:9px 10px;
-          }
-          .dispatcher-activity-metrics span {
-            display:block;
-            font-size:11px;
-            color:#667085;
-            font-weight:700;
-          }
-          .dispatcher-activity-metrics strong {
-            display:block;
-            margin-top:3px;
-            font-size:20px;
-            color:#111827;
-          }
-
           @media (max-width: 1500px) {
             .status-card-grid { grid-template-columns: repeat(4, minmax(150px, 1fr)); }
             .period-card-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
@@ -11119,14 +11051,6 @@ app.get("/jobs", async (req, res) => {
           </script>
 
           ${accountPendingTotal > 0 ? `<div class="account-request-banner"><span>⚠ ${accountPendingTotal} NEW ACCOUNT JOB${accountPendingTotal === 1 ? "" : "S"} NEED${accountPendingTotal === 1 ? "S" : ""} REVIEW</span><a href="/jobs?status=account_pending_review">Review now</a></div>` : ""}
-
-          <section class="dispatcher-activity-section">
-            <div class="dispatcher-activity-head">
-              <div class="dispatcher-activity-title">Dispatcher activity — today</div>
-              <div class="dispatcher-activity-hint">Calls answered · portal bookings · closures · Stripe links created</div>
-            </div>
-            <div class="dispatcher-activity-grid">${dispatcherActivityHtml || `<span class="muted">No active office users found.</span>`}</div>
-          </section>
 
           <section class="tech-strip">
             <div class="tech-strip-title">Technician availability</div>
