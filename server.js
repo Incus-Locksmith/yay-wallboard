@@ -1,4 +1,4 @@
-// YDP Unified master + technician-specific workspace links (v138)
+// YDP Unified master + scheduled time validation fix (v139)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -1038,7 +1038,7 @@ function quarterHourTimeOptions(selectedTime = "") {
 }
 
 function isValid24HourTime(value) {
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || "").trim());
+  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(String(value || "").trim());
 }
 
 function compactScheduledTimePicker(prefix, selectedTime = "") {
@@ -11657,7 +11657,7 @@ app.get("/jobs/new", async (req, res) => {
             const scheduledTime = document.getElementById(timeId);
             if (!scheduledDate || !scheduledTime || !scheduledDate.value || !scheduledTime.value) return true;
             const value = scheduledTime.value.trim();
-            const ok = /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+            const ok = /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
             if (!ok) {
               alert("Please enter the scheduled time in 24 hour format, for example 09:00 or 14:30.");
               scheduledTime.focus();
@@ -12266,7 +12266,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
             const scheduledTime = document.getElementById(timeId);
             if (!scheduledDate || !scheduledTime || !scheduledDate.value || !scheduledTime.value) return true;
             const value = scheduledTime.value.trim();
-            const ok = /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+            const ok = /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
             if (!ok) {
               alert("Please enter the scheduled time in 24 hour format, for example 09:00 or 14:30.");
               scheduledTime.focus();
