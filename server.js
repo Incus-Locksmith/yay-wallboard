@@ -1,4 +1,4 @@
-// YDP Unified master + campaign account directory and technician-summary classification (v160)
+// YDP Unified master + Account campaign details driven by Type (v161)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3594,6 +3594,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS account_website TEXT;`);
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS account_email TEXT;`);
   await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS account_phone TEXT;`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS agreed_payment_terms TEXT;`);
 
   await pool.query(`CREATE INDEX IF NOT EXISTS campaigns_active_idx ON campaigns (active);`);
 
@@ -7757,10 +7758,10 @@ app.get("/campaigns", async (req, res) => {
           </td>
           <td>
             <span class="pill ${campaignBadgeClass(campaign.campaign_type)}">${escapeHtml(campaign.campaign_type || "Private")}</span>
-            ${campaign.is_account_job ? `<div style="margin-top:6px;"><span class="pill stage-emailed">Account job</span></div>` : ""}
+            ${String(campaign.campaign_type || "").toLowerCase() === "account" ? `<div style="margin-top:6px;"><span class="pill stage-emailed">Account job</span></div>` : ""}
           </td>
           <td>
-            ${campaign.is_account_job ? `
+            ${String(campaign.campaign_type || "").toLowerCase() === "account" ? `
               <strong>${escapeHtml(campaign.account_name || campaign.name)}</strong><br>
               ${campaign.account_website ? `<span class="muted">${escapeHtml(campaign.account_website)}</span><br>` : ""}
               ${campaign.account_email ? `<span class="muted">${escapeHtml(campaign.account_email)}</span><br>` : ""}
@@ -7801,21 +7802,21 @@ app.get("/campaigns", async (req, res) => {
             <h2>Add campaign / source</h2>
             <form method="POST" action="/campaigns/save" class="grid-4">
               <div><label>Name</label><input name="name" placeholder="e.g. Google Ads" required></div>
-              <div><label>Type</label><select name="campaign_type">${campaignTypeOptions("Private")}</select></div>
+              <div><label>Type</label><select id="campaign_type_add" name="campaign_type">${campaignTypeOptions("Private")}</select></div>
               <div><label>Default payment</label><select name="default_payment_method">${campaignPaymentOptions("Unknown")}</select></div>
               <div><label>Commission / split %</label><input name="commission_percentage" value="0"></div>
               <div><label>Sort order</label><input name="sort_order" value="100"></div>
               <div><label>Status</label><select name="active"><option value="true">Active</option><option value="false">Hidden</option></select></div>
               <div style="grid-column: span 2;"><label>Notes</label><input name="notes" placeholder="Internal notes about this campaign/source"></div>
 
-              <div style="grid-column: 1 / -1; padding:14px; border:1px solid #dbe3ec; border-radius:14px; background:#f8fafc;">
+              <div id="account-fields-add" style="grid-column: 1 / -1; padding:14px; border:1px solid #dbe3ec; border-radius:14px; background:#f8fafc;">
                 <strong>Account client details</strong>
                 <div class="grid-4" style="margin-top:12px;">
-                  <div><label>Is this an Account job?</label><select name="is_account_job"><option value="false">No</option><option value="true">Yes</option></select></div>
                   <div><label>Account name</label><input name="account_name" placeholder="e.g. GRD"></div>
                   <div><label>Website</label><input name="account_website" placeholder="https://..."></div>
                   <div><label>Email</label><input name="account_email" type="email" placeholder="contact@..."></div>
                   <div><label>Contact telephone</label><input name="account_phone" placeholder="Telephone number"></div>
+                  <div style="grid-column:span 2;"><label>Agreed payment terms</label><input name="agreed_payment_terms" placeholder="e.g. 30 days from invoice"></div>
                 </div>
               </div>
 
@@ -7840,7 +7841,20 @@ app.get("/campaigns", async (req, res) => {
             </table>
           </div>
         </main>
-      </body>
+      
+        <script>
+          (function(){
+            const type = document.getElementById("campaign_type_add");
+            const panel = document.getElementById("account-fields-add");
+            function syncAccountFields(){
+              if (!type || !panel) return;
+              panel.style.display = String(type.value || "").toLowerCase() === "account" ? "block" : "none";
+            }
+            if (type) type.addEventListener("change", syncAccountFields);
+            syncAccountFields();
+          })();
+        </script>
+</body>
       </html>
     `);
   } catch (error) {
@@ -7868,21 +7882,21 @@ app.get("/campaigns/:id/edit", async (req, res) => {
             <form method="POST" action="/campaigns/save" class="grid-4">
               <input type="hidden" name="id" value="${campaign.id}">
               <div><label>Name</label><input name="name" value="${escapeHtml(campaign.name)}" required></div>
-              <div><label>Type</label><select name="campaign_type">${campaignTypeOptions(campaign.campaign_type)}</select></div>
+              <div><label>Type</label><select id="campaign_type_edit" name="campaign_type">${campaignTypeOptions(campaign.campaign_type)}</select></div>
               <div><label>Default payment</label><select name="default_payment_method">${campaignPaymentOptions(campaign.default_payment_method)}</select></div>
               <div><label>Commission / split %</label><input name="commission_percentage" value="${Number(campaign.commission_percentage || 0).toFixed(2)}"></div>
               <div><label>Sort order</label><input name="sort_order" value="${Number(campaign.sort_order || 100)}"></div>
               <div><label>Status</label><select name="active"><option value="true" ${campaign.active ? "selected" : ""}>Active</option><option value="false" ${!campaign.active ? "selected" : ""}>Hidden</option></select></div>
               <div style="grid-column: span 2;"><label>Notes</label><input name="notes" value="${escapeHtml(campaign.notes || "")}"></div>
 
-              <div style="grid-column: 1 / -1; padding:14px; border:1px solid #dbe3ec; border-radius:14px; background:#f8fafc;">
+              <div id="account-fields-edit" style="grid-column: 1 / -1; padding:14px; border:1px solid #dbe3ec; border-radius:14px; background:#f8fafc;">
                 <strong>Account client details</strong>
                 <div class="grid-4" style="margin-top:12px;">
-                  <div><label>Is this an Account job?</label><select name="is_account_job"><option value="false" ${!campaign.is_account_job ? "selected" : ""}>No</option><option value="true" ${campaign.is_account_job ? "selected" : ""}>Yes</option></select></div>
                   <div><label>Account name</label><input name="account_name" value="${escapeHtml(campaign.account_name || "")}" placeholder="e.g. GRD"></div>
                   <div><label>Website</label><input name="account_website" value="${escapeHtml(campaign.account_website || "")}" placeholder="https://..."></div>
                   <div><label>Email</label><input name="account_email" type="email" value="${escapeHtml(campaign.account_email || "")}" placeholder="contact@..."></div>
                   <div><label>Contact telephone</label><input name="account_phone" value="${escapeHtml(campaign.account_phone || "")}" placeholder="Telephone number"></div>
+                  <div style="grid-column:span 2;"><label>Agreed payment terms</label><input name="agreed_payment_terms" value="${escapeHtml(campaign.agreed_payment_terms || "")}" placeholder="e.g. 30 days from invoice"></div>
                 </div>
               </div>
 
@@ -7891,7 +7905,20 @@ app.get("/campaigns/:id/edit", async (req, res) => {
             </form>
           </div>
         </main>
-      </body>
+      
+        <script>
+          (function(){
+            const type = document.getElementById("campaign_type_edit");
+            const panel = document.getElementById("account-fields-edit");
+            function syncAccountFields(){
+              if (!type || !panel) return;
+              panel.style.display = String(type.value || "").toLowerCase() === "account" ? "block" : "none";
+            }
+            if (type) type.addEventListener("change", syncAccountFields);
+            syncAccountFields();
+          })();
+        </script>
+</body>
       </html>
     `);
   } catch (error) {
@@ -7911,11 +7938,12 @@ app.post("/campaigns/save", async (req, res) => {
     const active = req.body.active !== "false";
     const notes = req.body.notes || "";
     const accountRequirements = req.body.account_requirements || "";
-    const isAccountJob = req.body.is_account_job === "true";
+    const isAccountJob = String(campaignType || "").toLowerCase() === "account";
     const accountName = String(req.body.account_name || "").trim();
     const accountWebsite = String(req.body.account_website || "").trim();
     const accountEmail = String(req.body.account_email || "").trim();
     const accountPhone = compactPhone(req.body.account_phone || "");
+    const agreedPaymentTerms = String(req.body.agreed_payment_terms || "").trim();
 
     if (!name) return res.redirect("/campaigns");
 
@@ -7926,22 +7954,22 @@ app.post("/campaigns/save", async (req, res) => {
             commission_percentage = $4, sort_order = $5, active = $6,
             notes = $7, account_requirements = $8,
             is_account_job = $9, account_name = $10, account_website = $11,
-            account_email = $12, account_phone = $13,
+            account_email = $12, account_phone = $13, agreed_payment_terms = $14,
             updated_at = NOW()
-        WHERE id = $14
+        WHERE id = $15
       `, [
         name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active,
-        notes, accountRequirements, isAccountJob, accountName, accountWebsite, accountEmail, accountPhone, id
+        notes, accountRequirements, isAccountJob, accountName, accountWebsite, accountEmail, accountPhone, agreedPaymentTerms, id
       ]);
     } else {
       await pool.query(`
         INSERT INTO campaigns (
           name, campaign_type, default_payment_method, commission_percentage,
           sort_order, active, notes, account_requirements,
-          is_account_job, account_name, account_website, account_email, account_phone,
+          is_account_job, account_name, account_website, account_email, account_phone, agreed_payment_terms,
           created_at, updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
         ON CONFLICT (name) DO UPDATE SET
           campaign_type = EXCLUDED.campaign_type,
           default_payment_method = EXCLUDED.default_payment_method,
@@ -7955,10 +7983,11 @@ app.post("/campaigns/save", async (req, res) => {
           account_website = EXCLUDED.account_website,
           account_email = EXCLUDED.account_email,
           account_phone = EXCLUDED.account_phone,
+          agreed_payment_terms = EXCLUDED.agreed_payment_terms,
           updated_at = NOW()
       `, [
         name, campaignType, defaultPaymentMethod, commissionPercentage, sortOrder, active,
-        notes, accountRequirements, isAccountJob, accountName, accountWebsite, accountEmail, accountPhone
+        notes, accountRequirements, isAccountJob, accountName, accountWebsite, accountEmail, accountPhone, agreedPaymentTerms
       ]);
     }
 
@@ -10346,6 +10375,7 @@ function jobIsFantastic(job) {
 
 function jobIsCampaignAccount(job) {
   return Boolean(
+    String(job?.campaign_type || "").toLowerCase() === "account" ||
     job?.campaign_is_account === true ||
     String(job?.campaign_is_account || "").toLowerCase() === "true" ||
     job?.account_job === true ||
@@ -12456,7 +12486,7 @@ app.post("/jobs/create", async (req, res) => {
             WHEN EXISTS (
               SELECT 1 FROM campaigns c
               WHERE LOWER(TRIM(c.name)) = LOWER(TRIM(j.source_campaign))
-                AND COALESCE(c.is_account_job, FALSE) = TRUE
+                AND (LOWER(COALESCE(c.campaign_type,'')) = 'account' OR COALESCE(c.is_account_job, FALSE) = TRUE)
             ) THEN TRUE
             ELSE account_job
           END
@@ -12476,11 +12506,13 @@ app.get("/jobs/:id/summary", async (req, res) => {
     const id = Number(req.params.id);
     const result = await pool.query(`
       SELECT j.*,
+             c.campaign_type AS campaign_type,
              c.is_account_job AS campaign_is_account,
              c.account_name AS campaign_account_name,
              c.account_website AS campaign_account_website,
              c.account_email AS campaign_account_email,
-             c.account_phone AS campaign_account_phone
+             c.account_phone AS campaign_account_phone,
+             c.agreed_payment_terms AS campaign_agreed_payment_terms
       FROM jobs j
       LEFT JOIN campaigns c ON LOWER(TRIM(c.name)) = LOWER(TRIM(j.source_campaign))
       WHERE j.id = $1
@@ -12542,11 +12574,13 @@ app.get("/jobs/:id/edit", async (req, res) => {
     const id = Number(req.params.id);
     const jobResult = await pool.query(`
       SELECT j.*, t.name AS technician_name, t.phone AS technician_phone, t.checkin_token AS technician_token,
+             c.campaign_type AS campaign_type,
              c.is_account_job AS campaign_is_account,
              c.account_name AS campaign_account_name,
              c.account_website AS campaign_account_website,
              c.account_email AS campaign_account_email,
-             c.account_phone AS campaign_account_phone
+             c.account_phone AS campaign_account_phone,
+             c.agreed_payment_terms AS campaign_agreed_payment_terms
       FROM jobs j
       LEFT JOIN technicians t ON t.id = j.assigned_technician_id
       LEFT JOIN campaigns c ON LOWER(TRIM(c.name)) = LOWER(TRIM(j.source_campaign))
@@ -13388,7 +13422,7 @@ app.post("/jobs/:id/update", async (req, res) => {
         WHEN EXISTS (
           SELECT 1 FROM campaigns c
           WHERE LOWER(TRIM(c.name)) = LOWER(TRIM(j.source_campaign))
-            AND COALESCE(c.is_account_job, FALSE) = TRUE
+            AND (LOWER(COALESCE(c.campaign_type,'')) = 'account' OR COALESCE(c.is_account_job, FALSE) = TRUE)
         ) THEN TRUE
         ELSE account_job
       END
