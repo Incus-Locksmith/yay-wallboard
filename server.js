@@ -1,4 +1,4 @@
-// YDP Unified master + mobile technician workspace, 24h weekly schedule and job search (v156)
+// YDP Unified master + technician-safe job source labels (v157)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14938,6 +14938,13 @@ function techPaymentOptions(selected = '') {
   return optionList(['Cash', 'Card', 'BACS', 'Cheque', 'Bank transfer', 'Account', 'Other'], selected);
 }
 
+function technicianJobSourceLabel(job) {
+  if (!job) return "Organic";
+  if (String(job.source_campaign || "").trim().toUpperCase() === "FANTASTIC") return "Fantastic";
+  if (job.account_job === true || String(job.account_job).toLowerCase() === "true" || job.account_client_id || job.account_template_id) return "Account job";
+  return "Organic";
+}
+
 function technicianWorkspaceTabs(token, active, disputeCount = 0) {
   const disputeLabel = disputeCount > 0 ? `Disputes (${disputeCount})` : "Disputes";
   return `
@@ -16098,7 +16105,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
           <div>
             <h2 class="job-title">${escapeHtml(job.postcode || job.job_number || 'Job')}</h2>
             <div class="job-sub">
-              ${escapeHtml(job.job_type || 'Job')} ${job.source_campaign ? `· ${escapeHtml(job.source_campaign)}` : ''}<br>
+              ${escapeHtml(job.job_type || 'Job')} · <strong>${escapeHtml(technicianJobSourceLabel(job))}</strong><br>
               ${escapeHtml(job.customer_name || 'Customer')} ${job.customer_phone ? `· <a href="tel:${escapeHtml(job.customer_phone)}">${escapeHtml(job.customer_phone)}</a>` : ''}<br>
               ${escapeHtml(techJobAddress(job) || 'Address not set')}<br>
               ${job.eta ? `ETA: ${escapeHtml(job.eta)}<br>` : ''}
@@ -18245,7 +18252,7 @@ function technicianClosingWhatsappText(job) {
     `Address: ${techJobAddress(job) || '—'}`,
     `Postcode: ${job.postcode || '—'}`,
     `Job type: ${job.job_type || '—'}`,
-    `Campaign: ${job.source_campaign || '—'}`,
+    `Job source: ${technicianJobSourceLabel(job)}`,
     `Original quote / start price: ${job.quoted_price || job.starting_price ? whatsappClosingMoneySuffix(job.quoted_price || job.starting_price) : '—'}`,
     '',
     'CLOSING:',
