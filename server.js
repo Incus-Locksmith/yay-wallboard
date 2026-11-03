@@ -1,4 +1,4 @@
-// YDP Unified master + scheduled time validation fix (v139)
+// YDP Unified master + dispatcher daily activity cards (v140)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10515,6 +10515,78 @@ app.get("/jobs", async (req, res) => {
     const accountPendingTotal = Number(accountPendingMetricResult.rows[0]?.count || 0);
     const periodMetrics = periodMetricsResult.rows[0] || {};
 
+    // Dispatcher activity cards: live daily office activity by portal user.
+    const [dispatcherUsersResult, dispatcherCallsResult, dispatcherJobsBookedResult, dispatcherJobsClosedResult, dispatcherStripeResult, dispatcherWallboardAgents] = await Promise.all([
+      pool.query(`
+        SELECT name, role, extension_number
+        FROM app_users
+        WHERE active = TRUE
+        ORDER BY name ASC
+      `),
+      pool.query(wallboardTodaySql()),
+      pool.query(`
+        SELECT LOWER(TRIM(COALESCE(dispatcher_name, ''))) AS agent_key, COUNT(*)::int AS count
+        FROM jobs
+        WHERE DATE(created_at) = CURRENT_DATE
+          AND COALESCE(dispatcher_name, '') <> ''
+        GROUP BY LOWER(TRIM(dispatcher_name))
+      `),
+      pool.query(`
+        SELECT LOWER(TRIM(COALESCE(closed_by, ''))) AS agent_key, COUNT(*)::int AS count
+        FROM jobs
+        WHERE closed_at IS NOT NULL
+          AND DATE(closed_at) = CURRENT_DATE
+          AND COALESCE(closed_by, '') <> ''
+          AND COALESCE(status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+        GROUP BY LOWER(TRIM(closed_by))
+      `),
+      pool.query(`
+        SELECT LOWER(TRIM(COALESCE(created_by, ''))) AS agent_key, COUNT(*)::int AS count
+        FROM job_stripe_payment_links
+        WHERE DATE(created_at) = CURRENT_DATE
+          AND COALESCE(created_by, '') <> ''
+        GROUP BY LOWER(TRIM(created_by))
+      `),
+      getWallboardAgents()
+    ]);
+
+    const bookedByAgent = Object.fromEntries(dispatcherJobsBookedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+    const closedByAgent = Object.fromEntries(dispatcherJobsClosedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+    const stripeByAgent = Object.fromEntries(dispatcherStripeResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+
+    const answeredCallsByExtension = {};
+    dispatcherCallsResult.rows
+      .filter(call => String(call.call_type || "").toLowerCase() === "inbound" && String(call.answered_by || "").trim())
+      .forEach(call => {
+        const ext = wallboardCallAgentExtension(call, dispatcherWallboardAgents);
+        if (!ext) return;
+        answeredCallsByExtension[ext] = Number(answeredCallsByExtension[ext] || 0) + 1;
+      });
+
+    const dispatcherActivity = dispatcherUsersResult.rows.map(user => {
+      const key = String(user.name || "").trim().toLowerCase();
+      const ext = String(user.extension_number || "").trim();
+      return {
+        name: user.name,
+        calls: Number(answeredCallsByExtension[ext] || 0),
+        booked: Number(bookedByAgent[key] || 0),
+        closed: Number(closedByAgent[key] || 0),
+        stripe: Number(stripeByAgent[key] || 0)
+      };
+    });
+
+    const dispatcherActivityHtml = dispatcherActivity.map(item => `
+      <article class="dispatcher-activity-card">
+        <div class="dispatcher-activity-name">${escapeHtml(item.name)}</div>
+        <div class="dispatcher-activity-metrics">
+          <div><span>Calls taken</span><strong>${item.calls}</strong></div>
+          <div><span>Jobs booked</span><strong>${item.booked}</strong></div>
+          <div><span>Jobs closed</span><strong>${item.closed}</strong></div>
+          <div><span>Stripe links</span><strong>${item.stripe}</strong></div>
+        </div>
+      </article>
+    `).join("");
+
     const periodLabel = kpiPeriod === "week" ? "This week" : (kpiPeriod === "month" ? "This month" : "Today");
     const money = value => `£${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -10778,6 +10850,72 @@ app.get("/jobs", async (req, res) => {
           .feed-dot.job-disputed { background: #f97316; }
           .feed-dot.job-cancelled-before-arrival { background: #6b7280; }
           .feed-dot.job-cancelled-onsite { background: #4b5563; }
+
+          .dispatcher-activity-section {
+            margin: 18px 0;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 16px;
+          }
+          .dispatcher-activity-head {
+            display:flex;
+            justify-content:space-between;
+            align-items:flex-end;
+            gap:12px;
+            margin-bottom:12px;
+          }
+          .dispatcher-activity-title {
+            font-size:16px;
+            font-weight:900;
+            color:#111827;
+          }
+          .dispatcher-activity-hint {
+            font-size:12px;
+            color:#667085;
+          }
+          .dispatcher-activity-grid {
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+            gap:12px;
+          }
+          .dispatcher-activity-card {
+            border:1px solid #dbe3ec;
+            border-radius:14px;
+            padding:13px 14px;
+            background:#f8fafc;
+            min-width:0;
+          }
+          .dispatcher-activity-name {
+            font-weight:900;
+            font-size:15px;
+            color:#111827;
+            margin-bottom:10px;
+          }
+          .dispatcher-activity-metrics {
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:8px;
+          }
+          .dispatcher-activity-metrics div {
+            background:#ffffff;
+            border:1px solid #e5e7eb;
+            border-radius:10px;
+            padding:9px 10px;
+          }
+          .dispatcher-activity-metrics span {
+            display:block;
+            font-size:11px;
+            color:#667085;
+            font-weight:700;
+          }
+          .dispatcher-activity-metrics strong {
+            display:block;
+            margin-top:3px;
+            font-size:20px;
+            color:#111827;
+          }
+
           @media (max-width: 1500px) {
             .status-card-grid { grid-template-columns: repeat(4, minmax(150px, 1fr)); }
             .period-card-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
@@ -10857,6 +10995,14 @@ app.get("/jobs", async (req, res) => {
           </script>
 
           ${accountPendingTotal > 0 ? `<div class="account-request-banner"><span>⚠ ${accountPendingTotal} NEW ACCOUNT JOB${accountPendingTotal === 1 ? "" : "S"} NEED${accountPendingTotal === 1 ? "S" : ""} REVIEW</span><a href="/jobs?status=account_pending_review">Review now</a></div>` : ""}
+
+          <section class="dispatcher-activity-section">
+            <div class="dispatcher-activity-head">
+              <div class="dispatcher-activity-title">Dispatcher activity — today</div>
+              <div class="dispatcher-activity-hint">Calls answered · portal bookings · closures · Stripe links created</div>
+            </div>
+            <div class="dispatcher-activity-grid">${dispatcherActivityHtml || `<span class="muted">No active office users found.</span>`}</div>
+          </section>
 
           <section class="tech-strip">
             <div class="tech-strip-title">Technician availability</div>
