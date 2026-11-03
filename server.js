@@ -1,4 +1,4 @@
-// YDP Unified master + assigned jobs auto-scheduled + closed grey history (v147)
+// YDP Unified master + dispatch KPI cleanup (v148)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10731,10 +10731,7 @@ app.get("/jobs", async (req, res) => {
     const periodCards = [
       { label: "Jobs created", value: Number(periodMetrics.jobs_created || 0), className: "board-blue" },
       { label: "Closed", value: Number(periodMetrics.jobs_closed || 0), className: "board-green" },
-      { label: "Cancelled", value: Number(periodMetrics.jobs_cancelled || 0), className: "board-slate" },
-      { label: "Income", value: money(periodMetrics.income), className: "board-green" },
-      { label: "Materials", value: money(periodMetrics.materials), className: "board-amber" },
-      { label: "Avg job value", value: money(periodMetrics.average_job_value), className: "board-pink" }
+      { label: "Cancelled", value: Number(periodMetrics.jobs_cancelled || 0), className: "board-slate" }
     ];
 
     function technicianBadgeClass(status) {
