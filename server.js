@@ -1,4 +1,4 @@
-// YDP Unified master + technician-safe job source labels (v157)
+// YDP Unified master + dispatcher job-source operational notices (v158)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -2461,6 +2461,25 @@ function sharedStyles() {
     .sidebar-user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .sidebar-user-name { font-size: 17px; font-weight: 900; }
     .sidebar-user a { color: var(--brand-amber); font-size: 13px; margin: 0; }
+
+    .dispatcher-source-notice {
+      margin: 10px 0 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-weight: 900;
+      line-height: 1.35;
+      border: 1px solid transparent;
+    }
+    .dispatcher-source-notice.fantastic {
+      background: #ecfdf5;
+      border-color: #86efac;
+      color: #166534;
+    }
+    .dispatcher-source-notice.account {
+      background: #fff7ed;
+      border-color: #fdba74;
+      color: #9a3412;
+    }
 
     .sidebar-academy-bottom {
       margin-top: 48px;
@@ -12632,6 +12651,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
 
               <div class="control-card">
                 <h2>Edit full order details</h2>
+                ${dispatcherJobSourceNotice(job)}
                 <form method="POST" action="/jobs/${job.id}/update">
                   <div class="edit-form-grid">
                     <div><label>Customer name</label><input name="customer_name" value="${escapeHtml(job.customer_name)}" required></div>
@@ -13286,7 +13306,8 @@ app.get("/jobs/:id/close", async (req, res) => {
         </div>
 
         <form method="POST" action="/jobs/${job.id}/close" onsubmit="return confirmCloseJob();">
-          <div class="panel">
+${dispatcherJobSourceNotice(job)}
+                    <div class="panel">
             <h2>Close job / payment</h2>
             <p class="muted">Enter the NET value. VAT is calculated automatically at 20%, and the full value is saved against the job. Cancelled jobs should be cancelled from Quick Actions; they do not need to be closed here.</p>
             <div id="partialPaymentWarning" style="display:none; margin:14px 0; padding:14px 16px; border:2px solid #f59e0b; border-radius:10px; background:#422006; color:#fde68a;">
@@ -14943,6 +14964,22 @@ function technicianJobSourceLabel(job) {
   if (String(job.source_campaign || "").trim().toUpperCase() === "FANTASTIC") return "Fantastic";
   if (job.account_job === true || String(job.account_job).toLowerCase() === "true" || job.account_client_id || job.account_template_id) return "Account job";
   return "Organic";
+}
+
+function dispatcherJobSourceNotice(job) {
+  if (!job) return "";
+  const isFantastic = String(job.source_campaign || "").trim().toUpperCase() === "FANTASTIC";
+  const isAccount = job.account_job === true || String(job.account_job).toLowerCase() === "true" || job.account_client_id || job.account_template_id;
+
+  if (isFantastic) {
+    return `<div class="dispatcher-source-notice fantastic">Fantastic booking, £ paid upfront</div>`;
+  }
+
+  if (isAccount) {
+    return `<div class="dispatcher-source-notice account">Account job, do not discuss prices, please take before and after photos</div>`;
+  }
+
+  return "";
 }
 
 function technicianWorkspaceTabs(token, active, disputeCount = 0) {
