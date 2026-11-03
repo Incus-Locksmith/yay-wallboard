@@ -1,4 +1,4 @@
-// YDP Unified master + technician workload popup with distance to job (v152)
+// YDP Unified master + redesigned Dispatcher Activity dashboard with date range (v153)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10445,7 +10445,28 @@ function chromebookResponsiveStyles() {
 
 
 
-async function getDispatcherActivityToday() {
+
+function dispatcherActivityDateRange(req) {
+  const today = new Date();
+  const pad = value => String(value).padStart(2, "0");
+  const iso = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+  const requestedStart = String(req.query.start || "").trim();
+  const requestedEnd = String(req.query.end || "").trim();
+
+  const startValue = /^\d{4}-\d{2}-\d{2}$/.test(requestedStart) ? requestedStart : iso(today);
+  const endValue = /^\d{4}-\d{2}-\d{2}$/.test(requestedEnd) ? requestedEnd : startValue;
+
+  const start = new Date(`${startValue}T00:00:00`);
+  const end = new Date(`${endValue}T23:59:59.999`);
+
+  if (end < start) {
+    return { startValue: endValue, endValue: startValue, start: new Date(`${endValue}T00:00:00`), end: new Date(`${startValue}T23:59:59.999`) };
+  }
+  return { startValue, endValue, start, end };
+}
+
+async function getDispatcherActivityRange(start, end) {
   const [dispatcherUsersResult, dispatcherCallsResult, dispatcherJobsBookedResult, dispatcherJobsClosedResult, dispatcherStripeResult, dispatcherWallboardAgents] = await Promise.all([
     pool.query(`
       SELECT name, role, extension_number
@@ -10453,30 +10474,37 @@ async function getDispatcherActivityToday() {
       WHERE active = TRUE
       ORDER BY name ASC
     `),
-    pool.query(wallboardTodaySql()),
+    pool.query(`
+      SELECT *
+      FROM wallboard_calls
+      WHERE started_at BETWEEN $1 AND $2
+      ORDER BY started_at ASC
+    `, [start, end]).catch(async () => {
+      // Fallback for existing installations where calls are only available through the Yay helper.
+      return pool.query(wallboardTodaySql());
+    }),
     pool.query(`
       SELECT LOWER(TRIM(COALESCE(dispatcher_name, ''))) AS agent_key, COUNT(*)::int AS count
       FROM jobs
-      WHERE DATE(created_at) = CURRENT_DATE
+      WHERE created_at BETWEEN $1 AND $2
         AND COALESCE(dispatcher_name, '') <> ''
       GROUP BY LOWER(TRIM(COALESCE(dispatcher_name, '')))
-    `),
+    `, [start, end]),
     pool.query(`
       SELECT LOWER(TRIM(COALESCE(closed_by, ''))) AS agent_key, COUNT(*)::int AS count
       FROM jobs
-      WHERE closed_at IS NOT NULL
-        AND DATE(closed_at) = CURRENT_DATE
+      WHERE closed_at BETWEEN $1 AND $2
         AND COALESCE(closed_by, '') <> ''
         AND COALESCE(status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
       GROUP BY LOWER(TRIM(COALESCE(closed_by, '')))
-    `),
+    `, [start, end]),
     pool.query(`
       SELECT LOWER(TRIM(COALESCE(created_by, ''))) AS agent_key, COUNT(*)::int AS count
       FROM job_stripe_payment_links
-      WHERE DATE(created_at) = CURRENT_DATE
+      WHERE created_at BETWEEN $1 AND $2
         AND COALESCE(created_by, '') <> ''
       GROUP BY LOWER(TRIM(COALESCE(created_by, '')))
-    `),
+    `, [start, end]),
     getWallboardAgents()
   ]);
 
@@ -10486,7 +10514,13 @@ async function getDispatcherActivityToday() {
 
   const answeredCallsByExtension = {};
   dispatcherCallsResult.rows
-    .filter(call => String(call.call_type || "").toLowerCase() === "inbound" && String(call.answered_by || "").trim())
+    .filter(call => {
+      const stamp = new Date(call.started_at || call.start_time || call.created_at || 0);
+      return String(call.call_type || "").toLowerCase() === "inbound" &&
+        String(call.answered_by || "").trim() &&
+        !Number.isNaN(stamp.getTime()) &&
+        stamp >= start && stamp <= end;
+    })
     .forEach(call => {
       const ext = wallboardCallAgentExtension(call, dispatcherWallboardAgents);
       if (!ext) return;
@@ -10508,14 +10542,38 @@ async function getDispatcherActivityToday() {
 }
 
 function dispatcherActivityCardsHtml(dispatcherActivity) {
+  const maxCalls = Math.max(1, ...dispatcherActivity.map(item => item.calls));
+  const maxBooked = Math.max(1, ...dispatcherActivity.map(item => item.booked));
+  const maxClosed = Math.max(1, ...dispatcherActivity.map(item => item.closed));
+  const maxStripe = Math.max(1, ...dispatcherActivity.map(item => item.stripe));
+
   return dispatcherActivity.map(item => `
-    <article class="dispatcher-activity-card">
-      <div class="dispatcher-activity-name">${escapeHtml(item.name)}</div>
-      <div class="dispatcher-activity-metrics">
-        <div><span>Calls taken</span><strong>${item.calls}</strong></div>
-        <div><span>Jobs booked</span><strong>${item.booked}</strong></div>
-        <div><span>Jobs closed</span><strong>${item.closed}</strong></div>
-        <div><span>Stripe links</span><strong>${item.stripe}</strong></div>
+    <article class="dispatcher-card">
+      <div class="dispatcher-card-head">
+        <div class="dispatcher-avatar">${escapeHtml(String(item.name || "?").charAt(0).toUpperCase())}</div>
+        <div>
+          <div class="dispatcher-name">${escapeHtml(item.name)}</div>
+          <div class="dispatcher-role">${escapeHtml(item.role || "dispatcher")}</div>
+        </div>
+      </div>
+
+      <div class="dispatcher-metrics">
+        <div class="dispatcher-metric">
+          <div class="dispatcher-metric-top"><span>Calls taken</span><strong>${item.calls}</strong></div>
+          <div class="dispatcher-bar"><span style="width:${Math.round((item.calls / maxCalls) * 100)}%"></span></div>
+        </div>
+        <div class="dispatcher-metric">
+          <div class="dispatcher-metric-top"><span>Jobs booked</span><strong>${item.booked}</strong></div>
+          <div class="dispatcher-bar"><span style="width:${Math.round((item.booked / maxBooked) * 100)}%"></span></div>
+        </div>
+        <div class="dispatcher-metric">
+          <div class="dispatcher-metric-top"><span>Jobs closed</span><strong>${item.closed}</strong></div>
+          <div class="dispatcher-bar"><span style="width:${Math.round((item.closed / maxClosed) * 100)}%"></span></div>
+        </div>
+        <div class="dispatcher-metric">
+          <div class="dispatcher-metric-top"><span>Stripe links</span><strong>${item.stripe}</strong></div>
+          <div class="dispatcher-bar"><span style="width:${Math.round((item.stripe / maxStripe) * 100)}%"></span></div>
+        </div>
       </div>
     </article>
   `).join("");
@@ -10523,13 +10581,18 @@ function dispatcherActivityCardsHtml(dispatcherActivity) {
 
 app.get("/dispatcher-activity", async (req, res) => {
   try {
-    const dispatcherActivity = await getDispatcherActivityToday();
+    const range = dispatcherActivityDateRange(req);
+    const dispatcherActivity = await getDispatcherActivityRange(range.start, range.end);
     const cards = dispatcherActivityCardsHtml(dispatcherActivity);
 
     const totalCalls = dispatcherActivity.reduce((sum, item) => sum + item.calls, 0);
     const totalBooked = dispatcherActivity.reduce((sum, item) => sum + item.booked, 0);
     const totalClosed = dispatcherActivity.reduce((sum, item) => sum + item.closed, 0);
     const totalStripe = dispatcherActivity.reduce((sum, item) => sum + item.stripe, 0);
+
+    const rangeLabel = range.startValue === range.endValue
+      ? formatDate(range.start)
+      : `${formatDate(range.start)} – ${formatDate(range.end)}`;
 
     res.send(`
       <!DOCTYPE html>
@@ -10538,81 +10601,172 @@ app.get("/dispatcher-activity", async (req, res) => {
         <title>Dispatcher Activity</title>
         <style>
           ${sharedStyles()}
-          .activity-page { max-width: 1400px; margin: 0 auto; padding: 24px; }
+          .activity-page { max-width: 1480px; margin: 0 auto; }
+          .activity-hero {
+            display:flex;
+            justify-content:space-between;
+            align-items:flex-end;
+            gap:18px;
+            flex-wrap:wrap;
+            margin-bottom:18px;
+          }
+          .activity-hero h1 { margin-bottom:4px; }
+          .activity-range-label { color:#64748b; font-weight:700; }
+
+          .activity-filter {
+            background:#fff;
+            border:1px solid #e5e7eb;
+            border-radius:16px;
+            padding:14px;
+            display:flex;
+            align-items:end;
+            gap:10px;
+            flex-wrap:wrap;
+            box-shadow:0 8px 24px rgba(15,23,42,.04);
+          }
+          .activity-filter .filter-field { min-width:150px; }
+          .activity-filter label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#64748b; }
+
           .activity-summary-grid {
             display:grid;
-            grid-template-columns:repeat(4,minmax(150px,1fr));
-            gap:12px;
-            margin:16px 0 22px;
+            grid-template-columns:repeat(4,minmax(160px,1fr));
+            gap:14px;
+            margin:18px 0 22px;
           }
           .activity-summary {
             background:#fff;
             border:1px solid #e5e7eb;
-            border-radius:14px;
-            padding:15px;
+            border-radius:16px;
+            padding:17px;
+            box-shadow:0 8px 22px rgba(15,23,42,.035);
           }
-          .activity-summary span { display:block; font-size:12px; color:#667085; font-weight:800; }
-          .activity-summary strong { display:block; font-size:28px; margin-top:5px; color:#111827; }
-          .dispatcher-activity-grid {
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
-            gap:14px;
-          }
-          .dispatcher-activity-card {
-            border:1px solid #dbe3ec;
-            border-radius:14px;
-            padding:15px;
-            background:#f8fafc;
-          }
-          .dispatcher-activity-name {
-            font-weight:900;
-            font-size:17px;
-            color:#111827;
-            margin-bottom:10px;
-          }
-          .dispatcher-activity-metrics {
-            display:grid;
-            grid-template-columns:1fr 1fr;
-            gap:8px;
-          }
-          .dispatcher-activity-metrics div {
-            background:#fff;
-            border:1px solid #e5e7eb;
-            border-radius:10px;
-            padding:10px;
-          }
-          .dispatcher-activity-metrics span {
+          .activity-summary span {
             display:block;
             font-size:11px;
-            color:#667085;
-            font-weight:700;
+            text-transform:uppercase;
+            letter-spacing:.04em;
+            color:#64748b;
+            font-weight:800;
           }
-          .dispatcher-activity-metrics strong {
+          .activity-summary strong {
             display:block;
-            margin-top:3px;
-            font-size:22px;
-            color:#111827;
+            font-size:30px;
+            margin-top:7px;
+            color:#0f172a;
           }
-          @media (max-width: 900px) {
-            .activity-summary-grid { grid-template-columns:1fr 1fr; }
+
+          .dispatcher-grid {
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+            gap:14px;
+          }
+          .dispatcher-card {
+            background:#fff;
+            border:1px solid #dbe3ec;
+            border-radius:18px;
+            padding:16px;
+            box-shadow:0 10px 28px rgba(15,23,42,.045);
+          }
+          .dispatcher-card-head {
+            display:flex;
+            align-items:center;
+            gap:11px;
+            margin-bottom:15px;
+          }
+          .dispatcher-avatar {
+            width:42px;
+            height:42px;
+            border-radius:14px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            background:#26323a;
+            color:#fff;
+            font-weight:900;
+            font-size:18px;
+          }
+          .dispatcher-name { font-weight:900; font-size:17px; color:#111827; }
+          .dispatcher-role { font-size:11px; color:#64748b; text-transform:capitalize; margin-top:2px; }
+
+          .dispatcher-metrics { display:grid; gap:10px; }
+          .dispatcher-metric {
+            background:#f8fafc;
+            border:1px solid #edf1f5;
+            border-radius:12px;
+            padding:10px 11px;
+          }
+          .dispatcher-metric-top {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            gap:10px;
+          }
+          .dispatcher-metric-top span { font-size:12px; color:#64748b; font-weight:700; }
+          .dispatcher-metric-top strong { font-size:18px; color:#111827; }
+          .dispatcher-bar {
+            height:5px;
+            margin-top:7px;
+            background:#e5e7eb;
+            border-radius:999px;
+            overflow:hidden;
+          }
+          .dispatcher-bar span {
+            display:block;
+            height:100%;
+            background:#26323a;
+            border-radius:999px;
+          }
+
+          .activity-empty {
+            background:#fff;
+            border:1px solid #e5e7eb;
+            border-radius:16px;
+            padding:22px;
+            color:#64748b;
+          }
+
+          @media(max-width:1000px){
+            .activity-summary-grid{grid-template-columns:1fr 1fr}
+          }
+          @media(max-width:650px){
+            .activity-summary-grid{grid-template-columns:1fr}
+            .activity-filter{align-items:stretch}
+            .activity-filter .filter-field{width:100%}
           }
         </style>
       </head>
       <body>
         ${nav(req)}
         <main class="activity-page">
-          <h1>Dispatcher Activity</h1>
-          <div class="subtitle">Today’s activity by dispatcher.</div>
+          <div class="activity-hero">
+            <div>
+              <h1>Dispatcher Activity</h1>
+              <div class="activity-range-label">${escapeHtml(rangeLabel)}</div>
+            </div>
 
-          <div class="activity-summary-grid">
-            <div class="activity-summary"><span>Total calls taken</span><strong>${totalCalls}</strong></div>
-            <div class="activity-summary"><span>Total jobs booked</span><strong>${totalBooked}</strong></div>
-            <div class="activity-summary"><span>Total jobs closed</span><strong>${totalClosed}</strong></div>
-            <div class="activity-summary"><span>Total Stripe links</span><strong>${totalStripe}</strong></div>
+            <form class="activity-filter" method="GET" action="/dispatcher-activity">
+              <div class="filter-field">
+                <label>From</label>
+                <input type="date" name="start" value="${escapeHtml(range.startValue)}">
+              </div>
+              <div class="filter-field">
+                <label>To</label>
+                <input type="date" name="end" value="${escapeHtml(range.endValue)}">
+              </div>
+              <button type="submit">Apply range</button>
+              <a class="button secondary" href="/dispatcher-activity">Today</a>
+            </form>
           </div>
 
-          <div class="dispatcher-activity-grid">
-            ${cards || `<div class="panel">No active dispatchers found.</div>`}
+          <div class="activity-summary-grid">
+            <div class="activity-summary"><span>Calls taken</span><strong>${totalCalls}</strong></div>
+            <div class="activity-summary"><span>Jobs booked</span><strong>${totalBooked}</strong></div>
+            <div class="activity-summary"><span>Jobs closed</span><strong>${totalClosed}</strong></div>
+            <div class="activity-summary"><span>Stripe links created</span><strong>${totalStripe}</strong></div>
+          </div>
+
+          <div class="dispatcher-grid">
+            ${cards || `<div class="activity-empty">No dispatcher activity found for this date range.</div>`}
           </div>
         </main>
       </body>
