@@ -1,4 +1,4 @@
-// YDP Unified master + dispatcher activity grouping fixes (v142)
+// YDP Unified master + Dispatcher Activity menu page (v143)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -2716,6 +2716,7 @@ function nav(req) {
         <div class="sidebar-label">Operations</div>
         <a class="side-link${active("/call-wallboard")}" href="/call-wallboard"><span class="side-dot dot-green"></span><span>Call wallboard</span></a>
         <a class="side-link${active("/jobs")}" href="/jobs"><span class="side-dot dot-red"></span><span>Dispatch Board</span></a>
+        <a class="side-link${active("/dispatcher-activity")}" href="/dispatcher-activity"><span class="side-dot dot-blue"></span><span>Dispatcher Activity</span></a>
         <a class="side-link${active("/jobs/new")}" href="/jobs/new"><span class="side-dot dot-blue"></span><span>Create order</span></a>
         <a class="side-link${active("/customers")}" href="/customers"><span class="side-dot dot-green"></span><span>Customers</span></a>
         <a class="side-link${active("/account-clients")}" href="/account-clients"><span class="side-dot dot-blue"></span><span>Account Clients</span></a>
@@ -10289,6 +10290,186 @@ function chromebookResponsiveStyles() {
 }
 
 
+
+async function getDispatcherActivityToday() {
+  const [dispatcherUsersResult, dispatcherCallsResult, dispatcherJobsBookedResult, dispatcherJobsClosedResult, dispatcherStripeResult, dispatcherWallboardAgents] = await Promise.all([
+    pool.query(`
+      SELECT name, role, extension_number
+      FROM app_users
+      WHERE active = TRUE
+      ORDER BY name ASC
+    `),
+    pool.query(wallboardTodaySql()),
+    pool.query(`
+      SELECT LOWER(TRIM(COALESCE(dispatcher_name, ''))) AS agent_key, COUNT(*)::int AS count
+      FROM jobs
+      WHERE DATE(created_at) = CURRENT_DATE
+        AND COALESCE(dispatcher_name, '') <> ''
+      GROUP BY LOWER(TRIM(COALESCE(dispatcher_name, '')))
+    `),
+    pool.query(`
+      SELECT LOWER(TRIM(COALESCE(closed_by, ''))) AS agent_key, COUNT(*)::int AS count
+      FROM jobs
+      WHERE closed_at IS NOT NULL
+        AND DATE(closed_at) = CURRENT_DATE
+        AND COALESCE(closed_by, '') <> ''
+        AND COALESCE(status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
+      GROUP BY LOWER(TRIM(COALESCE(closed_by, '')))
+    `),
+    pool.query(`
+      SELECT LOWER(TRIM(COALESCE(created_by, ''))) AS agent_key, COUNT(*)::int AS count
+      FROM job_stripe_payment_links
+      WHERE DATE(created_at) = CURRENT_DATE
+        AND COALESCE(created_by, '') <> ''
+      GROUP BY LOWER(TRIM(COALESCE(created_by, '')))
+    `),
+    getWallboardAgents()
+  ]);
+
+  const bookedByAgent = Object.fromEntries(dispatcherJobsBookedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+  const closedByAgent = Object.fromEntries(dispatcherJobsClosedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+  const stripeByAgent = Object.fromEntries(dispatcherStripeResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
+
+  const answeredCallsByExtension = {};
+  dispatcherCallsResult.rows
+    .filter(call => String(call.call_type || "").toLowerCase() === "inbound" && String(call.answered_by || "").trim())
+    .forEach(call => {
+      const ext = wallboardCallAgentExtension(call, dispatcherWallboardAgents);
+      if (!ext) return;
+      answeredCallsByExtension[ext] = Number(answeredCallsByExtension[ext] || 0) + 1;
+    });
+
+  return dispatcherUsersResult.rows.map(user => {
+    const key = String(user.name || "").trim().toLowerCase();
+    const ext = String(user.extension_number || "").trim();
+    return {
+      name: user.name,
+      role: user.role || "dispatcher",
+      calls: Number(answeredCallsByExtension[ext] || 0),
+      booked: Number(bookedByAgent[key] || 0),
+      closed: Number(closedByAgent[key] || 0),
+      stripe: Number(stripeByAgent[key] || 0)
+    };
+  });
+}
+
+function dispatcherActivityCardsHtml(dispatcherActivity) {
+  return dispatcherActivity.map(item => `
+    <article class="dispatcher-activity-card">
+      <div class="dispatcher-activity-name">${escapeHtml(item.name)}</div>
+      <div class="dispatcher-activity-metrics">
+        <div><span>Calls taken</span><strong>${item.calls}</strong></div>
+        <div><span>Jobs booked</span><strong>${item.booked}</strong></div>
+        <div><span>Jobs closed</span><strong>${item.closed}</strong></div>
+        <div><span>Stripe links</span><strong>${item.stripe}</strong></div>
+      </div>
+    </article>
+  `).join("");
+}
+
+app.get("/dispatcher-activity", async (req, res) => {
+  try {
+    const dispatcherActivity = await getDispatcherActivityToday();
+    const cards = dispatcherActivityCardsHtml(dispatcherActivity);
+
+    const totalCalls = dispatcherActivity.reduce((sum, item) => sum + item.calls, 0);
+    const totalBooked = dispatcherActivity.reduce((sum, item) => sum + item.booked, 0);
+    const totalClosed = dispatcherActivity.reduce((sum, item) => sum + item.closed, 0);
+    const totalStripe = dispatcherActivity.reduce((sum, item) => sum + item.stripe, 0);
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Dispatcher Activity</title>
+        <style>
+          ${sharedStyles()}
+          .activity-page { max-width: 1400px; margin: 0 auto; padding: 24px; }
+          .activity-summary-grid {
+            display:grid;
+            grid-template-columns:repeat(4,minmax(150px,1fr));
+            gap:12px;
+            margin:16px 0 22px;
+          }
+          .activity-summary {
+            background:#fff;
+            border:1px solid #e5e7eb;
+            border-radius:14px;
+            padding:15px;
+          }
+          .activity-summary span { display:block; font-size:12px; color:#667085; font-weight:800; }
+          .activity-summary strong { display:block; font-size:28px; margin-top:5px; color:#111827; }
+          .dispatcher-activity-grid {
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+            gap:14px;
+          }
+          .dispatcher-activity-card {
+            border:1px solid #dbe3ec;
+            border-radius:14px;
+            padding:15px;
+            background:#f8fafc;
+          }
+          .dispatcher-activity-name {
+            font-weight:900;
+            font-size:17px;
+            color:#111827;
+            margin-bottom:10px;
+          }
+          .dispatcher-activity-metrics {
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:8px;
+          }
+          .dispatcher-activity-metrics div {
+            background:#fff;
+            border:1px solid #e5e7eb;
+            border-radius:10px;
+            padding:10px;
+          }
+          .dispatcher-activity-metrics span {
+            display:block;
+            font-size:11px;
+            color:#667085;
+            font-weight:700;
+          }
+          .dispatcher-activity-metrics strong {
+            display:block;
+            margin-top:3px;
+            font-size:22px;
+            color:#111827;
+          }
+          @media (max-width: 900px) {
+            .activity-summary-grid { grid-template-columns:1fr 1fr; }
+          }
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <main class="activity-page">
+          <h1>Dispatcher Activity</h1>
+          <div class="subtitle">Today’s activity by dispatcher.</div>
+
+          <div class="activity-summary-grid">
+            <div class="activity-summary"><span>Total calls taken</span><strong>${totalCalls}</strong></div>
+            <div class="activity-summary"><span>Total jobs booked</span><strong>${totalBooked}</strong></div>
+            <div class="activity-summary"><span>Total jobs closed</span><strong>${totalClosed}</strong></div>
+            <div class="activity-summary"><span>Total Stripe links</span><strong>${totalStripe}</strong></div>
+          </div>
+
+          <div class="dispatcher-activity-grid">
+            ${cards || `<div class="panel">No active dispatchers found.</div>`}
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Dispatcher activity page error:", error);
+    res.status(500).send("Dispatcher Activity error. Check Render logs.");
+  }
+});
+
 app.get("/jobs", async (req, res) => {
   try {
     const isAdmin = currentUserRole(req) === "admin";
@@ -10515,77 +10696,8 @@ app.get("/jobs", async (req, res) => {
     const accountPendingTotal = Number(accountPendingMetricResult.rows[0]?.count || 0);
     const periodMetrics = periodMetricsResult.rows[0] || {};
 
-    // Dispatcher activity cards: live daily office activity by portal user.
-    const [dispatcherUsersResult, dispatcherCallsResult, dispatcherJobsBookedResult, dispatcherJobsClosedResult, dispatcherStripeResult, dispatcherWallboardAgents] = await Promise.all([
-      pool.query(`
-        SELECT name, role, extension_number
-        FROM app_users
-        WHERE active = TRUE
-        ORDER BY name ASC
-      `),
-      pool.query(wallboardTodaySql()),
-      pool.query(`
-        SELECT LOWER(TRIM(COALESCE(dispatcher_name, ''))) AS agent_key, COUNT(*)::int AS count
-        FROM jobs
-        WHERE DATE(created_at) = CURRENT_DATE
-          AND COALESCE(dispatcher_name, '') <> ''
-        GROUP BY LOWER(TRIM(COALESCE(dispatcher_name, '')))
-      `),
-      pool.query(`
-        SELECT LOWER(TRIM(COALESCE(closed_by, ''))) AS agent_key, COUNT(*)::int AS count
-        FROM jobs
-        WHERE closed_at IS NOT NULL
-          AND DATE(closed_at) = CURRENT_DATE
-          AND COALESCE(closed_by, '') <> ''
-          AND COALESCE(status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
-        GROUP BY LOWER(TRIM(COALESCE(closed_by, '')))
-      `),
-      pool.query(`
-        SELECT LOWER(TRIM(COALESCE(created_by, ''))) AS agent_key, COUNT(*)::int AS count
-        FROM job_stripe_payment_links
-        WHERE DATE(created_at) = CURRENT_DATE
-          AND COALESCE(created_by, '') <> ''
-        GROUP BY LOWER(TRIM(COALESCE(created_by, '')))
-      `),
-      getWallboardAgents()
-    ]);
-
-    const bookedByAgent = Object.fromEntries(dispatcherJobsBookedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
-    const closedByAgent = Object.fromEntries(dispatcherJobsClosedResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
-    const stripeByAgent = Object.fromEntries(dispatcherStripeResult.rows.map(row => [row.agent_key, Number(row.count || 0)]));
-
-    const answeredCallsByExtension = {};
-    dispatcherCallsResult.rows
-      .filter(call => String(call.call_type || "").toLowerCase() === "inbound" && String(call.answered_by || "").trim())
-      .forEach(call => {
-        const ext = wallboardCallAgentExtension(call, dispatcherWallboardAgents);
-        if (!ext) return;
-        answeredCallsByExtension[ext] = Number(answeredCallsByExtension[ext] || 0) + 1;
-      });
-
-    const dispatcherActivity = dispatcherUsersResult.rows.map(user => {
-      const key = String(user.name || "").trim().toLowerCase();
-      const ext = String(user.extension_number || "").trim();
-      return {
-        name: user.name,
-        calls: Number(answeredCallsByExtension[ext] || 0),
-        booked: Number(bookedByAgent[key] || 0),
-        closed: Number(closedByAgent[key] || 0),
-        stripe: Number(stripeByAgent[key] || 0)
-      };
-    });
-
-    const dispatcherActivityHtml = dispatcherActivity.map(item => `
-      <article class="dispatcher-activity-card">
-        <div class="dispatcher-activity-name">${escapeHtml(item.name)}</div>
-        <div class="dispatcher-activity-metrics">
-          <div><span>Calls taken</span><strong>${item.calls}</strong></div>
-          <div><span>Jobs booked</span><strong>${item.booked}</strong></div>
-          <div><span>Jobs closed</span><strong>${item.closed}</strong></div>
-          <div><span>Stripe links</span><strong>${item.stripe}</strong></div>
-        </div>
-      </article>
-    `).join("");
+    const dispatcherActivity = await getDispatcherActivityToday();
+    const dispatcherActivityHtml = dispatcherActivityCardsHtml(dispatcherActivity);
 
     const periodLabel = kpiPeriod === "week" ? "This week" : (kpiPeriod === "month" ? "This month" : "Today");
     const money = value => `£${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
