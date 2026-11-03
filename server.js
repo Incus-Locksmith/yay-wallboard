@@ -1,4 +1,4 @@
-// YDP Unified master + dispatcher daily activity cards (v140)
+// YDP Unified master + dispatcher activity Stripe grouping fix (v141)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10545,7 +10545,7 @@ app.get("/jobs", async (req, res) => {
         FROM job_stripe_payment_links
         WHERE DATE(created_at) = CURRENT_DATE
           AND COALESCE(created_by, '') <> ''
-        GROUP BY LOWER(TRIM(created_by))
+        GROUP BY LOWER(TRIM(COALESCE(created_by, '')))
       `),
       getWallboardAgents()
     ]);
