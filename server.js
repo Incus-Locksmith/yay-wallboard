@@ -1,4 +1,4 @@
-// YDP Unified master + Dispatcher Activity menu page (v143)
+// YDP Unified master + technician daily schedule calendar (v144)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14186,6 +14186,112 @@ function technicianWorkspaceStyles() {
       .brief-card { padding:24px; }
       table { display:block; overflow-x:auto; }
     }
+
+    .tech-cal-title-row { display:flex; justify-content:space-between; align-items:flex-end; gap:14px; flex-wrap:wrap; }
+    .tech-cal-nav { display:flex; gap:8px; flex-wrap:wrap; }
+    .tech-calendar-panel { overflow:hidden; }
+    .tech-cal-hours {
+      position:relative;
+      height:34px;
+      margin-left:0;
+      border-bottom:1px solid #dbe3ec;
+      overflow:visible;
+    }
+    .tech-cal-hour {
+      position:absolute;
+      top:7px;
+      transform:translateX(-50%);
+      font-size:11px;
+      color:#64748b;
+      white-space:nowrap;
+    }
+    .tech-cal-track {
+      position:relative;
+      min-height:92px;
+      background:
+        linear-gradient(to right, rgba(15,23,42,0.018) 50%, rgba(15,23,42,0.035) 50%);
+      background-size:13.333% 100%;
+      overflow:hidden;
+    }
+    .tech-cal-gridline {
+      position:absolute;
+      top:0;
+      bottom:0;
+      width:1px;
+      background:#e5e7eb;
+    }
+    .tech-cal-event {
+      position:absolute;
+      min-width:84px;
+      height:56px;
+      border-radius:10px;
+      padding:7px 8px;
+      border:1px solid #bfdbfe;
+      background:#eff6ff;
+      color:#0f172a;
+      text-decoration:none;
+      overflow:hidden;
+      box-shadow:0 1px 2px rgba(15,23,42,.06);
+    }
+    .tech-cal-event strong,
+    .tech-cal-event span,
+    .tech-cal-event small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tech-cal-event strong { font-size:11px; }
+    .tech-cal-event span { font-weight:900; font-size:13px; margin-top:1px; }
+    .tech-cal-event small { font-size:10px; color:#475569; margin-top:2px; }
+    .tech-cal-now {
+      position:absolute;
+      top:0;
+      bottom:0;
+      width:2px;
+      background:#dc2626;
+      z-index:5;
+    }
+    .tech-cal-now span {
+      position:absolute;
+      top:-25px;
+      left:50%;
+      transform:translateX(-50%);
+      padding:3px 6px;
+      border-radius:9px;
+      background:#dc2626;
+      color:#fff;
+      font-size:10px;
+      font-weight:900;
+      white-space:nowrap;
+    }
+    .tech-cal-empty {
+      position:absolute;
+      left:14px;
+      top:28px;
+      color:#64748b;
+      font-size:13px;
+    }
+    .tech-unscheduled-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+      gap:10px;
+      margin-top:12px;
+    }
+    .tech-unscheduled-card {
+      display:block;
+      padding:12px;
+      border:1px solid #dbe3ec;
+      border-radius:12px;
+      background:#f8fafc;
+      color:#0f172a;
+      text-decoration:none;
+    }
+    .tech-unscheduled-card strong,
+    .tech-unscheduled-card span,
+    .tech-unscheduled-card small { display:block; }
+    .tech-unscheduled-card span { margin-top:3px; }
+    .tech-unscheduled-card small { margin-top:3px; color:#64748b; }
+    @media (max-width:700px) {
+      .tech-calendar-panel { overflow-x:auto; }
+      .tech-cal-hours, .tech-cal-track { min-width:980px; }
+      .tech-cal-title-row { align-items:flex-start; }
+    }
   `;
 }
 
@@ -14390,6 +14496,7 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
   return `
     <div class="tabs">
       <a class="tab ${active === 'jobs' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}">Active jobs</a>
+      <a class="tab ${active === 'schedule' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/schedule">Today's Schedule<br><span style="font-size:11px;">Programul de azi</span></a>
       <a class="tab ${active === 'disputes' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/disputes">${escapeHtml(disputeLabel)}</a>
       <a class="tab ${active === 'record' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/work-record">Your Work Record<br><span style="font-size:11px;">Evidența ta de lucru</span></a>
       <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
@@ -14804,6 +14911,212 @@ async function technicianPerformanceData(tech) {
 function techPerformanceLink(token, metric, label, count) {
   return `<a href="/tech-workspace/${escapeHtml(token)}/performance/jobs?metric=${encodeURIComponent(metric)}"><strong>${escapeHtml(String(count))}</strong></a>`;
 }
+
+
+function techScheduleDateParam(value) {
+  const raw = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  return dateInputValue(new Date());
+}
+
+function techScheduleTimeParts(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    hour: date.getHours(),
+    minute: date.getMinutes(),
+    totalMinutes: (date.getHours() * 60) + date.getMinutes()
+  };
+}
+
+function techScheduleLaneAssignments(jobs, dayStartMinutes = 7 * 60, assumedDurationMinutes = 75) {
+  const laneEnds = [];
+  return jobs.map(job => {
+    const parts = techScheduleTimeParts(job.scheduled_at);
+    const startMinutes = parts ? parts.totalMinutes : dayStartMinutes;
+    let lane = laneEnds.findIndex(end => startMinutes >= end);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(startMinutes + assumedDurationMinutes);
+    } else {
+      laneEnds[lane] = startMinutes + assumedDurationMinutes;
+    }
+    return { job, lane, startMinutes };
+  });
+}
+
+app.get('/tech-workspace/:token/schedule', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) {
+      return res.status(404).send(technicianPortalShell(
+        'Invalid technician link',
+        `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`
+      ));
+    }
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.send(technicianLoginPage(token, tech));
+    }
+
+    const selectedDate = techScheduleDateParam(req.query.date);
+    const dayStart = new Date(`${selectedDate}T00:00:00`);
+    const dayEnd = new Date(`${selectedDate}T23:59:59`);
+    const prev = new Date(`${selectedDate}T12:00:00`);
+    prev.setDate(prev.getDate() - 1);
+    const next = new Date(`${selectedDate}T12:00:00`);
+    next.setDate(next.getDate() + 1);
+
+    const assignedClause = `(j.assigned_technician_id = $1 OR j.assigned_technician_id IN (
+      SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)
+    ))`;
+
+    const scheduledJobs = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE ${assignedClause}
+        AND j.scheduled_at IS NOT NULL
+        AND j.scheduled_at BETWEEN $3 AND $4
+        AND COALESCE(j.status, '') NOT IN (
+          'closed','fully_paid','fully_paid_private','cancelled_before_arrival','cancelled_onsite'
+        )
+      ORDER BY j.scheduled_at ASC, j.id ASC
+    `, [tech.id, tech.name, dayStart, dayEnd])).rows;
+
+    const unscheduledJobs = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE ${assignedClause}
+        AND j.scheduled_at IS NULL
+        AND COALESCE(j.status, 'open') IN ('account_pending_review','open','assigned','scheduled')
+      ORDER BY j.created_at ASC
+    `, [tech.id, tech.name])).rows;
+
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
+
+    const dayStartMinutes = 7 * 60;
+    const dayEndMinutes = 22 * 60;
+    const totalDayMinutes = dayEndMinutes - dayStartMinutes;
+    const assigned = techScheduleLaneAssignments(scheduledJobs, dayStartMinutes, 75);
+    const laneCount = Math.max(1, ...assigned.map(item => item.lane + 1));
+    const laneHeight = 68;
+    const scheduleHeight = Math.max(92, (laneCount * laneHeight) + 18);
+
+    const hourLabels = [];
+    for (let hour = 7; hour <= 22; hour += 1) {
+      hourLabels.push(`<div class="tech-cal-hour" style="left:${((hour * 60 - dayStartMinutes) / totalDayMinutes) * 100}%">${String(hour).padStart(2, '0')}:00</div>`);
+    }
+
+    const gridLines = [];
+    for (let hour = 7; hour <= 22; hour += 1) {
+      gridLines.push(`<span class="tech-cal-gridline" style="left:${((hour * 60 - dayStartMinutes) / totalDayMinutes) * 100}%"></span>`);
+    }
+
+    const eventBlocks = assigned.map(({job, lane, startMinutes}) => {
+      const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 15, startMinutes));
+      const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
+      const width = Math.max(6.5, (75 / totalDayMinutes) * 100);
+      const time = scheduledTimeValue(job.scheduled_at) || '';
+      const top = 10 + (lane * laneHeight);
+      return `
+        <a class="tech-cal-event ${jobStatusClass(job.status)}"
+           href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}"
+           style="left:${left}%;width:${width}%;top:${top}px;"
+           title="${escapeHtml(`${time} · ${job.postcode || ''} · ${job.customer_name || ''}`)}">
+          <strong>${escapeHtml(time)}</strong>
+          <span>${escapeHtml(job.postcode || job.job_number || 'Job')}</span>
+          <small>${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.customer_name || 'Customer')}</small>
+        </a>
+      `;
+    }).join('');
+
+    const now = new Date();
+    const todayValue = dateInputValue(now);
+    let nowMarker = '';
+    if (selectedDate === todayValue) {
+      const nowMinutes = (now.getHours() * 60) + now.getMinutes();
+      if (nowMinutes >= dayStartMinutes && nowMinutes <= dayEndMinutes) {
+        const nowLeft = ((nowMinutes - dayStartMinutes) / totalDayMinutes) * 100;
+        nowMarker = `
+          <div class="tech-cal-now" style="left:${nowLeft}%;">
+            <span>${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}</span>
+          </div>
+        `;
+      }
+    }
+
+    const unscheduledHtml = unscheduledJobs.map(job => `
+      <a class="tech-unscheduled-card" href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}">
+        <strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong>
+        <span>${escapeHtml(job.job_type || 'Job')}</span>
+        <small>${escapeHtml(job.customer_name || 'Customer')} · ${escapeHtml(jobStatusLabel(job.status))}</small>
+      </a>
+    `).join('');
+
+    const selectedDisplay = formatDate(dayStart);
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Daily schedule</div>
+      </div>
+
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'schedule', openDisputeCount)}
+
+        <div class="tech-cal-title-row">
+          <div>
+            <h1 style="margin-bottom:4px;">Today's Schedule</h1>
+            <div class="job-sub">Programul de azi · ${escapeHtml(selectedDisplay)}</div>
+          </div>
+          <div class="tech-cal-nav">
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/schedule?date=${escapeHtml(dateInputValue(prev))}">← Previous</a>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/schedule">Today</a>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/schedule?date=${escapeHtml(dateInputValue(next))}">Next →</a>
+          </div>
+        </div>
+
+        <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}/schedule" style="margin-bottom:14px;">
+          <label style="font-weight:800;">Choose day</label>
+          <input type="date" name="date" value="${escapeHtml(selectedDate)}">
+          <button class="button dark" type="submit">Go</button>
+        </form>
+
+        <div class="panel tech-calendar-panel">
+          <div class="tech-cal-hours">${hourLabels.join('')}</div>
+          <div class="tech-cal-track" style="height:${scheduleHeight}px;">
+            ${gridLines.join('')}
+            ${nowMarker}
+            ${eventBlocks || `<div class="tech-cal-empty">No scheduled jobs for this day.</div>`}
+          </div>
+          <div class="job-sub" style="margin-top:10px;">
+            Scheduled jobs are shown from 07:00 to 22:00. Tap a job to open it in Active Jobs.
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="job-head">
+            <div>
+              <h2 style="margin:0;">Unallocated / no time set</h2>
+              <div class="job-sub">Fără oră stabilită</div>
+            </div>
+            <span class="pill job-assigned">${unscheduledJobs.length}</span>
+          </div>
+          <div class="tech-unscheduled-grid">
+            ${unscheduledHtml || `<div class="empty">No active jobs without a scheduled time.</div>`}
+          </div>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Technician Daily Schedule', body));
+  } catch (error) {
+    console.error('Technician schedule error:', error);
+    res.status(500).send('Technician schedule error. Check Render logs.');
+  }
+});
 
 app.get('/tech-workspace/:token', async (req, res) => {
   try {
