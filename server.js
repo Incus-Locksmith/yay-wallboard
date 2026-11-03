@@ -1,4 +1,4 @@
-// YDP Unified master + Account campaign details driven by Type (v161)
+// YDP Unified master + remove duplicate Account campaign badge (v162)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -7758,7 +7758,6 @@ app.get("/campaigns", async (req, res) => {
           </td>
           <td>
             <span class="pill ${campaignBadgeClass(campaign.campaign_type)}">${escapeHtml(campaign.campaign_type || "Private")}</span>
-            ${String(campaign.campaign_type || "").toLowerCase() === "account" ? `<div style="margin-top:6px;"><span class="pill stage-emailed">Account job</span></div>` : ""}
           </td>
           <td>
             ${String(campaign.campaign_type || "").toLowerCase() === "account" ? `
