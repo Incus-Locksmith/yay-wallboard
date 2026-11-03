@@ -1,4 +1,4 @@
-// YDP Unified master + admin technician activity leaderboard (v154)
+// YDP Unified master + mobile technician workspace, 24h weekly schedule and job search (v156)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3311,6 +3311,19 @@ async function initDb() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS technician_schedule_blocks_tech_start_idx ON technician_schedule_blocks (technician_id, starts_at);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS technician_shift_briefing_acknowledgements (
+      id SERIAL PRIMARY KEY,
+      technician_id INTEGER NOT NULL,
+      briefing_date DATE NOT NULL,
+      briefing_slot TEXT NOT NULL,
+      acknowledged_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (technician_id, briefing_date, briefing_slot)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS technician_shift_briefing_tech_date_idx ON technician_shift_briefing_acknowledgements (technician_id, briefing_date);`);
+
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
@@ -14471,7 +14484,7 @@ function technicianWorkspaceStyles() {
     .brief-line.green { border-color:var(--green); background:#dcfce7; }
     .brief-button { display:block; width:100%; background:var(--red); color:white; text-align:center; border:0; border-radius:10px; padding:17px 18px; margin-top:24px; font-weight:900; cursor:pointer; font-size:15px; }
     .tabs { display:flex; gap:10px; margin:18px 0; flex-wrap:wrap; }
-    .tab { display:inline-flex; align-items:center; gap:8px; padding:11px 16px; border:1px solid var(--border); border-radius:12px; background:white; color:var(--text); text-decoration:none; font-weight:800; }
+    .tab { display:inline-flex; align-items:center; gap:8px; padding:11px 16px; border:1px solid var(--border); border-radius:12px; background:white; color:var(--text); text-decoration:none; font-weight:800; white-space:normal; line-height:1.2; overflow-wrap:anywhere; }
     .tab.active { background:var(--charcoal); color:white; border-color:var(--charcoal); }
     .toolbar { display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:10px; margin:14px 0; }
     input, select, textarea { width:100%; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:15px; background:white; color:var(--text); }
@@ -14511,11 +14524,27 @@ function technicianWorkspaceStyles() {
     .empty { background:white; border:1px dashed var(--border); padding:30px; border-radius:16px; text-align:center; color:var(--muted); }
     .money { font-weight:900; }
     @media(max-width:760px){
-      .topbar { height:auto; padding:12px; align-items:flex-start; }
-      .wrap { padding:12px; }
+      body { font-size:15px; }
+      .topbar { height:auto; padding:10px 12px; align-items:flex-start; gap:8px; flex-wrap:wrap; }
+      .brand { font-size:16px; }
+      .wrap { padding:10px; }
+      .tabs { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0; }
+      .tab { width:100%; min-width:0; padding:10px 9px; justify-content:center; text-align:center; font-size:12px; }
       .toolbar, .summary-grid, .field-grid, .actions { grid-template-columns:1fr; }
-      .brief-card { padding:24px; }
+      .brief-card { padding:18px; }
+      .job-card, .panel { padding:14px; border-radius:14px; }
+      .job-head { display:block; }
+      .job-head .pill { margin-top:10px; }
+      .job-title { font-size:20px; }
+      .button { min-height:44px; width:100%; }
+      input, select, textarea { font-size:16px; min-height:44px; }
       table { display:block; overflow-x:auto; }
+      .tech-calendar-panel { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+      .tech-cal-hours, .tech-cal-track { min-width:1440px !important; }
+      .tech-cal-title-row { display:block; }
+      .tech-cal-nav { display:grid; grid-template-columns:1fr 1fr 1fr; margin-top:10px; }
+      .tech-cal-nav .button { width:auto; padding:10px 8px; font-size:12px; }
+      .tech-week-grid { grid-template-columns:1fr !important; }
     }
 
     .tech-cal-title-row { display:flex; justify-content:space-between; align-items:flex-end; gap:14px; flex-wrap:wrap; }
@@ -14602,6 +14631,40 @@ function technicianWorkspaceStyles() {
       opacity:.9;
     }
     .tech-cal-closed small { color:#6b7280 !important; }
+    .tech-week-grid { display:grid; grid-template-columns:repeat(7,minmax(150px,1fr)); gap:10px; }
+    .tech-week-day { background:#fff; border:1px solid #e5e7eb; border-radius:14px; padding:10px; min-height:130px; }
+    .tech-week-day.is-today { border:2px solid #26323a; }
+    .tech-week-day-head { display:flex; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .tech-week-day-head span { color:#64748b; font-size:12px; }
+    .tech-week-job { display:block; padding:8px; border-radius:10px; background:#eef2ff; color:#312e81; text-decoration:none; margin-top:7px; }
+    .tech-week-job strong,.tech-week-job span { display:block; }
+    .tech-week-job span { font-size:11px; margin-top:2px; }
+    .tech-week-job.is-closed { background:#e5e7eb; color:#4b5563; }
+    .tech-week-empty { color:#94a3b8; font-size:12px; padding:8px 0; }
+    .tech-shift-page { min-height:100vh; padding:24px; display:flex; justify-content:center; align-items:flex-start; background:linear-gradient(rgba(15,23,42,.74),rgba(15,23,42,.74)),#1f2937; }
+    .tech-shift-card { width:min(900px,100%); margin:20px auto; background:#fff; border-radius:24px; padding:28px; box-shadow:0 28px 80px rgba(0,0,0,.32); }
+    .tech-shift-head { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; margin-bottom:20px; }
+    .tech-shift-head h1 { margin:12px 0 6px; font-size:30px; }
+    .tech-shift-head p { margin:0; color:#64748b; }
+    .tech-shift-pill { display:inline-flex; padding:7px 12px; border-radius:999px; background:#fee2e2; color:#b91c1c; font-size:11px; font-weight:900; text-transform:uppercase; letter-spacing:.04em; }
+    .tech-shift-status { min-width:180px; padding:13px; border-radius:14px; background:#f8fafc; border:1px solid #e5e7eb; }
+    .tech-shift-status span,.tech-shift-status small { display:block; color:#64748b; font-size:11px; }
+    .tech-shift-status strong { display:block; margin:5px 0; font-size:17px; }
+    .tech-shift-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:18px 0 22px; }
+    .tech-shift-metric { background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:13px; }
+    .tech-shift-metric span { display:block; min-height:26px; font-size:11px; color:#64748b; font-weight:900; text-transform:uppercase; }
+    .tech-shift-metric strong { display:block; margin-top:5px; font-size:27px; }
+    .tech-shift-section { border:1px solid #e5e7eb; border-radius:16px; overflow:hidden; margin-top:12px; }
+    .tech-shift-section-title { padding:13px 15px; background:#f8fafc; font-weight:900; }
+    .tech-shift-line { display:grid; grid-template-columns:60px 1fr auto; gap:10px; align-items:center; padding:12px 15px; border-top:1px solid #edf1f5; }
+    .tech-shift-line span:not(.pill) { display:block; margin-top:3px; color:#64748b; font-size:12px; }
+    .tech-shift-empty { padding:16px; color:#64748b; }
+    .tech-shift-alert { margin-top:14px; padding:14px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa; }
+    .tech-shift-alert strong,.tech-shift-alert span { display:block; }
+    .tech-shift-alert span { margin-top:4px; color:#9a3412; font-size:13px; }
+    .tech-shift-enter { width:100%; justify-content:center; margin-top:20px; padding:15px 18px; font-size:16px; }
+    @media(max-width:700px){ .tech-shift-page{padding:10px}.tech-shift-card{padding:20px;margin:8px auto}.tech-shift-head{display:block}.tech-shift-status{margin-top:14px}.tech-shift-metrics{grid-template-columns:1fr 1fr}.tech-shift-line{grid-template-columns:52px 1fr}.tech-shift-line .pill{grid-column:2} }
+
     .tech-cal-now {
       position:absolute;
       top:0;
@@ -14652,7 +14715,7 @@ function technicianWorkspaceStyles() {
     .tech-unscheduled-card small { margin-top:3px; color:#64748b; }
     @media (max-width:700px) {
       .tech-calendar-panel { overflow-x:auto; }
-      .tech-cal-hours, .tech-cal-track { min-width:980px; }
+      .tech-cal-hours, .tech-cal-track { min-width:1440px; }
       .tech-cal-title-row { align-items:flex-start; }
     }
   `;
@@ -14670,6 +14733,27 @@ function technicianPortalShell(title, bodyHtml) {
     <body>
       ${bodyHtml}
       <script>
+        (function technicianBriefingWatcher(){
+          const match = window.location.pathname.match(/^\/tech-workspace\/([^\/]+)/);
+          if (!match) return;
+          if (window.location.pathname.includes('/start-shift')) return;
+          const token = match[1];
+
+          async function checkBriefing(){
+            try {
+              const response = await fetch('/tech-workspace/' + encodeURIComponent(token) + '/briefing-status', { cache: 'no-store' });
+              if (!response.ok) return;
+              const data = await response.json();
+              if (data && data.due) {
+                window.location.href = '/tech-workspace/' + encodeURIComponent(token) + '/start-shift';
+              }
+            } catch (_) {}
+          }
+
+          window.setTimeout(checkBriefing, 1500);
+          window.setInterval(checkBriefing, 60000);
+        })();
+
         function copyTechStripeLink(url) {
           if (!url) return;
           if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -14859,9 +14943,10 @@ function technicianWorkspaceTabs(token, active, disputeCount = 0) {
   return `
     <div class="tabs">
       <a class="tab ${active === 'jobs' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}">Active jobs</a>
-      <a class="tab ${active === 'schedule' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/schedule">Today's Schedule<br><span style="font-size:11px;">Programul de azi</span></a>
+      <a class="tab ${active === 'search' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/search">Search Jobs<br><span style="font-size:11px;">Caută lucrări</span></a>
+      <a class="tab ${active === 'schedule' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/schedule">Schedule<br><span style="font-size:11px;">Program</span></a>
       <a class="tab ${active === 'disputes' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/disputes">${escapeHtml(disputeLabel)}</a>
-      <a class="tab ${active === 'record' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/work-record">Your Work Record<br><span style="font-size:11px;">Evidența ta de lucru</span></a>
+      <a class="tab ${active === 'record' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/work-record"><span>Your Work<br>Record</span><br><span style="font-size:11px;">Evidența ta</span></a>
       <a class="tab ${active === 'summary' ? 'active' : ''}" href="/tech-workspace/${escapeHtml(token)}/summary">Income summary</a>
       <a class="tab" href="/tech-checkin/${escapeHtml(token)}">Status check-in</a>
       <a class="tab" href="/tech-workspace/${escapeHtml(token)}/logout">Lock dashboard</a>
@@ -15054,6 +15139,187 @@ async function getOpenDisputesForTechnician(tech) {
 }
 
 
+
+function londonShiftBriefingContext() {
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(now);
+  const part = type => dateParts.find(item => item.type === type)?.value || '';
+  const dateValue = `${part('year')}-${part('month')}-${part('day')}`;
+  const hour = Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', hour: '2-digit', hour12: false
+  }).format(now));
+  const slot = hour >= 18 ? 'evening' : 'start';
+  return { now, dateValue, hour, slot };
+}
+
+async function technicianShiftBriefingDue(tech) {
+  const context = londonShiftBriefingContext();
+  const result = await pool.query(`
+    SELECT id
+    FROM technician_shift_briefing_acknowledgements
+    WHERE technician_id = $1
+      AND briefing_date = $2::date
+      AND briefing_slot = $3
+    LIMIT 1
+  `, [tech.id, context.dateValue, context.slot]);
+  return { ...context, due: result.rows.length === 0 };
+}
+
+app.get('/tech-workspace/:token/briefing-status', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech || !isTechnicianWorkspaceLoggedIn(req, token)) return res.status(401).json({ due: false });
+    const status = await technicianShiftBriefingDue(tech);
+    res.json({ due: status.due, slot: status.slot, date: status.dateValue });
+  } catch (error) {
+    console.error('Technician briefing status error:', error);
+    res.status(500).json({ due: false });
+  }
+});
+
+app.get('/tech-workspace/:token/start-shift', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+
+    const briefing = await technicianShiftBriefingDue(tech);
+    if (!briefing.due) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+
+    const dayStart = new Date(`${briefing.dateValue}T00:00:00`);
+    const dayEnd = new Date(`${briefing.dateValue}T23:59:59.999`);
+    const techMatch = `(assigned_technician_id = $1 OR assigned_technician_id IN (SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)))`;
+
+    const [activeResult, scheduledResult, completedResult, cancelledResult, scheduleResult, partsResult, disputes] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE ${techMatch} AND COALESCE(status,'open') IN ('account_pending_review','open','assigned','scheduled')`, [tech.id, tech.name]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE ${techMatch} AND scheduled_at BETWEEN $3 AND $4`, [tech.id, tech.name, dayStart, dayEnd]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE ${techMatch} AND closed_at BETWEEN $3 AND $4 AND COALESCE(status,'') NOT IN ('cancelled_before_arrival','cancelled_onsite')`, [tech.id, tech.name, dayStart, dayEnd]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM jobs WHERE ${techMatch} AND status = 'cancelled_onsite' AND COALESCE(closed_at,updated_at,created_at) BETWEEN $3 AND $4`, [tech.id, tech.name, dayStart, dayEnd]),
+      pool.query(`
+        SELECT id, job_number, postcode, job_type, customer_name, scheduled_at, status
+        FROM jobs
+        WHERE ${techMatch}
+          AND scheduled_at BETWEEN $3 AND $4
+        ORDER BY scheduled_at ASC
+        LIMIT 8
+      `, [tech.id, tech.name, dayStart, dayEnd]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM technician_schedule_blocks WHERE technician_id=$1 AND starts_at BETWEEN $2 AND $3`, [tech.id, dayStart, dayEnd]),
+      getOpenDisputesForTechnician(tech)
+    ]);
+
+    const activeJobs = Number(activeResult.rows[0]?.count || 0);
+    const scheduledToday = Number(scheduledResult.rows[0]?.count || 0);
+    const completedToday = Number(completedResult.rows[0]?.count || 0);
+    const cancelledOnsite = Number(cancelledResult.rows[0]?.count || 0);
+    const partsBlocks = Number(partsResult.rows[0]?.count || 0);
+    const disputeCount = disputes.length;
+
+    const scheduleRows = scheduleResult.rows.map(job => `
+      <div class="tech-shift-line">
+        <div><strong>${escapeHtml(scheduledTimeValue(job.scheduled_at) || '—')}</strong></div>
+        <div>
+          <strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong>
+          <span>${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.customer_name || 'Customer')}</span>
+        </div>
+        <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+      </div>
+    `).join('');
+
+    const greeting = briefing.hour < 12 ? 'Good morning' : briefing.hour < 18 ? 'Good afternoon' : 'Good evening';
+    const slotTitle = briefing.slot === 'evening' ? '18:00 shift summary' : 'Start of shift summary';
+    const slotText = briefing.slot === 'evening'
+      ? 'Here is your evening position before you continue the shift.'
+      : 'Here is your position before you start the day.';
+    const todayLabel = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+    }).format(new Date());
+
+    const body = `
+      <div class="tech-shift-page">
+        <div class="tech-shift-card">
+          <div class="tech-shift-head">
+            <div>
+              <span class="tech-shift-pill">${escapeHtml(slotTitle)}</span>
+              <h1>${escapeHtml(greeting)}, ${escapeHtml(tech.name)}.</h1>
+              <p>${escapeHtml(slotText)} <strong>${escapeHtml(todayLabel)}</strong></p>
+            </div>
+            <div class="tech-shift-status">
+              <span>Status</span>
+              <strong>${escapeHtml(tech.status || 'Not set')}</strong>
+              <small>${escapeHtml(locationFreshnessText(tech.location_checked_in_at))}</small>
+            </div>
+          </div>
+
+          <div class="tech-shift-metrics">
+            <div class="tech-shift-metric"><span>Active jobs</span><strong>${activeJobs}</strong></div>
+            <div class="tech-shift-metric"><span>Scheduled today</span><strong>${scheduledToday}</strong></div>
+            <div class="tech-shift-metric"><span>Completed today</span><strong>${completedToday}</strong></div>
+            <div class="tech-shift-metric"><span>Cancelled onsite</span><strong>${cancelledOnsite}</strong></div>
+            <div class="tech-shift-metric"><span>DUFFLES / PARTS</span><strong>${partsBlocks}</strong></div>
+            <div class="tech-shift-metric"><span>Open disputes</span><strong>${disputeCount}</strong></div>
+          </div>
+
+          <section class="tech-shift-section">
+            <div class="tech-shift-section-title">Today's scheduled jobs</div>
+            ${scheduleRows || `<div class="tech-shift-empty">No scheduled jobs are currently showing for today.</div>`}
+          </section>
+
+          ${disputeCount ? `
+            <section class="tech-shift-alert">
+              <strong>${disputeCount} open dispute${disputeCount === 1 ? '' : 's'} linked to your work.</strong>
+              <span>Please check the Disputes tab during your shift.</span>
+            </section>
+          ` : ''}
+
+          <form method="POST" action="/tech-workspace/${escapeHtml(token)}/start-shift/acknowledge">
+            <input type="hidden" name="briefing_date" value="${escapeHtml(briefing.dateValue)}">
+            <input type="hidden" name="briefing_slot" value="${escapeHtml(briefing.slot)}">
+            <button class="button red tech-shift-enter" type="submit">Enter my workspace</button>
+          </form>
+        </div>
+      </div>
+    `;
+
+    res.send(technicianPortalShell(slotTitle, body));
+  } catch (error) {
+    console.error('Technician shift briefing error:', error);
+    res.status(500).send('Could not load technician shift summary. Check Render logs.');
+  }
+});
+
+app.post('/tech-workspace/:token/start-shift/acknowledge', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+
+    const current = londonShiftBriefingContext();
+    const dateValue = String(req.body.briefing_date || current.dateValue);
+    const slot = ['start','evening'].includes(String(req.body.briefing_slot || '')) ? String(req.body.briefing_slot) : current.slot;
+
+    await pool.query(`
+      INSERT INTO technician_shift_briefing_acknowledgements (technician_id, briefing_date, briefing_slot, acknowledged_at)
+      VALUES ($1, $2::date, $3, NOW())
+      ON CONFLICT (technician_id, briefing_date, briefing_slot)
+      DO UPDATE SET acknowledged_at = EXCLUDED.acknowledged_at
+    `, [tech.id, dateValue, slot]);
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+  } catch (error) {
+    console.error('Technician shift acknowledgement error:', error);
+    res.status(500).send('Could not acknowledge shift summary. Check Render logs.');
+  }
+});
+
 app.get('/tech-workspace', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
@@ -15089,7 +15355,7 @@ app.post('/tech-workspace/login', async (req, res) => {
       return res.status(403).send(universalTechnicianLoginPage('Incorrect PIN. Please check the private PIN issued by the office.'));
     }
     setTechnicianSessionCookie(res, tech.checkin_token);
-    res.redirect(`/tech-workspace/${encodeURIComponent(tech.checkin_token)}`);
+    res.redirect(`/tech-workspace/${encodeURIComponent(tech.checkin_token)}/start-shift`);
   } catch (error) {
     console.error('Universal technician PIN login error:', error);
     res.status(500).send('Technician PIN login error. Check Render logs.');
@@ -15108,7 +15374,7 @@ app.post('/tech-workspace/:token/login', async (req, res) => {
       return res.status(403).send(technicianLoginPage(token, tech, 'Incorrect PIN. Please check the private PIN issued by the office.'));
     }
     setTechnicianSessionCookie(res, token);
-    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/start-shift`);
   } catch (error) {
     console.error('Technician PIN login error:', error);
     res.status(500).send('Technician PIN login error. Check Render logs.');
@@ -15332,7 +15598,7 @@ app.post('/tech-workspace/:token/schedule/duffles-parts', async (req, res) => {
       INSERT INTO technician_schedule_blocks (
         technician_id, block_type, starts_at, duration_minutes, notes, created_by, created_at, updated_at
       )
-      VALUES ($1, 'DUFFLES / PARTS', $2, 60, $3, $4, NOW(), NOW())
+      VALUES ($1, 'DUFFLES / PARTS', $2, 120, $3, $4, NOW(), NOW())
     `, [tech.id, `${date} ${time}`, notes, `${tech.name} workspace`]);
 
     res.redirect(`/tech-workspace/${encodeURIComponent(token)}/schedule?date=${encodeURIComponent(date)}`);
@@ -15392,15 +15658,6 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       return !Number.isNaN(stamp.getTime()) && stamp >= dayStart && stamp <= dayEnd;
     });
 
-    const onsiteJobs = (await pool.query(`
-      SELECT j.*
-      FROM jobs j
-      WHERE ${assignedClause}
-        AND j.onsite_at IS NOT NULL
-        AND j.onsite_at BETWEEN $3 AND $4
-      ORDER BY j.onsite_at ASC, j.id ASC
-    `, [tech.id, tech.name, dayStart, dayEnd])).rows;
-
     const manualBlocks = (await pool.query(`
       SELECT *
       FROM technician_schedule_blocks
@@ -15411,22 +15668,15 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
 
     const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
 
-    const dayStartMinutes = 7 * 60;
-    const dayEndMinutes = 22 * 60;
+    const dayStartMinutes = 0;
+    const dayEndMinutes = 24 * 60;
     const totalDayMinutes = dayEndMinutes - dayStartMinutes;
     const assigned = techScheduleLaneAssignments(scheduledJobs, dayStartMinutes, 75);
-
-    // Actual check-ins are shown as separate 20-minute blocks.
-    const onsiteAssigned = techScheduleLaneAssignments(
-      onsiteJobs.map(job => ({ ...job, scheduled_at: job.onsite_at })),
-      dayStartMinutes,
-      20
-    );
 
     const manualAssigned = techScheduleLaneAssignments(
       manualBlocks.map(block => ({ ...block, scheduled_at: block.starts_at })),
       dayStartMinutes,
-      60
+      120
     );
 
     const assignedNow = techScheduleLaneAssignments(
@@ -15438,35 +15688,30 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       45
     );
 
-    // Keep actual check-ins, manual blocks and newly assigned jobs below scheduled appointment lanes.
+    // Manual blocks and newly assigned jobs sit below scheduled appointment lanes.
     const scheduledLaneCount = Math.max(1, ...assigned.map(item => item.lane + 1));
-    const onsiteWithOffset = onsiteAssigned.map(item => ({
-      ...item,
-      lane: item.lane + scheduledLaneCount
-    }));
-    const onsiteLaneCount = Math.max(0, ...onsiteAssigned.map(item => item.lane + 1));
     const manualWithOffset = manualAssigned.map(item => ({
       ...item,
-      lane: item.lane + scheduledLaneCount + onsiteLaneCount
+      lane: item.lane + scheduledLaneCount
     }));
     const manualLaneCount = Math.max(0, ...manualAssigned.map(item => item.lane + 1));
     const assignedNowWithOffset = assignedNow.map(item => ({
       ...item,
-      lane: item.lane + scheduledLaneCount + onsiteLaneCount + manualLaneCount
+      lane: item.lane + scheduledLaneCount + manualLaneCount
     }));
 
-    const allLaneItems = [...assigned, ...onsiteWithOffset, ...manualWithOffset, ...assignedNowWithOffset];
+    const allLaneItems = [...assigned, ...manualWithOffset, ...assignedNowWithOffset];
     const laneCount = Math.max(1, ...allLaneItems.map(item => item.lane + 1));
     const laneHeight = 68;
     const scheduleHeight = Math.max(92, (laneCount * laneHeight) + 18);
 
     const hourLabels = [];
-    for (let hour = 7; hour <= 22; hour += 1) {
+    for (let hour = 0; hour <= 24; hour += 1) {
       hourLabels.push(`<div class="tech-cal-hour" style="left:${((hour * 60 - dayStartMinutes) / totalDayMinutes) * 100}%">${String(hour).padStart(2, '0')}:00</div>`);
     }
 
     const gridLines = [];
-    for (let hour = 7; hour <= 22; hour += 1) {
+    for (let hour = 0; hour <= 24; hour += 1) {
       gridLines.push(`<span class="tech-cal-gridline" style="left:${((hour * 60 - dayStartMinutes) / totalDayMinutes) * 100}%"></span>`);
     }
 
@@ -15488,35 +15733,15 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       `;
     }).join('');
 
-    const onsiteEventBlocks = onsiteWithOffset.map(({job, lane, startMinutes}) => {
-      const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 5, startMinutes));
-      const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
-      const width = Math.max(3.4, (20 / totalDayMinutes) * 100);
-      const startTime = scheduledTimeValue(job.onsite_at) || '';
-      const onsiteDate = job.onsite_at instanceof Date ? job.onsite_at : new Date(job.onsite_at);
-      const endDate = new Date(onsiteDate.getTime() + (20 * 60 * 1000));
-      const endTime = scheduledTimeValue(endDate) || '';
-      const top = 10 + (lane * laneHeight);
-
-      return `
-        <a class="tech-cal-event tech-cal-onsite"
-           href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}"
-           style="left:${left}%;width:${width}%;top:${top}px;"
-           title="${escapeHtml(`On site ${startTime}–${endTime} · ${job.postcode || ''}`)}">
-          <strong>ON SITE ${escapeHtml(startTime)}</strong>
-          <span>${escapeHtml(job.postcode || job.job_number || 'Job')}</span>
-          <small>Blocked to ${escapeHtml(endTime)}</small>
-        </a>
-      `;
-    }).join('');
 
     const manualEventBlocks = manualWithOffset.map(({job: block, lane, startMinutes}) => {
       const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 10, startMinutes));
       const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
-      const width = Math.max(5.5, (60 / totalDayMinutes) * 100);
+      const blockDuration = Math.max(1, Number(block.duration_minutes || 120));
+      const width = Math.max(5.5, (blockDuration / totalDayMinutes) * 100);
       const startTime = scheduledTimeValue(block.starts_at) || '';
       const startDate = block.starts_at instanceof Date ? block.starts_at : new Date(block.starts_at);
-      const endDate = new Date(startDate.getTime() + (60 * 60 * 1000));
+      const endDate = new Date(startDate.getTime() + (blockDuration * 60 * 1000));
       const endTime = scheduledTimeValue(endDate) || '';
       const top = 10 + (lane * laneHeight);
 
@@ -15575,12 +15800,49 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       </a>
     `).join('');
 
+    const weekStart = startOfMondayWeek(dayStart);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(23,59,59,999);
+
+    const weekScheduledJobs = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE ${assignedClause}
+        AND j.scheduled_at IS NOT NULL
+        AND j.scheduled_at BETWEEN $3 AND $4
+      ORDER BY j.scheduled_at ASC, j.id ASC
+    `, [tech.id, tech.name, weekStart, weekEnd])).rows;
+
+    const weekDays = [];
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date(weekStart);
+      d.setDate(weekStart.getDate() + i);
+      const dValue = dateInputValue(d);
+      const dayJobs = weekScheduledJobs.filter(job => dateInputValue(new Date(job.scheduled_at)) === dValue);
+      weekDays.push(`
+        <div class="tech-week-day ${dValue === todayValue ? 'is-today' : ''}">
+          <div class="tech-week-day-head">
+            <strong>${escapeHtml(d.toLocaleDateString('en-GB',{weekday:'short'}))}</strong>
+            <span>${escapeHtml(d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'}))}</span>
+          </div>
+          ${dayJobs.length ? dayJobs.map(job => `
+            <a class="tech-week-job ${['closed','fully_paid','fully_paid_private','invoiced_account','sent_to_pm','awaiting_balance','awaiting_payment'].includes(String(job.status || '')) ? 'is-closed' : ''}"
+               href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}">
+              <strong>${escapeHtml(scheduledTimeValue(job.scheduled_at) || '')} · ${escapeHtml(job.postcode || job.job_number || 'Job')}</strong>
+              <span>${escapeHtml(job.job_type || 'Job')}</span>
+            </a>
+          `).join('') : `<div class="tech-week-empty">No scheduled jobs</div>`}
+        </div>
+      `);
+    }
+
     const selectedDisplay = formatDate(dayStart);
 
     const body = `
       <div class="topbar">
         <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
-        <div class="live">● Daily schedule</div>
+        <div class="live">● ${String(tech.status || '').toLowerCase() === 'on job' ? 'ON A JOB' : escapeHtml(tech.status || 'Available')}</div>
       </div>
 
       <div class="wrap">
@@ -15588,7 +15850,7 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
 
         <div class="tech-cal-title-row">
           <div>
-            <h1 style="margin-bottom:4px;">Today's Schedule</h1>
+            <h1 style="margin-bottom:4px;">Schedule</h1>
             <div class="job-sub">Programul de azi · ${escapeHtml(selectedDisplay)}</div>
           </div>
           <div class="tech-cal-nav">
@@ -15604,13 +15866,23 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
           <button class="button dark" type="submit">Go</button>
         </form>
 
+        <div class="panel">
+          <div class="job-head">
+            <div>
+              <h2 style="margin:0;">This Week</h2>
+              <div class="job-sub">Scheduled jobs · Monday to Sunday</div>
+            </div>
+          </div>
+          <div class="tech-week-grid" style="margin-top:12px;">${weekDays.join('')}</div>
+        </div>
+
         <div class="panel tech-parts-add">
           <div class="job-head">
             <div>
               <h2 style="margin:0;">Block out DUFFLES / PARTS</h2>
-              <div class="job-sub">Blochează o oră pentru ridicarea pieselor</div>
+              <div class="job-sub">Blochează două ore pentru ridicarea pieselor</div>
             </div>
-            <span class="pill job-assigned">1 hour / 1 oră</span>
+            <span class="pill job-assigned">2 hours / 2 ore</span>
           </div>
           <form class="toolbar" method="POST" action="/tech-workspace/${escapeHtml(token)}/schedule/duffles-parts" style="margin-top:12px;">
             <div>
@@ -15625,7 +15897,7 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
               <label>Notes (optional)</label>
               <input name="notes" placeholder="e.g. collect cylinder / handles">
             </div>
-            <button class="button dark" type="submit">Block 1 hour</button>
+            <button class="button dark" type="submit">Block 2 hours</button>
           </form>
         </div>
 
@@ -15635,13 +15907,12 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
             ${gridLines.join('')}
             ${nowMarker}
             ${eventBlocks}
-            ${onsiteEventBlocks}
             ${manualEventBlocks}
             ${assignedNowEventBlocks}
-            ${(!eventBlocks && !onsiteEventBlocks && !manualEventBlocks && !assignedNowEventBlocks) ? `<div class="tech-cal-empty">No schedule activity for this day.</div>` : ''}
+            ${(!eventBlocks && !manualEventBlocks && !assignedNowEventBlocks) ? `<div class="tech-cal-empty">No schedule activity for this day.</div>` : ''}
           </div>
           <div class="job-sub" style="margin-top:10px;">
-            Scheduled jobs are shown from 07:00 to 22:00. Newly assigned jobs are added automatically at the time they are assigned. ON SITE creates a 20-minute block. DUFFLES / PARTS blocks one hour. Closed jobs stay visible in grey.
+            Schedule runs 24 hours. Newly assigned jobs are added automatically at the time they are assigned. Checking in ON SITE changes your status to ON A JOB but does not reserve calendar time. DUFFLES / PARTS blocks two hours. Closed jobs stay visible in grey.
           </div>
         </div>
 
@@ -15671,10 +15942,77 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       </div>
     `;
 
-    res.send(technicianPortalShell('Technician Daily Schedule', body));
+    res.send(technicianPortalShell('Technician Schedule', body));
   } catch (error) {
     console.error('Technician schedule error:', error);
     res.status(500).send('Technician schedule error. Check Render logs.');
+  }
+});
+
+
+app.get('/tech-workspace/:token/search', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send(technicianPortalShell('Invalid technician link', `<div class="wrap"><div class="empty">Invalid technician workspace link.</div></div>`));
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+
+    const postcode = String(req.query.postcode || '').trim();
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
+    let jobs = [];
+
+    if (postcode) {
+      jobs = (await pool.query(`
+        SELECT j.*
+        FROM jobs j
+        WHERE (j.assigned_technician_id = $1 OR j.assigned_technician_id IN (
+          SELECT id FROM technicians WHERE LOWER(name) = LOWER($2)
+        ))
+          AND COALESCE(j.postcode,'') ILIKE $3
+        ORDER BY COALESCE(j.closed_at,j.updated_at,j.created_at) DESC
+        LIMIT 100
+      `, [tech.id, tech.name, `%${postcode}%`])).rows;
+    }
+
+    const results = jobs.map(job => `
+      <a class="job-card tech-search-result" href="/tech-workspace/${escapeHtml(token)}${['closed','fully_paid','fully_paid_private','invoiced_account','sent_to_pm','awaiting_balance','awaiting_payment','disputed','cancelled_before_arrival','cancelled_onsite'].includes(String(job.status || '')) ? '/summary' : ''}#job-${Number(job.id)}" style="display:block;text-decoration:none;color:inherit;">
+        <div class="job-head">
+          <div>
+            <h2 class="job-title">${escapeHtml(job.postcode || job.job_number || 'Job')}</h2>
+            <div class="job-sub">
+              ${escapeHtml(job.job_type || 'Job')}<br>
+              ${escapeHtml(job.customer_name || 'Customer')}<br>
+              ${escapeHtml(techJobAddress(job) || '')}<br>
+              ${escapeHtml(formatDateTime(job.closed_at || job.updated_at || job.created_at))}
+            </div>
+          </div>
+          <span class="pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
+        </div>
+      </a>
+    `).join('');
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● My job search</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'search', openDisputeCount)}
+        <h1>Search My Jobs</h1>
+        <p class="job-sub">Search only jobs assigned to you, including older and closed jobs.</p>
+        <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}/search">
+          <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Enter postcode" autocomplete="postal-code" autofocus>
+          <button class="button dark" type="submit">Search</button>
+        </form>
+        ${postcode ? (results || `<div class="empty">No jobs found for postcode <strong>${escapeHtml(postcode)}</strong>.</div>`) : `<div class="empty">Enter a postcode to search your own job history.</div>`}
+      </div>
+    `;
+
+    res.send(technicianPortalShell('Search My Jobs', body));
+  } catch (error) {
+    console.error('Technician job search error:', error);
+    res.status(500).send('Technician job search error. Check Render logs.');
   }
 });
 
@@ -15812,14 +16150,14 @@ app.get('/tech-workspace/:token', async (req, res) => {
       </div>
       <div class="topbar">
         <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
-        <div class="live">● ${escapeHtml(tech.status || 'Available')}</div>
+        <div class="live">● ${String(tech.status || '').toLowerCase() === 'on job' ? 'ON A JOB' : escapeHtml(tech.status || 'Available')}</div>
       </div>
       <div class="wrap">
         ${technicianWorkspaceTabs(token, 'jobs', openDisputes.length)}
         ${disputeNotice}
         <h1>Your active jobs</h1>
         <form class="toolbar" method="GET" action="/tech-workspace/${escapeHtml(token)}">
-          <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Postcode">
+          <input name="postcode" value="${escapeHtml(postcode)}" placeholder="Active job postcode">
           <input name="phone" value="${escapeHtml(phone)}" placeholder="Phone">
           <select name="status"><option value="">All statuses</option>${jobStatusOptions(statusFilter)}</select>
           <button class="button dark" type="submit">Filter</button>
