@@ -1,4 +1,4 @@
-// YDP Unified master + redesigned Dispatcher Activity dashboard with date range (v153)
+// YDP Unified master + admin technician activity leaderboard (v154)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -1129,6 +1129,7 @@ const auditFieldLabels = {
   tech_notes: "Technician notes",
   close_notes: "Close notes",
   onsite_at: "On site time",
+  assigned_at: "Assigned time",
   closing_invoice_yes: "Invoice issued",
   closing_invoice_number: "Invoice number",
   closing_invoice_reason: "No invoice reason",
@@ -2729,6 +2730,7 @@ function nav(req) {
 
         <div class="sidebar-label section-label">Team</div>
         <a class="side-link${active("/technicians")}" href="/technicians"><span class="side-dot dot-green"></span><span>Technicians</span></a>
+        ${isAdmin ? `<a class="side-link${active("/technician-leaderboard")}" href="/technician-leaderboard"><span class="side-dot dot-amber"></span><span>Technician Leaderboard</span></a>` : ""}
 
         <div class="sidebar-label section-label">Finance</div>
         <a class="side-link${active("/quotations")}" href="/quotations"><span class="side-dot dot-blue"></span><span>Quotations</span></a>
@@ -3312,6 +3314,7 @@ async function initDb() {
 
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed BOOLEAN DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_price_confirmed_at TIMESTAMP;`);
@@ -4053,7 +4056,13 @@ app.post("/client/jobs/create", requireClientLogin, async (req, res) => {
       `Account Portal · ${client.display_name}`, notes, status
     ]);
     const id = result.rows[0].id;
-    await pool.query(`UPDATE jobs SET job_number = $1 WHERE id = $2`, [jobNumber(id), id]);
+    await pool.query(
+      `UPDATE jobs
+       SET job_number = $1,
+           assigned_at = CASE WHEN assigned_technician_id IS NOT NULL THEN NOW() ELSE assigned_at END
+       WHERE id = $2`,
+      [jobNumber(id), id]
+    );
     await addJobAuditEntry(id, "account_client_job_submitted", "status", "—", jobStatusLabel(status), `${client.display_name} · ${client.company_name}`);
     await pool.query(`
       INSERT INTO account_client_activity (account_client_id, account_client_user_id, job_id, activity_type, detail)
@@ -13124,7 +13133,11 @@ app.post("/jobs/:id/quick-assign", async (req, res) => {
     const newStatus = technicianId !== null && oldJob && oldJob.status === "open" ? "assigned" : oldJob ? oldJob.status : "open";
     await pool.query(`
       UPDATE jobs
-      SET assigned_technician_id = $1::integer,
+      SET assigned_at = CASE
+            WHEN $1::integer IS NOT NULL AND assigned_technician_id IS DISTINCT FROM $1::integer THEN NOW()
+            ELSE assigned_at
+          END,
+          assigned_technician_id = $1::integer,
           status = CASE WHEN $1::integer IS NOT NULL AND status = 'open' THEN 'assigned' ELSE status END,
           updated_at = NOW()
       WHERE id = $2::integer
@@ -13182,7 +13195,12 @@ app.post("/jobs/:id/update", async (req, res) => {
         address_line_1=$5, address_line_2=$6, address_line_3=$7, town=$8, county=$9, postcode=$10,
         job_type=$11, job_description=$12, lock_change_keys=$13, urgency=$14, source_campaign=$15, quoted_price=$16,
         starting_price=$17, call_out_agreed=$18, start_price_locks=$19, offsite_payment=$20, bill_payer_name=$21, bill_payer_phone=$22,
-        expected_payment_method=$23, account_job=$24, account_template_id=$25, assigned_technician_id=$26,
+        expected_payment_method=$23, account_job=$24, account_template_id=$25,
+        assigned_at = CASE
+          WHEN $26::integer IS NOT NULL AND assigned_technician_id IS DISTINCT FROM $26::integer THEN NOW()
+          ELSE assigned_at
+        END,
+        assigned_technician_id=$26,
         eta=$27, scheduled_at=$28, dispatcher_notes=$29, status=$30, updated_at=NOW()
       WHERE id=$31
     `, [
@@ -18579,6 +18597,219 @@ app.post("/tech-checkin/:token", async (req, res) => {
   }
 });
 
+
+
+function leaderboardDuration(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "—";
+  const rounded = Math.round(value);
+  if (rounded < 60) return `${rounded} min`;
+  const hours = Math.floor(rounded / 60);
+  const mins = rounded % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+app.get("/technician-leaderboard", async (req, res) => {
+  try {
+    if (currentUserRole(req) !== "admin") {
+      return res.status(403).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Admin access required</title><style>${sharedStyles()}</style></head>
+        <body>
+          ${nav(req)}
+          <main class="app-main">
+            <h1>Admin access required</h1>
+            <div class="panel">The Technician Leaderboard is only visible to Admin users.</div>
+          </main>
+        </body>
+        </html>
+      `);
+    }
+
+    const result = await pool.query(`
+      WITH bounds AS (
+        SELECT
+          date_trunc('day', NOW()) AS day_start,
+          date_trunc('week', NOW()) AS week_start,
+          date_trunc('month', NOW()) AS month_start
+      ),
+      assignment_audit AS (
+        SELECT
+          jal.job_id,
+          MIN(jal.created_at) AS first_assignment_at
+        FROM job_audit_log jal
+        WHERE LOWER(COALESCE(jal.field_name,'')) = 'technician'
+          AND COALESCE(jal.new_value,'') NOT IN ('', '—', 'Unassigned')
+        GROUP BY jal.job_id
+      ),
+      job_base AS (
+        SELECT
+          j.*,
+          COALESCE(j.assigned_at, aa.first_assignment_at, j.created_at) AS assignment_time
+        FROM jobs j
+        LEFT JOIN assignment_audit aa ON aa.job_id = j.id
+      )
+      SELECT
+        t.id,
+        t.name,
+        t.status,
+        t.is_subcontractor,
+
+        COUNT(j.id) FILTER (
+          WHERE j.assignment_time >= b.day_start
+        )::int AS jobs_day,
+
+        COUNT(j.id) FILTER (
+          WHERE j.assignment_time >= b.week_start
+        )::int AS jobs_week,
+
+        COUNT(j.id) FILTER (
+          WHERE j.assignment_time >= b.month_start
+        )::int AS jobs_month,
+
+        COUNT(j.id) FILTER (
+          WHERE j.status = 'cancelled_onsite'
+            AND COALESCE(j.closed_at, j.updated_at, j.created_at) >= b.month_start
+        )::int AS cancelled_onsite_month,
+
+        AVG(EXTRACT(EPOCH FROM (j.closed_at - j.assignment_time)) / 60.0) FILTER (
+          WHERE UPPER(COALESCE(j.job_type,'')) LIKE '%LOCKED OUT%'
+            AND j.closed_at IS NOT NULL
+            AND j.assignment_time IS NOT NULL
+            AND j.closed_at >= j.assignment_time
+            AND j.closed_at >= b.month_start
+        ) AS avg_lockout_minutes,
+
+        AVG(EXTRACT(EPOCH FROM (j.closed_at - j.assignment_time)) / 60.0) FILTER (
+          WHERE UPPER(COALESCE(j.job_type,'')) LIKE '%LOCK CHANGE%'
+            AND j.closed_at IS NOT NULL
+            AND j.assignment_time IS NOT NULL
+            AND j.closed_at >= j.assignment_time
+            AND j.closed_at >= b.month_start
+        ) AS avg_lockchange_minutes,
+
+        COUNT(j.id) FILTER (
+          WHERE j.onsite_at IS NOT NULL
+            AND j.onsite_at >= b.month_start
+            AND EXTRACT(HOUR FROM j.onsite_at) >= 0
+            AND EXTRACT(HOUR FROM j.onsite_at) < 6
+        )::int AS after_midnight_month
+
+      FROM technicians t
+      CROSS JOIN bounds b
+      LEFT JOIN job_base j ON j.assigned_technician_id = t.id
+      WHERE t.active = TRUE
+      GROUP BY t.id, t.name, t.status, t.is_subcontractor
+      ORDER BY
+        jobs_month DESC,
+        jobs_week DESC,
+        jobs_day DESC,
+        t.name ASC
+    `);
+
+    const bodyRows = result.rows.map((row, index) => {
+      const rank = index + 1;
+      const rankText = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `#${rank}`;
+      return `
+        <tr class="${rank <= 3 ? `leader-rank-${rank}` : ""}">
+          <td><span class="leader-rank">${rankText}</span></td>
+          <td>
+            <strong>${escapeHtml(row.name)}</strong>
+            <div class="leader-sub">${escapeHtml(row.status || "Unknown")}${row.is_subcontractor ? " · Subcontractor" : ""}</div>
+          </td>
+          <td class="leader-num">${Number(row.jobs_day || 0)}</td>
+          <td class="leader-num">${Number(row.jobs_week || 0)}</td>
+          <td class="leader-num">${Number(row.jobs_month || 0)}</td>
+          <td class="leader-num">${Number(row.cancelled_onsite_month || 0)}</td>
+          <td>${escapeHtml(leaderboardDuration(row.avg_lockout_minutes))}</td>
+          <td>${escapeHtml(leaderboardDuration(row.avg_lockchange_minutes))}</td>
+          <td class="leader-num">${Number(row.after_midnight_month || 0)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const totalMonth = result.rows.reduce((sum, row) => sum + Number(row.jobs_month || 0), 0);
+    const totalCancelledOnsite = result.rows.reduce((sum, row) => sum + Number(row.cancelled_onsite_month || 0), 0);
+    const totalAfterMidnight = result.rows.reduce((sum, row) => sum + Number(row.after_midnight_month || 0), 0);
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Technician Leaderboard</title>
+        <style>
+          ${sharedStyles()}
+          .leader-page{max-width:1580px;margin:0 auto}
+          .leader-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+          .leader-note{color:#64748b;max-width:980px;line-height:1.5}
+          .leader-summary{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px;margin:18px 0}
+          .leader-summary-card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 8px 22px rgba(15,23,42,.04)}
+          .leader-summary-card span{display:block;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800}
+          .leader-summary-card strong{display:block;font-size:30px;margin-top:6px}
+          .leader-table-wrap{background:#fff;border:1px solid #e5e7eb;border-radius:18px;overflow:auto;box-shadow:0 10px 28px rgba(15,23,42,.04)}
+          .leader-table{width:100%;border-collapse:collapse;min-width:1150px}
+          .leader-table th,.leader-table td{padding:13px 12px;border-bottom:1px solid #edf1f5;text-align:left}
+          .leader-table th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;background:#f8fafc;position:sticky;top:0}
+          .leader-rank{font-weight:900;font-size:18px}
+          .leader-sub{font-size:11px;color:#64748b;margin-top:3px}
+          .leader-num{font-weight:900;font-size:18px}
+          .leader-rank-1{background:#fffbeb}
+          .leader-rank-2{background:#f8fafc}
+          .leader-rank-3{background:#fff7ed}
+          .leader-key{margin-top:14px;padding:13px 15px;border-radius:14px;background:#f8fafc;border:1px solid #e5e7eb;color:#475569;line-height:1.55}
+          @media(max-width:800px){.leader-summary{grid-template-columns:1fr}}
+        </style>
+      </head>
+      <body>
+        ${nav(req)}
+        <main class="leader-page">
+          <div class="leader-hero">
+            <div>
+              <h1>Technician Leaderboard</h1>
+              <div class="leader-note">
+                Admin-only view of technician workload, speed and quality. Ranking is based on jobs assigned this month, then this week and today. Cancelled onsite jobs are visible separately and do not improve rank.
+              </div>
+            </div>
+          </div>
+
+          <div class="leader-summary">
+            <div class="leader-summary-card"><span>Jobs assigned this month</span><strong>${totalMonth}</strong></div>
+            <div class="leader-summary-card"><span>Cancelled onsite this month</span><strong>${totalCancelledOnsite}</strong></div>
+            <div class="leader-summary-card"><span>Attended after midnight this month</span><strong>${totalAfterMidnight}</strong></div>
+          </div>
+
+          <div class="leader-table-wrap">
+            <table class="leader-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Technician</th>
+                  <th>Jobs today</th>
+                  <th>Jobs this week</th>
+                  <th>Jobs this month</th>
+                  <th>Cancelled onsite<br>this month</th>
+                  <th>Avg lock-out<br>assign → close</th>
+                  <th>Avg lock change<br>assign → close</th>
+                  <th>After midnight<br>this month</th>
+                </tr>
+              </thead>
+              <tbody>${bodyRows || `<tr><td colspan="9">No technician activity found.</td></tr>`}</tbody>
+            </table>
+          </div>
+
+          <div class="leader-key">
+            <strong>Timing logic:</strong> assignment time → job closing time. From this version onward, the portal stores a dedicated assignment timestamp whenever a technician is assigned or changed. For older jobs, it uses the technician-assignment audit entry where available and job creation time only as a final fallback. “After midnight” means the technician checked on site between 00:00 and 05:59. Cancellation, speed and after-midnight measures use the current month.
+          </div>
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Technician leaderboard error:", error);
+    res.status(500).send(`Technician Leaderboard error: ${escapeHtml(error.message || "Unknown error")}. Check Render logs.`);
+  }
+});
 
 app.get("/technicians", async (req, res) => {
   try {
