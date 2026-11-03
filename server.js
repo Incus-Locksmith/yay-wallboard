@@ -1,4 +1,4 @@
-// YDP Unified master + dispatcher activity Stripe grouping fix (v141)
+// YDP Unified master + dispatcher activity grouping fixes (v142)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -10529,7 +10529,7 @@ app.get("/jobs", async (req, res) => {
         FROM jobs
         WHERE DATE(created_at) = CURRENT_DATE
           AND COALESCE(dispatcher_name, '') <> ''
-        GROUP BY LOWER(TRIM(dispatcher_name))
+        GROUP BY LOWER(TRIM(COALESCE(dispatcher_name, '')))
       `),
       pool.query(`
         SELECT LOWER(TRIM(COALESCE(closed_by, ''))) AS agent_key, COUNT(*)::int AS count
@@ -10538,7 +10538,7 @@ app.get("/jobs", async (req, res) => {
           AND DATE(closed_at) = CURRENT_DATE
           AND COALESCE(closed_by, '') <> ''
           AND COALESCE(status, '') NOT IN ('cancelled_before_arrival', 'cancelled_onsite')
-        GROUP BY LOWER(TRIM(closed_by))
+        GROUP BY LOWER(TRIM(COALESCE(closed_by, '')))
       `),
       pool.query(`
         SELECT LOWER(TRIM(COALESCE(created_by, ''))) AS agent_key, COUNT(*)::int AS count
