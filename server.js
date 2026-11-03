@@ -1,4 +1,4 @@
-// YDP Unified master + technician daily schedule calendar (v144)
+// YDP Unified master + assigned jobs auto-scheduled + closed grey history (v147)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -3286,6 +3286,21 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS close_notes TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS technician_schedule_blocks (
+      id SERIAL PRIMARY KEY,
+      technician_id INTEGER NOT NULL,
+      block_type TEXT NOT NULL DEFAULT 'DUFFLES / PARTS',
+      starts_at TIMESTAMP NOT NULL,
+      duration_minutes INTEGER NOT NULL DEFAULT 60,
+      notes TEXT,
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS technician_schedule_blocks_tech_start_idx ON technician_schedule_blocks (technician_id, starts_at);`);
+
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS onsite_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_updated_at TIMESTAMP;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tech_close_submitted_by TEXT;`);
@@ -14239,6 +14254,38 @@ function technicianWorkspaceStyles() {
     .tech-cal-event strong { font-size:11px; }
     .tech-cal-event span { font-weight:900; font-size:13px; margin-top:1px; }
     .tech-cal-event small { font-size:10px; color:#475569; margin-top:2px; }
+    .tech-cal-onsite {
+      background:#dcfce7;
+      border:2px solid #16a34a;
+      color:#14532d;
+      z-index:4;
+      min-width:72px;
+    }
+    .tech-cal-onsite small { color:#166534; }
+    .tech-cal-parts {
+      background:#fff7ed;
+      border:2px solid #f97316;
+      color:#7c2d12;
+      z-index:3;
+      min-width:88px;
+    }
+    .tech-cal-parts small { color:#9a3412; }
+    .tech-parts-add { border-left:6px solid #f97316; }
+    .tech-cal-assigned {
+      background:#eef2ff;
+      border:2px solid #6366f1;
+      color:#312e81;
+      z-index:2;
+      min-width:88px;
+    }
+    .tech-cal-assigned small { color:#4338ca; }
+    .tech-cal-closed {
+      background:#e5e7eb !important;
+      border:2px solid #9ca3af !important;
+      color:#374151 !important;
+      opacity:.9;
+    }
+    .tech-cal-closed small { color:#6b7280 !important; }
     .tech-cal-now {
       position:absolute;
       top:0;
@@ -14946,6 +14993,39 @@ function techScheduleLaneAssignments(jobs, dayStartMinutes = 7 * 60, assumedDura
   });
 }
 
+
+app.post('/tech-workspace/:token/schedule/duffles-parts', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) {
+      return res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    }
+
+    const date = String(req.body.block_date || '').trim();
+    const time = String(req.body.block_time || '').trim();
+    const notes = String(req.body.notes || '').trim();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isValid24HourTime(time)) {
+      return res.status(400).send('Please enter a valid date and 24-hour start time.');
+    }
+
+    await pool.query(`
+      INSERT INTO technician_schedule_blocks (
+        technician_id, block_type, starts_at, duration_minutes, notes, created_by, created_at, updated_at
+      )
+      VALUES ($1, 'DUFFLES / PARTS', $2, 60, $3, $4, NOW(), NOW())
+    `, [tech.id, `${date} ${time}`, notes, `${tech.name} workspace`]);
+
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/schedule?date=${encodeURIComponent(date)}`);
+  } catch (error) {
+    console.error('Technician DUFFLES/PARTS block error:', error);
+    res.status(500).send('Could not add DUFFLES / PARTS block. Check Render logs.');
+  }
+});
+
 app.get('/tech-workspace/:token/schedule', async (req, res) => {
   try {
     await ensureTechnicianWorkspaceSchema();
@@ -14979,9 +15059,6 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       WHERE ${assignedClause}
         AND j.scheduled_at IS NOT NULL
         AND j.scheduled_at BETWEEN $3 AND $4
-        AND COALESCE(j.status, '') NOT IN (
-          'closed','fully_paid','fully_paid_private','cancelled_before_arrival','cancelled_onsite'
-        )
       ORDER BY j.scheduled_at ASC, j.id ASC
     `, [tech.id, tech.name, dayStart, dayEnd])).rows;
 
@@ -14991,8 +15068,30 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       WHERE ${assignedClause}
         AND j.scheduled_at IS NULL
         AND COALESCE(j.status, 'open') IN ('account_pending_review','open','assigned','scheduled')
-      ORDER BY j.created_at ASC
+      ORDER BY COALESCE(j.tech_updated_at, j.updated_at, j.created_at) ASC
     `, [tech.id, tech.name])).rows;
+
+    const assignedTodayJobs = unscheduledJobs.filter(job => {
+      const stamp = new Date(job.tech_updated_at || job.updated_at || job.created_at);
+      return !Number.isNaN(stamp.getTime()) && stamp >= dayStart && stamp <= dayEnd;
+    });
+
+    const onsiteJobs = (await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE ${assignedClause}
+        AND j.onsite_at IS NOT NULL
+        AND j.onsite_at BETWEEN $3 AND $4
+      ORDER BY j.onsite_at ASC, j.id ASC
+    `, [tech.id, tech.name, dayStart, dayEnd])).rows;
+
+    const manualBlocks = (await pool.query(`
+      SELECT *
+      FROM technician_schedule_blocks
+      WHERE technician_id = $1
+        AND starts_at BETWEEN $2 AND $3
+      ORDER BY starts_at ASC, id ASC
+    `, [tech.id, dayStart, dayEnd])).rows;
 
     const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
 
@@ -15000,7 +15099,48 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
     const dayEndMinutes = 22 * 60;
     const totalDayMinutes = dayEndMinutes - dayStartMinutes;
     const assigned = techScheduleLaneAssignments(scheduledJobs, dayStartMinutes, 75);
-    const laneCount = Math.max(1, ...assigned.map(item => item.lane + 1));
+
+    // Actual check-ins are shown as separate 20-minute blocks.
+    const onsiteAssigned = techScheduleLaneAssignments(
+      onsiteJobs.map(job => ({ ...job, scheduled_at: job.onsite_at })),
+      dayStartMinutes,
+      20
+    );
+
+    const manualAssigned = techScheduleLaneAssignments(
+      manualBlocks.map(block => ({ ...block, scheduled_at: block.starts_at })),
+      dayStartMinutes,
+      60
+    );
+
+    const assignedNow = techScheduleLaneAssignments(
+      assignedTodayJobs.map(job => ({
+        ...job,
+        scheduled_at: job.tech_updated_at || job.updated_at || job.created_at
+      })),
+      dayStartMinutes,
+      45
+    );
+
+    // Keep actual check-ins, manual blocks and newly assigned jobs below scheduled appointment lanes.
+    const scheduledLaneCount = Math.max(1, ...assigned.map(item => item.lane + 1));
+    const onsiteWithOffset = onsiteAssigned.map(item => ({
+      ...item,
+      lane: item.lane + scheduledLaneCount
+    }));
+    const onsiteLaneCount = Math.max(0, ...onsiteAssigned.map(item => item.lane + 1));
+    const manualWithOffset = manualAssigned.map(item => ({
+      ...item,
+      lane: item.lane + scheduledLaneCount + onsiteLaneCount
+    }));
+    const manualLaneCount = Math.max(0, ...manualAssigned.map(item => item.lane + 1));
+    const assignedNowWithOffset = assignedNow.map(item => ({
+      ...item,
+      lane: item.lane + scheduledLaneCount + onsiteLaneCount + manualLaneCount
+    }));
+
+    const allLaneItems = [...assigned, ...onsiteWithOffset, ...manualWithOffset, ...assignedNowWithOffset];
+    const laneCount = Math.max(1, ...allLaneItems.map(item => item.lane + 1));
     const laneHeight = 68;
     const scheduleHeight = Math.max(92, (laneCount * laneHeight) + 18);
 
@@ -15021,11 +15161,73 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       const time = scheduledTimeValue(job.scheduled_at) || '';
       const top = 10 + (lane * laneHeight);
       return `
-        <a class="tech-cal-event ${jobStatusClass(job.status)}"
+        <a class="tech-cal-event ${['closed','fully_paid','fully_paid_private','invoiced_account','sent_to_pm','awaiting_balance','awaiting_payment'].includes(String(job.status || '')) ? 'tech-cal-closed' : jobStatusClass(job.status)}"
            href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}"
            style="left:${left}%;width:${width}%;top:${top}px;"
            title="${escapeHtml(`${time} · ${job.postcode || ''} · ${job.customer_name || ''}`)}">
           <strong>${escapeHtml(time)}</strong>
+          <span>${escapeHtml(job.postcode || job.job_number || 'Job')}</span>
+          <small>${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.customer_name || 'Customer')}</small>
+        </a>
+      `;
+    }).join('');
+
+    const onsiteEventBlocks = onsiteWithOffset.map(({job, lane, startMinutes}) => {
+      const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 5, startMinutes));
+      const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
+      const width = Math.max(3.4, (20 / totalDayMinutes) * 100);
+      const startTime = scheduledTimeValue(job.onsite_at) || '';
+      const onsiteDate = job.onsite_at instanceof Date ? job.onsite_at : new Date(job.onsite_at);
+      const endDate = new Date(onsiteDate.getTime() + (20 * 60 * 1000));
+      const endTime = scheduledTimeValue(endDate) || '';
+      const top = 10 + (lane * laneHeight);
+
+      return `
+        <a class="tech-cal-event tech-cal-onsite"
+           href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}"
+           style="left:${left}%;width:${width}%;top:${top}px;"
+           title="${escapeHtml(`On site ${startTime}–${endTime} · ${job.postcode || ''}`)}">
+          <strong>ON SITE ${escapeHtml(startTime)}</strong>
+          <span>${escapeHtml(job.postcode || job.job_number || 'Job')}</span>
+          <small>Blocked to ${escapeHtml(endTime)}</small>
+        </a>
+      `;
+    }).join('');
+
+    const manualEventBlocks = manualWithOffset.map(({job: block, lane, startMinutes}) => {
+      const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 10, startMinutes));
+      const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
+      const width = Math.max(5.5, (60 / totalDayMinutes) * 100);
+      const startTime = scheduledTimeValue(block.starts_at) || '';
+      const startDate = block.starts_at instanceof Date ? block.starts_at : new Date(block.starts_at);
+      const endDate = new Date(startDate.getTime() + (60 * 60 * 1000));
+      const endTime = scheduledTimeValue(endDate) || '';
+      const top = 10 + (lane * laneHeight);
+
+      return `
+        <div class="tech-cal-event tech-cal-parts"
+             style="left:${left}%;width:${width}%;top:${top}px;"
+             title="${escapeHtml('DUFFLES / PARTS ' + startTime + '–' + endTime + (block.notes ? ' · ' + block.notes : ''))}">
+          <strong>DUFFLES / PARTS</strong>
+          <span>${escapeHtml(startTime)}–${escapeHtml(endTime)}</span>
+          <small>${escapeHtml(block.notes || 'Parts collection')}</small>
+        </div>
+      `;
+    }).join('');
+
+    const assignedNowEventBlocks = assignedNowWithOffset.map(({job, lane, startMinutes}) => {
+      const clampedStart = Math.max(dayStartMinutes, Math.min(dayEndMinutes - 10, startMinutes));
+      const left = ((clampedStart - dayStartMinutes) / totalDayMinutes) * 100;
+      const width = Math.max(4.5, (45 / totalDayMinutes) * 100);
+      const time = scheduledTimeValue(job.tech_updated_at || job.updated_at || job.created_at) || '';
+      const top = 10 + (lane * laneHeight);
+
+      return `
+        <a class="tech-cal-event tech-cal-assigned"
+           href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}"
+           style="left:${left}%;width:${width}%;top:${top}px;"
+           title="${escapeHtml(`Assigned ${time} · ${job.postcode || ''}`)}">
+          <strong>ASSIGNED ${escapeHtml(time)}</strong>
           <span>${escapeHtml(job.postcode || job.job_number || 'Job')}</span>
           <small>${escapeHtml(job.job_type || 'Job')} · ${escapeHtml(job.customer_name || 'Customer')}</small>
         </a>
@@ -15047,7 +15249,9 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
       }
     }
 
-    const unscheduledHtml = unscheduledJobs.map(job => `
+    const unscheduledHtml = unscheduledJobs
+      .filter(job => !assignedTodayJobs.some(assignedJob => Number(assignedJob.id) === Number(job.id)))
+      .map(job => `
       <a class="tech-unscheduled-card" href="/tech-workspace/${escapeHtml(token)}#job-${Number(job.id)}">
         <strong>${escapeHtml(job.postcode || job.job_number || 'Job')}</strong>
         <span>${escapeHtml(job.job_type || 'Job')}</span>
@@ -15084,15 +15288,44 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
           <button class="button dark" type="submit">Go</button>
         </form>
 
+        <div class="panel tech-parts-add">
+          <div class="job-head">
+            <div>
+              <h2 style="margin:0;">Block out DUFFLES / PARTS</h2>
+              <div class="job-sub">Blochează o oră pentru ridicarea pieselor</div>
+            </div>
+            <span class="pill job-assigned">1 hour / 1 oră</span>
+          </div>
+          <form class="toolbar" method="POST" action="/tech-workspace/${escapeHtml(token)}/schedule/duffles-parts" style="margin-top:12px;">
+            <div>
+              <label>Date</label>
+              <input type="date" name="block_date" value="${escapeHtml(selectedDate)}" required>
+            </div>
+            <div>
+              <label>Start time</label>
+              <input type="time" name="block_time" step="300" required>
+            </div>
+            <div style="min-width:220px;flex:1;">
+              <label>Notes (optional)</label>
+              <input name="notes" placeholder="e.g. collect cylinder / handles">
+            </div>
+            <button class="button dark" type="submit">Block 1 hour</button>
+          </form>
+        </div>
+
         <div class="panel tech-calendar-panel">
           <div class="tech-cal-hours">${hourLabels.join('')}</div>
           <div class="tech-cal-track" style="height:${scheduleHeight}px;">
             ${gridLines.join('')}
             ${nowMarker}
-            ${eventBlocks || `<div class="tech-cal-empty">No scheduled jobs for this day.</div>`}
+            ${eventBlocks}
+            ${onsiteEventBlocks}
+            ${manualEventBlocks}
+            ${assignedNowEventBlocks}
+            ${(!eventBlocks && !onsiteEventBlocks && !manualEventBlocks && !assignedNowEventBlocks) ? `<div class="tech-cal-empty">No schedule activity for this day.</div>` : ''}
           </div>
           <div class="job-sub" style="margin-top:10px;">
-            Scheduled jobs are shown from 07:00 to 22:00. Tap a job to open it in Active Jobs.
+            Scheduled jobs are shown from 07:00 to 22:00. Newly assigned jobs are added automatically at the time they are assigned. ON SITE creates a 20-minute block. DUFFLES / PARTS blocks one hour. Closed jobs stay visible in grey.
           </div>
         </div>
 
@@ -15108,6 +15341,17 @@ app.get('/tech-workspace/:token/schedule', async (req, res) => {
             ${unscheduledHtml || `<div class="empty">No active jobs without a scheduled time.</div>`}
           </div>
         </div>
+
+        ${selectedDate === todayValue ? `
+          <script>
+            (function () {
+              const refreshMs = 30000;
+              window.setTimeout(function () {
+                window.location.reload();
+              }, refreshMs);
+            })();
+          </script>
+        ` : ''}
       </div>
     `;
 
@@ -16317,7 +16561,7 @@ app.post('/tech-workspace/:token/job/:id/onsite', async (req, res) => {
       WHERE id = $2
     `, [`${tech.name} workspace`, tech.id]);
 
-    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/schedule`);
   } catch (error) {
     console.error('Technician on-site error:', error);
     res.status(500).send('Technician on-site error. Check Render logs.');
