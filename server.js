@@ -1,4 +1,4 @@
-// YDP Unified master + technician WhatsApp closing summary (v150)
+// YDP Unified master + technician workload assignment popup (v151)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -9942,6 +9942,121 @@ function technicianOptions(technicians, selectedId = "", targetDateValue = null)
   }).join("");
 }
 
+function technicianWorkloadPopupHtml() {
+  return `
+    <div id="technicianWorkloadModal" class="tech-workload-modal" aria-hidden="true">
+      <div class="tech-workload-backdrop" data-close-tech-workload="1"></div>
+      <div class="tech-workload-dialog" role="dialog" aria-modal="true" aria-labelledby="techWorkloadTitle">
+        <div class="tech-workload-head">
+          <div>
+            <h2 id="techWorkloadTitle" style="margin:0;">Technician workload</h2>
+            <div class="muted">Compare jobs allocated today and this week before assigning.</div>
+          </div>
+          <button type="button" class="tech-workload-close" data-close-tech-workload="1">×</button>
+        </div>
+        <div id="technicianWorkloadBody"><div class="muted">Loading…</div></div>
+      </div>
+    </div>
+    <style>
+      .tech-workload-modal{display:none;position:fixed;inset:0;z-index:9999}
+      .tech-workload-modal.is-open{display:block}
+      .tech-workload-backdrop{position:absolute;inset:0;background:rgba(15,23,42,.45)}
+      .tech-workload-dialog{position:relative;width:min(760px,calc(100% - 32px));max-height:82vh;overflow:auto;margin:6vh auto 0;background:#fff;border-radius:18px;padding:18px;box-shadow:0 24px 80px rgba(15,23,42,.25)}
+      .tech-workload-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px}
+      .tech-workload-close{width:40px;height:40px;border:0;border-radius:10px;background:#f1f5f9;font-size:24px;cursor:pointer}
+      .tech-workload-table{width:100%;border-collapse:collapse}
+      .tech-workload-table th,.tech-workload-table td{padding:10px 8px;border-bottom:1px solid #e5e7eb;text-align:left}
+      .tech-workload-table th{font-size:12px;color:#64748b;text-transform:uppercase}
+      .tech-workload-table tr.is-selected{background:#ecfdf5}
+      .tech-workload-count{font-size:19px;font-weight:900}
+      .tech-workload-status{font-size:12px;color:#64748b}
+      .tech-workload-choose{border:0;border-radius:9px;padding:8px 10px;background:#26323a;color:#fff;font-weight:800;cursor:pointer}
+      @media(max-width:700px){.tech-workload-dialog{margin:3vh auto 0}.tech-workload-table th:nth-child(4),.tech-workload-table td:nth-child(4){display:none}}
+    </style>
+    <script>
+      (function(){
+        const modal=document.getElementById("technicianWorkloadModal");
+        const body=document.getElementById("technicianWorkloadBody");
+        if(!modal||!body)return;
+        let activeSelect=null;
+        let technicians=[];
+
+        function esc(value){
+          return String(value==null?"":value)
+            .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+            .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+        }
+
+        function closeModal(){
+          modal.classList.remove("is-open");
+          modal.setAttribute("aria-hidden","true");
+        }
+
+        function render(){
+          const selected=activeSelect?String(activeSelect.value||""):"";
+          body.innerHTML='<table class="tech-workload-table"><thead><tr><th>Technician</th><th>Today</th><th>This week</th><th>Active now</th><th></th></tr></thead><tbody>'+
+            technicians.map(function(t){
+              const cls=String(t.id)===selected?' class="is-selected"':'';
+              return '<tr'+cls+'>'+
+                '<td><strong>'+esc(t.name)+'</strong><div class="tech-workload-status">'+esc(t.status)+(t.subcontractor?' · Subcontractor':'')+'</div></td>'+
+                '<td><span class="tech-workload-count">'+Number(t.jobs_today||0)+'</span></td>'+
+                '<td><span class="tech-workload-count">'+Number(t.jobs_week||0)+'</span></td>'+
+                '<td><span class="tech-workload-count">'+Number(t.active_jobs||0)+'</span></td>'+
+                '<td><button type="button" class="tech-workload-choose" data-tech-id="'+t.id+'">Choose</button></td>'+
+              '</tr>';
+            }).join("")+'</tbody></table>';
+
+          body.querySelectorAll("[data-tech-id]").forEach(function(button){
+            button.addEventListener("click",function(){
+              if(activeSelect){
+                activeSelect.value=button.getAttribute("data-tech-id");
+                activeSelect.dispatchEvent(new Event("change",{bubbles:true}));
+              }
+              closeModal();
+            });
+          });
+        }
+
+        async function openModal(select){
+          activeSelect=select;
+          modal.classList.add("is-open");
+          modal.setAttribute("aria-hidden","false");
+          body.innerHTML='<div class="muted">Loading technician workload…</div>';
+          try{
+            const response=await fetch("/api/technician-workload",{cache:"no-store"});
+            if(!response.ok)throw new Error("HTTP "+response.status);
+            const data=await response.json();
+            technicians=Array.isArray(data.technicians)?data.technicians:[];
+            render();
+          }catch(error){
+            body.innerHTML='<div style="color:#b91c1c;font-weight:800">Could not load technician workload.</div>';
+          }
+        }
+
+        document.querySelectorAll(".tech-assignment-select").forEach(function(select){
+          select.addEventListener("mousedown",function(event){
+            if(!modal.classList.contains("is-open")){
+              event.preventDefault();
+              openModal(select);
+            }
+          });
+          select.addEventListener("focus",function(){
+            if(!modal.classList.contains("is-open"))openModal(select);
+          });
+        });
+
+        modal.querySelectorAll("[data-close-tech-workload]").forEach(function(el){
+          el.addEventListener("click",closeModal);
+        });
+        document.addEventListener("keydown",function(event){
+          if(event.key==="Escape"&&modal.classList.contains("is-open"))closeModal();
+        });
+      })();
+    </script>
+  `;
+}
+
+
 function accountTemplateOptions(templates, selectedId = "") {
   return templates.map(template => `<option value="${template.id}" ${String(template.id) === String(selectedId || "") ? "selected" : ""}>${escapeHtml(template.template_name)}</option>`).join("");
 }
@@ -11241,6 +11356,54 @@ app.post("/jobs/:id/delete", async (req, res) => {
   }
 });
 
+
+app.get("/api/technician-workload", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      WITH bounds AS (
+        SELECT
+          date_trunc('day', NOW()) AS today_start,
+          date_trunc('week', NOW()) AS week_start
+      )
+      SELECT
+        t.id,
+        t.name,
+        t.status,
+        t.is_subcontractor,
+        COUNT(j.id) FILTER (WHERE j.created_at >= b.today_start)::int AS jobs_today,
+        COUNT(j.id) FILTER (WHERE j.created_at >= b.week_start)::int AS jobs_week,
+        COUNT(j.id) FILTER (
+          WHERE COALESCE(j.status,'open') IN ('account_pending_review','open','assigned','scheduled')
+        )::int AS active_jobs
+      FROM technicians t
+      CROSS JOIN bounds b
+      LEFT JOIN jobs j ON j.assigned_technician_id = t.id
+      WHERE t.active = TRUE
+      GROUP BY t.id, t.name, t.status, t.is_subcontractor
+      ORDER BY
+        COALESCE(t.is_subcontractor, FALSE) ASC,
+        jobs_today ASC,
+        jobs_week ASC,
+        t.name ASC
+    `);
+
+    res.json({
+      technicians: result.rows.map(row => ({
+        id: Number(row.id),
+        name: row.name,
+        status: row.status || "Unknown",
+        subcontractor: Boolean(row.is_subcontractor),
+        jobs_today: Number(row.jobs_today || 0),
+        jobs_week: Number(row.jobs_week || 0),
+        active_jobs: Number(row.active_jobs || 0)
+      }))
+    });
+  } catch (error) {
+    console.error("Technician workload API error:", error);
+    res.status(500).json({ error: "Could not load technician workload." });
+  }
+});
+
 app.get("/jobs/new", async (req, res) => {
   try {
     const search = (req.query.search || "").trim();
@@ -11699,7 +11862,7 @@ app.get("/jobs/new", async (req, res) => {
                 <div class="form-grid-3">
                   <div class="field">
                     <label>Technician</label>
-                    <select name="assigned_technician_id"><option value="">-</option>${technicianOptions(technicians)}</select><div class="helper-line">Unavailable technicians can only be assigned if their return-to-work date is on or before the job date.</div>
+                    <select class="tech-assignment-select" name="assigned_technician_id"><option value="">-</option>${technicianOptions(technicians)}</select><div class="helper-line">Unavailable technicians can only be assigned if their return-to-work date is on or before the job date. Click Technician to compare today's and this week's workload.</div>
                   </div>
                   <div class="field">
                     <label>Status</label>
@@ -11887,7 +12050,8 @@ app.get("/jobs/new", async (req, res) => {
             if (!combineScheduledDateTime()) event.preventDefault();
           });
         </script>
-      </body>
+      ${technicianWorkloadPopupHtml()}
+</body>
       </html>
     `);
   } catch (error) {
@@ -12268,7 +12432,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                     <div><label>Expected payment method</label><select name="expected_payment_method">${optionList(jobPaymentMethods, job.expected_payment_method)}</select></div>
                     <div><label>Account job?</label><select name="account_job"><option value="false" ${!job.account_job ? "selected" : ""}>No</option><option value="true" ${job.account_job ? "selected" : ""}>Yes</option></select></div>
                     <div><label>Account template</label><select name="account_template_id"><option value="">None</option>${accountTemplateOptions(templates, job.account_template_id)}</select></div>
-                    <div><label>Assigned technician</label><select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select><div class="helper-line">Assignment is checked against the job date.</div><div class="helper-line">System will block unavailable technicians unless their return-to-work date covers the appointment date.</div></div>
+                    <div><label>Assigned technician</label><select class="tech-assignment-select" name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select><div class="helper-line">Assignment is checked against the job date.</div><div class="helper-line">System will block unavailable technicians unless their return-to-work date covers the appointment date.</div></div>
                     <div><label>ETA</label><select id="edit_eta_select" name="eta">${etaSelectOptions(job.eta)}</select><input id="edit_eta_other" name="eta_other" value="${etaOptions.includes(job.eta || "") ? "" : escapeHtml(job.eta || "")}" placeholder="Other ETA" style="display:none; margin-top:8px;"><div id="edit_scheduled_box" style="display:none; margin-top:10px;"><label>Scheduled date and time</label><div class="form-grid-2" style="margin-top:6px; align-items:start;"><div><label>Date</label><input type="date" id="edit_scheduled_date" name="scheduled_date" value="${escapeHtml(scheduledDateValue(job.scheduled_at))}"></div>${compactScheduledTimePicker("edit_scheduled", scheduledTimeValue(job.scheduled_at))}</div><input type="hidden" id="edit_scheduled_at" name="scheduled_at" value="${escapeHtml(datetimeLocalValue(job.scheduled_at))}"></div></div>
                     <div><label>Status</label><select id="edit_job_status" name="status">${jobStatusOptions(job.status)}</select></div>
                     <div class="wide"><label>Job description</label><textarea name="job_description" rows="4">${escapeHtml(job.job_description)}</textarea></div>
@@ -12309,7 +12473,7 @@ app.get("/jobs/:id/edit", async (req, res) => {
                 <form class="quick-form" method="POST" action="/jobs/${job.id}/quick-assign">
                   <label>Assign / change technician</label>
                   <div class="quick-form-row">
-                    <select name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select>
+                    <select class="tech-assignment-select" name="assigned_technician_id"><option value="">Unassigned</option>${technicianOptions(technicians, job.assigned_technician_id)}</select>
                     <button type="submit">Assign</button>
                   </div>
                 </form>
@@ -12522,7 +12686,8 @@ app.get("/jobs/:id/edit", async (req, res) => {
             if (!combineEditScheduledDateTime()) event.preventDefault();
           });
         </script>
-      </body>
+      ${technicianWorkloadPopupHtml()}
+</body>
       </html>
     `);
   } catch (error) {
