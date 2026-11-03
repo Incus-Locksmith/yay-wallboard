@@ -1,4 +1,4 @@
-// YDP Unified master + technician workload assignment popup (v151)
+// YDP Unified master + technician workload popup with distance to job (v152)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -9950,7 +9950,7 @@ function technicianWorkloadPopupHtml() {
         <div class="tech-workload-head">
           <div>
             <h2 id="techWorkloadTitle" style="margin:0;">Technician workload</h2>
-            <div class="muted">Compare jobs allocated today and this week before assigning.</div>
+            <div class="muted">Compare workload and distance to this job before assigning.</div>
           </div>
           <button type="button" class="tech-workload-close" data-close-tech-workload="1">×</button>
         </div>
@@ -9971,7 +9971,7 @@ function technicianWorkloadPopupHtml() {
       .tech-workload-count{font-size:19px;font-weight:900}
       .tech-workload-status{font-size:12px;color:#64748b}
       .tech-workload-choose{border:0;border-radius:9px;padding:8px 10px;background:#26323a;color:#fff;font-weight:800;cursor:pointer}
-      @media(max-width:700px){.tech-workload-dialog{margin:3vh auto 0}.tech-workload-table th:nth-child(4),.tech-workload-table td:nth-child(4){display:none}}
+      @media(max-width:700px){.tech-workload-dialog{margin:3vh auto 0}.tech-workload-table th:nth-child(5),.tech-workload-table td:nth-child(5){display:none}}
     </style>
     <script>
       (function(){
@@ -9994,11 +9994,12 @@ function technicianWorkloadPopupHtml() {
 
         function render(){
           const selected=activeSelect?String(activeSelect.value||""):"";
-          body.innerHTML='<table class="tech-workload-table"><thead><tr><th>Technician</th><th>Today</th><th>This week</th><th>Active now</th><th></th></tr></thead><tbody>'+
+          body.innerHTML='<table class="tech-workload-table"><thead><tr><th>Technician</th><th>Distance</th><th>Today</th><th>This week</th><th>Active now</th><th></th></tr></thead><tbody>'+
             technicians.map(function(t){
               const cls=String(t.id)===selected?' class="is-selected"':'';
               return '<tr'+cls+'>'+
                 '<td><strong>'+esc(t.name)+'</strong><div class="tech-workload-status">'+esc(t.status)+(t.subcontractor?' · Subcontractor':'')+'</div></td>'+
+                '<td><span class="tech-workload-count">'+(t.distance_miles==null?'—':Number(t.distance_miles).toFixed(1)+' mi')+'</span><div class="tech-workload-status">'+esc(t.location_source||'')+'</div></td>'+
                 '<td><span class="tech-workload-count">'+Number(t.jobs_today||0)+'</span></td>'+
                 '<td><span class="tech-workload-count">'+Number(t.jobs_week||0)+'</span></td>'+
                 '<td><span class="tech-workload-count">'+Number(t.active_jobs||0)+'</span></td>'+
@@ -10023,11 +10024,25 @@ function technicianWorkloadPopupHtml() {
           modal.setAttribute("aria-hidden","false");
           body.innerHTML='<div class="muted">Loading technician workload…</div>';
           try{
-            const response=await fetch("/api/technician-workload",{cache:"no-store"});
+            const postcodeField =
+              document.querySelector('input[name="postcode"]') ||
+              document.getElementById('postcode');
+            const postcode = postcodeField ? String(postcodeField.value || '').trim() : '';
+            const workloadUrl = "/api/technician-workload" + (postcode ? "?postcode=" + encodeURIComponent(postcode) : "");
+            const response=await fetch(workloadUrl,{cache:"no-store"});
             if(!response.ok)throw new Error("HTTP "+response.status);
             const data=await response.json();
             technicians=Array.isArray(data.technicians)?data.technicians:[];
             render();
+            if (!data.postcode_located) {
+              const note = document.createElement("div");
+              note.className = "tech-workload-status";
+              note.style.marginTop = "10px";
+              note.textContent = postcode
+                ? "Distance unavailable: the job postcode could not be located."
+                : "Enter the job postcode to show technician distance.";
+              body.appendChild(note);
+            }
           }catch(error){
             body.innerHTML='<div style="color:#b91c1c;font-weight:800">Could not load technician workload.</div>';
           }
@@ -11359,6 +11374,16 @@ app.post("/jobs/:id/delete", async (req, res) => {
 
 app.get("/api/technician-workload", async (req, res) => {
   try {
+    const jobPostcode = compactPostcode(String(req.query.postcode || "").trim());
+    let jobLocation = null;
+
+    if (jobPostcode) {
+      const lookedUp = await lookupPostcodeLocation(jobPostcode);
+      if (lookedUp && lookedUp.ok) {
+        jobLocation = lookedUp;
+      }
+    }
+
     const result = await pool.query(`
       WITH bounds AS (
         SELECT
@@ -11366,10 +11391,7 @@ app.get("/api/technician-workload", async (req, res) => {
           date_trunc('week', NOW()) AS week_start
       )
       SELECT
-        t.id,
-        t.name,
-        t.status,
-        t.is_subcontractor,
+        t.*,
         COUNT(j.id) FILTER (WHERE j.created_at >= b.today_start)::int AS jobs_today,
         COUNT(j.id) FILTER (WHERE j.created_at >= b.week_start)::int AS jobs_week,
         COUNT(j.id) FILTER (
@@ -11379,24 +11401,51 @@ app.get("/api/technician-workload", async (req, res) => {
       CROSS JOIN bounds b
       LEFT JOIN jobs j ON j.assigned_technician_id = t.id
       WHERE t.active = TRUE
-      GROUP BY t.id, t.name, t.status, t.is_subcontractor
-      ORDER BY
-        COALESCE(t.is_subcontractor, FALSE) ASC,
-        jobs_today ASC,
-        jobs_week ASC,
-        t.name ASC
+      GROUP BY t.id
     `);
 
-    res.json({
-      technicians: result.rows.map(row => ({
+    const technicians = await Promise.all(result.rows.map(async row => {
+      const techLocation = await getTechnicianDispatchLocation(row);
+      let distance = null;
+
+      if (jobLocation && jobLocation.ok && techLocation && techLocation.ok) {
+        distance = distanceMiles(
+          jobLocation.latitude,
+          jobLocation.longitude,
+          techLocation.latitude,
+          techLocation.longitude
+        );
+      }
+
+      return {
         id: Number(row.id),
         name: row.name,
         status: row.status || "Unknown",
         subcontractor: Boolean(row.is_subcontractor),
         jobs_today: Number(row.jobs_today || 0),
         jobs_week: Number(row.jobs_week || 0),
-        active_jobs: Number(row.active_jobs || 0)
-      }))
+        active_jobs: Number(row.active_jobs || 0),
+        distance_miles: distance === null ? null : Math.round(distance * 10) / 10,
+        location_source: techLocation && techLocation.ok ? (techLocation.source || "") : "",
+        location_updated: row.location_checked_in_at || null
+      };
+    }));
+
+    technicians.sort((a, b) => {
+      if (a.jobs_today !== b.jobs_today) return a.jobs_today - b.jobs_today;
+      if (a.distance_miles !== null && b.distance_miles === null) return -1;
+      if (a.distance_miles === null && b.distance_miles !== null) return 1;
+      if (a.distance_miles !== null && b.distance_miles !== null && a.distance_miles !== b.distance_miles) {
+        return a.distance_miles - b.distance_miles;
+      }
+      if (a.jobs_week !== b.jobs_week) return a.jobs_week - b.jobs_week;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+
+    res.json({
+      postcode: jobPostcode || null,
+      postcode_located: Boolean(jobLocation && jobLocation.ok),
+      technicians
     });
   } catch (error) {
     console.error("Technician workload API error:", error);
