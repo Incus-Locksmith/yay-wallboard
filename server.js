@@ -1,4 +1,4 @@
-// YDP Unified master + remove duplicate Account campaign badge (v162)
+// YDP Unified master + mobile technician invoice dropdowns and briefing navigation fix (v163)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14923,13 +14923,14 @@ function technicianPortalShell(title, bodyHtml) {
               const response = await fetch('/tech-workspace/' + encodeURIComponent(token) + '/briefing-status', { cache: 'no-store' });
               if (!response.ok) return;
               const data = await response.json();
-              if (data && data.due) {
-                window.location.href = '/tech-workspace/' + encodeURIComponent(token) + '/start-shift';
+              // Start-of-shift is shown only as part of login.
+              // While moving around the workspace, only the 18:00 evening summary may interrupt.
+              if (data && data.due && data.slot === 'evening') {
+                window.location.replace('/tech-workspace/' + encodeURIComponent(token) + '/start-shift');
               }
             } catch (_) {}
           }
 
-          window.setTimeout(checkBriefing, 1500);
           window.setInterval(checkBriefing, 60000);
         })();
 
@@ -15396,6 +15397,9 @@ app.get('/tech-workspace/:token/briefing-status', async (req, res) => {
 
 app.get('/tech-workspace/:token/start-shift', async (req, res) => {
   try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     await ensureTechnicianWorkspaceSchema();
     const token = req.params.token;
     const tech = await getTechnicianByToken(token);
@@ -15525,7 +15529,7 @@ app.post('/tech-workspace/:token/start-shift/acknowledge', async (req, res) => {
       DO UPDATE SET acknowledged_at = EXCLUDED.acknowledged_at
     `, [tech.id, dateValue, slot]);
 
-    res.redirect(`/tech-workspace/${encodeURIComponent(token)}`);
+    res.redirect(303, `/tech-workspace/${encodeURIComponent(token)}?briefing_ack=1`);
   } catch (error) {
     console.error('Technician shift acknowledgement error:', error);
     res.status(500).send('Could not acknowledge shift summary. Check Render logs.');
@@ -16787,6 +16791,15 @@ app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
     }
 
     const invoiceAddress = await technicianInvoiceAddressForJob(job);
+    const invoiceItems = (await pool.query(`
+      SELECT id, description, default_price
+      FROM invoice_items
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, description ASC
+    `)).rows;
+    const techInvoiceItemOptions = invoiceItems.map(item =>
+      `<option value="${escapeHtml(item.id)}" data-description="${escapeHtml(item.description)}" data-price="${Number(item.default_price || 0).toFixed(2)}">${escapeHtml(item.description)} — ${money(item.default_price)}</option>`
+    ).join("");
     const defaultCompany = technicianInvoiceCompanyForJob(job);
     const defaultPayment = technicianInvoicePaymentForJob(job);
     const defaultNet = technicianInvoiceNetValue(job);
@@ -16873,18 +16886,62 @@ app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
             </p>
           </div>
 
-          <div class="card">
-            <h2>Invoice line</h2>
-            <div class="field-grid">
-              <div class="full"><label>Description</label><input name="line1_description" value="${escapeHtml(technicianInvoiceDescription(job))}" required></div>
-              <div><label>Qty</label><input name="line1_qty" value="1" inputmode="numeric" required></div>
-              <div><label>Net unit price</label><input name="line1_unit_price" inputmode="decimal" value="${defaultNet !== null ? defaultNet.toFixed(2) : ''}" placeholder="Enter net amount" required></div>
-              <div class="full"><label>Optional second line</label><input name="line2_description" placeholder="Additional labour / parts / other"></div>
-              <div><label>Qty</label><input name="line2_qty" inputmode="numeric" placeholder="1"></div>
-              <div><label>Net unit price</label><input name="line2_unit_price" inputmode="decimal" placeholder="0.00"></div>
-              <div class="full"><label>Notes</label><textarea name="notes">6 months warranty on parts fitted</textarea></div>
+          <div class="card tech-invoice-lines-card">
+            <h2>Invoice items</h2>
+            <p class="job-sub">Choose the work from the dropdown, then adjust the description or price only if needed.</p>
+
+            <div class="tech-invoice-line">
+              <label>Invoice item 1</label>
+              <select id="tech_invoice_item_1" onchange="fillTechInvoiceLine(1, this)">
+                <option value="">Choose invoice item</option>
+                ${techInvoiceItemOptions}
+                <option value="custom">Other / custom</option>
+              </select>
+              <div class="tech-invoice-line-grid">
+                <div class="tech-invoice-description">
+                  <label>Description</label>
+                  <input id="line1_description" name="line1_description" value="${escapeHtml(technicianInvoiceDescription(job))}" required>
+                </div>
+                <div>
+                  <label>Qty</label>
+                  <input name="line1_qty" value="1" inputmode="numeric" required>
+                </div>
+                <div>
+                  <label>Net price</label>
+                  <input id="line1_unit_price" name="line1_unit_price" inputmode="decimal" value="${defaultNet !== null ? defaultNet.toFixed(2) : ''}" placeholder="0.00" required>
+                </div>
+              </div>
             </div>
-            <p class="job-sub" style="margin-top:10px;">VAT is added automatically at 20%. The first line has been prefilled from the job and can be adjusted before creation.</p>
+
+            <div class="tech-invoice-line">
+              <label>Invoice item 2 <span class="job-sub">(optional)</span></label>
+              <select id="tech_invoice_item_2" onchange="fillTechInvoiceLine(2, this)">
+                <option value="">No second item</option>
+                ${techInvoiceItemOptions}
+                <option value="custom">Other / custom</option>
+              </select>
+              <div class="tech-invoice-line-grid">
+                <div class="tech-invoice-description">
+                  <label>Description</label>
+                  <input id="line2_description" name="line2_description" placeholder="Additional labour / parts / other">
+                </div>
+                <div>
+                  <label>Qty</label>
+                  <input name="line2_qty" inputmode="numeric" placeholder="1">
+                </div>
+                <div>
+                  <label>Net price</label>
+                  <input id="line2_unit_price" name="line2_unit_price" inputmode="decimal" placeholder="0.00">
+                </div>
+              </div>
+            </div>
+
+            <div style="margin-top:14px;">
+              <label>Notes</label>
+              <textarea name="notes" rows="3">6 months warranty on parts fitted</textarea>
+            </div>
+
+            <p class="job-sub" style="margin-top:10px;">VAT is added automatically at 20%. Dropdown items use the same saved invoice-item list as the office invoice system.</p>
           </div>
 
           <div class="actions">
@@ -16893,6 +16950,73 @@ app.get('/tech-workspace/:token/job/:id/invoice/new', async (req, res) => {
           </div>
         </form>
       </div>
+
+      <style>
+        .tech-invoice-line {
+          margin-top:14px;
+          padding:14px;
+          border:1px solid #dbe3ec;
+          border-radius:14px;
+          background:#f8fafc;
+        }
+        .tech-invoice-line-grid {
+          display:grid;
+          grid-template-columns:minmax(0,2fr) 90px 130px;
+          gap:10px;
+          margin-top:10px;
+          align-items:end;
+        }
+        .tech-invoice-lines-card select,
+        .tech-invoice-lines-card input,
+        .tech-invoice-lines-card textarea {
+          width:100%;
+          min-height:44px;
+          font-size:16px;
+        }
+        @media(max-width:700px) {
+          .tech-invoice-line-grid {
+            grid-template-columns:1fr 1fr;
+          }
+          .tech-invoice-description {
+            grid-column:1 / -1;
+          }
+          .tech-invoice-lines-card {
+            padding:14px;
+          }
+          .tech-invoice-line {
+            padding:12px;
+          }
+        }
+      </style>
+
+      <script>
+        function fillTechInvoiceLine(number, select) {
+          const description = document.getElementById('line' + number + '_description');
+          const price = document.getElementById('line' + number + '_unit_price');
+          if (!description || !price || !select) return;
+
+          const option = select.options[select.selectedIndex];
+          if (!option) return;
+
+          if (select.value === 'custom') {
+            description.value = '';
+            price.value = '';
+            description.focus();
+            return;
+          }
+
+          if (!select.value) {
+            if (number === 2) {
+              description.value = '';
+              price.value = '';
+            }
+            return;
+          }
+
+          description.value = option.dataset.description || '';
+          price.value = option.dataset.price || '';
+        }
+      </script>
     `;
 
     res.send(technicianPortalShell('Create invoice', body));
