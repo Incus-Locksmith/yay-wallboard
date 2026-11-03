@@ -1,4 +1,4 @@
-// YDP Unified master + dispatcher job-source operational notices (v158)
+// YDP Unified master + WhatsApp operational booking notices (v159)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14982,6 +14982,16 @@ function dispatcherJobSourceNotice(job) {
   return "";
 }
 
+function technicianWhatsappOperationalNotice(job) {
+  if (!job) return "";
+  const isFantastic = String(job.source_campaign || "").trim().toUpperCase() === "FANTASTIC";
+  const isAccount = job.account_job === true || String(job.account_job).toLowerCase() === "true" || job.account_client_id || job.account_template_id;
+
+  if (isFantastic) return "Fantastic booking, £ paid upfront";
+  if (isAccount) return "Account job, do not discuss prices, please take before and after photos";
+  return "";
+}
+
 function technicianWorkspaceTabs(token, active, disputeCount = 0) {
   const disputeLabel = disputeCount > 0 ? `Disputes (${disputeCount})` : "Disputes";
   return `
@@ -18281,6 +18291,7 @@ function technicianClosingWhatsappText(job) {
     ? `Yes - ${job.closing_invoice_number || 'Number not entered'}`
     : `No - ${job.closing_invoice_reason || 'Reason not entered'}`;
 
+  const operationalNotice = technicianWhatsappOperationalNotice(job);
   const original = [
     'ORIGINAL JOB DETAILS',
     `Job: ${job.job_number || jobNumber(job.id)}`,
@@ -18289,9 +18300,9 @@ function technicianClosingWhatsappText(job) {
     `Address: ${techJobAddress(job) || '—'}`,
     `Postcode: ${job.postcode || '—'}`,
     `Job type: ${job.job_type || '—'}`,
-    `Job source: ${technicianJobSourceLabel(job)}`,
+    ...(operationalNotice ? [operationalNotice] : []),
     `Original quote / start price: ${job.quoted_price || job.starting_price ? whatsappClosingMoneySuffix(job.quoted_price || job.starting_price) : '—'}`,
-    '',
+    '__BLANK__',
     'CLOSING:',
     `TOTAL ${whatsappClosingMoneySuffix(job.final_value)} ${payment}`,
     `VAT AMOUNT = ${whatsappClosingMoneySuffix(job.vat_amount)}`,
@@ -18302,7 +18313,7 @@ function technicianClosingWhatsappText(job) {
     `Comments: ${job.closing_comment || '—'}`
   ];
 
-  return original.join('\n');
+  return original.map(line => line === "__BLANK__" ? "" : line).join('\n');
 }
 
 app.get('/tech-workspace/:token/job/:id/closing-whatsapp', async (req, res) => {
