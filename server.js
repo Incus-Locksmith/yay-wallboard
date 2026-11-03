@@ -1,4 +1,4 @@
-// YDP Unified master + Dispatcher Activity removed from main board (v149)
+// YDP Unified master + technician WhatsApp closing summary (v150)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -1128,7 +1128,11 @@ const auditFieldLabels = {
   outcome: "Outcome",
   tech_notes: "Technician notes",
   close_notes: "Close notes",
-  onsite_at: "On site time"
+  onsite_at: "On site time",
+  closing_invoice_yes: "Invoice issued",
+  closing_invoice_number: "Invoice number",
+  closing_invoice_reason: "No invoice reason",
+  closing_comment: "Closing comment"
 };
 
 const auditMoneyFields = new Set(["quoted_price", "starting_price", "call_out_agreed", "start_price_locks", "net_value", "vat_amount", "final_value", "payment_amount_1", "payment_amount_2", "materials_cost"]);
@@ -3286,6 +3290,11 @@ async function initDb() {
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS close_notes TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by TEXT;`);
   await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closing_invoice_yes BOOLEAN;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closing_invoice_number TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closing_invoice_reason TEXT;`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closing_comment TEXT;`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS technician_schedule_blocks (
       id SERIAL PRIMARY KEY,
@@ -16532,6 +16541,43 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
               <div><label>Materials cost</label><input name="materials_cost" value="${job.materials_cost !== null && job.materials_cost !== undefined ? Number(job.materials_cost).toFixed(2) : ''}" inputmode="decimal" placeholder="£"></div>
               <div><label>Outcome</label><select name="outcome">${optionList(jobOutcomes, job.outcome || 'Completed')}</select></div>
             </div>
+
+            <div class="panel" style="margin-top:14px;background:#f8fafc;color:#111827;">
+              <h3 style="margin-top:0;">WhatsApp closing details</h3>
+              <div class="field-grid">
+                <div>
+                  <label>Invoice No?</label>
+                  <select id="techClosingInvoiceYes" name="closing_invoice_yes" onchange="toggleClosingInvoiceFields()" required>
+                    <option value="">Select Yes / No</option>
+                    <option value="true" ${job.closing_invoice_yes === true ? 'selected' : ''}>Yes</option>
+                    <option value="false" ${job.closing_invoice_yes === false ? 'selected' : ''}>No</option>
+                  </select>
+                </div>
+                <div id="techClosingInvoiceNumberBox">
+                  <label>Invoice number</label>
+                  <input name="closing_invoice_number" value="${escapeHtml(job.closing_invoice_number || '')}" placeholder="e.g. INV-12345">
+                </div>
+                <div id="techClosingInvoiceReasonBox">
+                  <label>If no invoice, why?</label>
+                  <input name="closing_invoice_reason" value="${escapeHtml(job.closing_invoice_reason || '')}" placeholder="Reason invoice not issued">
+                </div>
+                <div class="full">
+                  <label>Comments</label>
+                  <select id="techClosingComment" name="closing_comment" onchange="toggleClosingOther()" required>
+                    <option value="">Select closing comment</option>
+                    <option value="Call out only" ${job.closing_comment === 'Call out only' ? 'selected' : ''}>Call out only</option>
+                    <option value="Labour only" ${job.closing_comment === 'Labour only' ? 'selected' : ''}>Labour only</option>
+                    <option value="Extended warranty given" ${job.closing_comment === 'Extended warranty given' ? 'selected' : ''}>Extended warranty given</option>
+                    <option value="Cancellation fee only" ${job.closing_comment === 'Cancellation fee only' ? 'selected' : ''}>Cancellation fee only</option>
+                    <option value="OTHER" ${String(job.closing_comment || '').startsWith('OTHER:') ? 'selected' : ''}>OTHER</option>
+                  </select>
+                </div>
+                <div class="full" id="techClosingOtherBox">
+                  <label>Other comment</label>
+                  <input name="closing_comment_other" value="${escapeHtml(String(job.closing_comment || '').startsWith('OTHER:') ? String(job.closing_comment).slice(6).trim() : '')}" placeholder="Enter closing comment">
+                </div>
+              </div>
+            </div>
             <div id="techInvoicePhotosBox" class="panel" style="margin-top:14px; display:none; background:#0f172a; color:white;">
               <label>The correct invoice has been used and completed, photos are also on file</label>
               <select name="invoice_photos_confirmed"><option value="false" ${!job.invoice_photos_confirmed ? 'selected' : ''}>No</option><option value="true" ${job.invoice_photos_confirmed ? 'selected' : ''}>Yes</option></select>
@@ -16582,6 +16628,18 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
             function selectedTechPaymentMethods(){
               return [document.getElementById('techPaymentMethod1')?.value || '', document.getElementById('techPaymentMethod2')?.value || ''].map(v => v.toLowerCase());
             }
+            function toggleClosingInvoiceFields(){
+              const value = document.getElementById('techClosingInvoiceYes')?.value || '';
+              const yesBox = document.getElementById('techClosingInvoiceNumberBox');
+              const noBox = document.getElementById('techClosingInvoiceReasonBox');
+              if (yesBox) yesBox.style.display = value === 'true' ? 'block' : 'none';
+              if (noBox) noBox.style.display = value === 'false' ? 'block' : 'none';
+            }
+            function toggleClosingOther(){
+              const value = document.getElementById('techClosingComment')?.value || '';
+              const box = document.getElementById('techClosingOtherBox');
+              if (box) box.style.display = value === 'OTHER' ? 'block' : 'none';
+            }
             function toggleTechClosePaymentRules(){
               const methods = selectedTechPaymentMethods();
               const hasCard = methods.some(v => v.includes('card'));
@@ -16594,6 +16652,8 @@ app.get('/tech-workspace/:token/job/:id/close', async (req, res) => {
             document.getElementById('techNetValue').addEventListener('input', recalcTechCloseValues);
             recalcTechCloseValues();
             toggleTechClosePaymentRules();
+            toggleClosingInvoiceFields();
+            toggleClosingOther();
           </script>
         </div>
       </div>
@@ -16676,10 +16736,29 @@ app.post('/tech-workspace/:token/job/:id/close/customer-confirmation', async (re
       outcome: body.outcome || '',
       tech_notes: body.tech_notes || '',
       close_notes: body.close_notes || '',
+      closing_invoice_yes: body.closing_invoice_yes === 'true',
+      closing_invoice_number: body.closing_invoice_yes === 'true' ? String(body.closing_invoice_number || '').trim() : '',
+      closing_invoice_reason: body.closing_invoice_yes === 'false' ? String(body.closing_invoice_reason || '').trim() : '',
+      closing_comment: body.closing_comment === 'OTHER'
+        ? `OTHER: ${String(body.closing_comment_other || '').trim()}`
+        : String(body.closing_comment || '').trim(),
       status: selectedStatus,
       verification_route: verificationRoute,
       createdAt: Date.now()
     };
+
+    if (body.closing_invoice_yes !== 'true' && body.closing_invoice_yes !== 'false') {
+      return res.status(400).send('Please select whether an invoice number was issued.');
+    }
+    if (body.closing_invoice_yes === 'true' && !draft.closing_invoice_number) {
+      return res.status(400).send('Please enter the invoice number.');
+    }
+    if (body.closing_invoice_yes === 'false' && !draft.closing_invoice_reason) {
+      return res.status(400).send('Please state why no invoice was issued.');
+    }
+    if (!draft.closing_comment || draft.closing_comment === 'OTHER:') {
+      return res.status(400).send('Please select or enter the closing comment.');
+    }
 
     const draftToken = techCloseDraftToken(draft);
 
@@ -17291,6 +17370,10 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       outcome: draft.outcome || '',
       tech_notes: draft.tech_notes || '',
       close_notes: draft.close_notes || '',
+      closing_invoice_yes: draft.closing_invoice_yes === true,
+      closing_invoice_number: draft.closing_invoice_number || '',
+      closing_invoice_reason: draft.closing_invoice_reason || '',
+      closing_comment: draft.closing_comment || '',
       status: draft.status || 'fully_paid'
     };
 
@@ -17313,17 +17396,21 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
           outcome = $15,
           tech_notes = $16,
           close_notes = $17,
-          status = $18,
-          closed_by = $19,
+          closing_invoice_yes = $18,
+          closing_invoice_number = $19,
+          closing_invoice_reason = $20,
+          closing_comment = $21,
+          status = $22,
+          closed_by = $23,
           closed_at = COALESCE(closed_at, NOW()),
           tech_updated_at = NOW(),
-          tech_close_submitted_by = $19,
+          tech_close_submitted_by = $23,
           customer_price_confirmed = TRUE,
           customer_price_confirmed_at = NOW(),
           customer_price_confirmed_amount = $3,
-          customer_price_confirmed_by = $20,
+          customer_price_confirmed_by = $24,
           updated_at = NOW()
-      WHERE id = $21
+      WHERE id = $25
     `, [
       techCloseValues.net_value,
       techCloseValues.vat_amount,
@@ -17342,6 +17429,10 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       techCloseValues.outcome,
       techCloseValues.tech_notes,
       techCloseValues.close_notes,
+      techCloseValues.closing_invoice_yes,
+      techCloseValues.closing_invoice_number,
+      techCloseValues.closing_invoice_reason,
+      techCloseValues.closing_comment,
       techCloseValues.status,
       tech.name,
       signerName,
@@ -17399,13 +17490,129 @@ app.post('/tech-workspace/:token/job/:id/close', async (req, res) => {
       }
     }
 
-    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/summary`);
+    res.redirect(`/tech-workspace/${encodeURIComponent(token)}/job/${jobId}/closing-whatsapp`);
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('Technician customer-confirmed close error:', error);
     res.status(500).send('Could not complete the job after customer confirmation. Check Render logs.');
   } finally {
     client.release();
+  }
+});
+
+
+function whatsappClosingMoneySuffix(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return '0.00£';
+  return `${amount.toFixed(2)}£`;
+}
+
+function technicianClosingWhatsappText(job) {
+  const payment = String(job.payment_method || job.expected_payment_method || 'Unknown').trim();
+  const invoiceLine = job.closing_invoice_yes
+    ? `Yes - ${job.closing_invoice_number || 'Number not entered'}`
+    : `No - ${job.closing_invoice_reason || 'Reason not entered'}`;
+
+  const original = [
+    'ORIGINAL JOB DETAILS',
+    `Job: ${job.job_number || jobNumber(job.id)}`,
+    `Customer: ${job.customer_name || '—'}`,
+    `Phone: ${job.customer_phone || '—'}`,
+    `Address: ${techJobAddress(job) || '—'}`,
+    `Postcode: ${job.postcode || '—'}`,
+    `Job type: ${job.job_type || '—'}`,
+    `Campaign: ${job.source_campaign || '—'}`,
+    `Original quote / start price: ${job.quoted_price || job.starting_price ? whatsappClosingMoneySuffix(job.quoted_price || job.starting_price) : '—'}`,
+    '',
+    'CLOSING:',
+    `TOTAL ${whatsappClosingMoneySuffix(job.final_value)} ${payment}`,
+    `VAT AMOUNT = ${whatsappClosingMoneySuffix(job.vat_amount)}`,
+    `NET AMOUNT = ${whatsappClosingMoneySuffix(job.net_value)}`,
+    `PAYMENT METHOD - ${payment}`,
+    `INVOICE No: ${invoiceLine}`,
+    `MATERIAL: ${whatsappClosingMoneySuffix(job.materials_cost)}`,
+    `Comments: ${job.closing_comment || '—'}`
+  ];
+
+  return original.join('\n');
+}
+
+app.get('/tech-workspace/:token/job/:id/closing-whatsapp', async (req, res) => {
+  try {
+    await ensureTechnicianWorkspaceSchema();
+    const token = req.params.token;
+    const jobId = Number(req.params.id);
+    const tech = await getTechnicianByToken(token);
+    if (!tech) return res.status(404).send('Invalid technician link');
+    if (!isTechnicianWorkspaceLoggedIn(req, token)) return res.send(technicianLoginPage(token, tech));
+    if (!Number.isInteger(jobId)) return res.status(400).send('Invalid job ID.');
+
+    const result = await pool.query(`
+      SELECT j.*
+      FROM jobs j
+      WHERE j.id = $1
+        AND (
+          j.assigned_technician_id = $2
+          OR j.assigned_technician_id IN (
+            SELECT id FROM technicians WHERE LOWER(name) = LOWER($3)
+          )
+        )
+    `, [jobId, tech.id, tech.name]);
+
+    const job = result.rows[0];
+    if (!job) return res.status(404).send('Job not found for this technician.');
+
+    const message = technicianClosingWhatsappText(job);
+    const openDisputeCount = (await getOpenDisputesForTechnician(tech)).length;
+
+    const body = `
+      <div class="topbar">
+        <div class="brand"><span class="brand-badge">24H</span><span>${escapeHtml(tech.name)}</span></div>
+        <div class="live">● Job closed</div>
+      </div>
+      <div class="wrap">
+        ${technicianWorkspaceTabs(token, 'jobs', openDisputeCount)}
+        <div class="panel" style="border-left:6px solid #16a34a;">
+          <h1 style="margin-top:0;">WhatsApp Closing</h1>
+          <p class="job-sub">Job ${escapeHtml(job.job_number || jobNumber(job.id))} has been closed. Copy the completed closing below and paste it into WhatsApp.</p>
+          <textarea id="whatsappClosingText" readonly style="width:100%;min-height:360px;font-family:monospace;font-size:15px;line-height:1.55;">${escapeHtml(message)}</textarea>
+          <div class="actions" style="margin-top:14px;">
+            <button class="button green" type="button" onclick="copyWhatsappClosing()">Copy WhatsApp Closing</button>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}/schedule">Back to Schedule</a>
+            <a class="button dark" href="/tech-workspace/${escapeHtml(token)}">Active Jobs</a>
+          </div>
+          <div id="whatsappCopyStatus" class="job-sub" style="margin-top:10px;"></div>
+        </div>
+      </div>
+      <script>
+        function copyWhatsappClosing() {
+          const field = document.getElementById('whatsappClosingText');
+          const status = document.getElementById('whatsappCopyStatus');
+          if (!field) return;
+          const text = field.value || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              if (status) status.textContent = 'Copied — ready to paste into WhatsApp.';
+            }).catch(function () {
+              field.focus();
+              field.select();
+              document.execCommand('copy');
+              if (status) status.textContent = 'Copied — ready to paste into WhatsApp.';
+            });
+          } else {
+            field.focus();
+            field.select();
+            document.execCommand('copy');
+            if (status) status.textContent = 'Copied — ready to paste into WhatsApp.';
+          }
+        }
+      </script>
+    `;
+
+    res.send(technicianPortalShell('WhatsApp Closing', body));
+  } catch (error) {
+    console.error('Technician WhatsApp closing error:', error);
+    res.status(500).send('Could not load WhatsApp closing. Check Render logs.');
   }
 });
 
