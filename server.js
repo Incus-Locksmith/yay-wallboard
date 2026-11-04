@@ -1,4 +1,4 @@
-// YDP Unified master + mobile technician invoice dropdowns and briefing navigation fix (v163)
+// YDP Unified master + technician workspace PWA (v164)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -14647,7 +14647,17 @@ function technicianWorkspaceStyles() {
       --charcoal:#26323a; --soft:#f8fafc;
     }
     * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family: Arial, Helvetica, sans-serif; }
+    html { background:var(--bg); }
+    body {
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:Arial, Helvetica, sans-serif;
+      padding-bottom:env(safe-area-inset-bottom);
+    }
+    @media (display-mode: standalone) {
+      .topbar { padding-top:env(safe-area-inset-top); height:calc(70px + env(safe-area-inset-top)); }
+    }
     .topbar { height:70px; background:white; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 18px; position:sticky; top:0; z-index:5; }
     .brand { display:flex; align-items:center; gap:12px; font-weight:800; }
     .brand-badge { width:38px; height:38px; border-radius:10px; background:var(--red); color:white; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:13px; }
@@ -14900,18 +14910,148 @@ function technicianWorkspaceStyles() {
   `;
 }
 
+
+const TECH_PWA_ICON_192 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAEjElEQVR4nO3cvYtcZRjG4bMSQbBQ1EaIoDaiGyw0SaOVWqngP2BhZxFICnsFUawtrGzEMkJAbC0NkgQlRZpUWojgprJNZTE6TvYrM3uf92PyXle12cxODs/55Zkzw+zsXDu7O8FJPdT6ANhuAiIiICICIiIgIgIiIiAiAiIiICICIiIgIgIiIiAiAiIiICICIiIgIgIiIiAiAiIiICICIiIgIgIiIiAiAiIiICICIiIgIqdaH8Bazt+41foQ2rh+7kzrQ7iPnW4/3mXYaI7SZ0w9BiSdY/SWUUcB6WYjnZTUy0W0ejbVycTab6BOBrG92q6ixhtIPbm2M2wZkHrm0nCSzQJSz7xazbNNQOopoclUGwSknnLqz7Z2QOoprfKEqwaknjpqzrleQOqpqdq0e3klmi1VKSDrp746M68RkHpaqTB5D2FEBESkeEAev9oqPX8biEjZgKyfHhQ9CzYQEQERERCRggG5AOpHuXNhAxEREBEBEREQEQERERARAREREBEBEREQEQER2Y4P2azshVdfO+qvbv9yteaR9E9A9zgmndUbyGhJQP+6bzoHbyyjSUDThukc/MHBMxr9IvrE9cx4D1tt6IDmOvcjNzRuQPOe9WEbGjSgEud7zIYGDYi5jBhQuVUx4BIaMSBmNFxApZfEaEtouICY11gB1VkPQy2hsQJidgIiIiAiAiIiICICIiIgIgIiMlZAdd5+OtSbXMcKiNkNF1Dp9TDU+pkGDIh5jRhQuSUx2vqZxgyIGQ0aUIlVMeD6mYYNaJr7fI9ZzzRyQNN8Z33YeqbBA5rmOPcj1zP5cIXpvwJO8D7UwdNZGH0DLW1ag3oWBEREQEQERERARAREREBEBEREQEQERERARAREREBEBEREQEQERERARAREREBEBEREQEQERERARAREREBEBEREQEQERERA/1v/1939YvySgIgI6B7rrBbrZ5WA9ju+D/Xs4wOmDnHoR05J51ACOpJi1uEhjIiAiAiIiICIFAzo+rkz5e6cjZQ7FzYQEQERERCRsgG5DOpB0bNgAxEpHpAl1Fbp+dtARAREpEZAHsVaqTD5ShtIQ/XVmbmHMCL1ArKEaqo27aobSEN11Jxz7YcwDZVWecINroE0VE792ba5iNZQCU2m2uxZmIbm1WqeLZ/Ga2guDSfZ+HUgDeXaznDn2tndhv/80vkbt1ofwvbp4b9fL69E9zCL7dLJxHrZQKtso2N00s1SjwEtyGif3tJZ6DegVcPG1Gc0q7YjoM3s7Dxz8aOn3/9g+Y0/vvryz2++PuYnXvnxp1OPPb7Ofe9dufz7F59O07T77eVHX3xp8c2/f756++KH+275/CefP/Xue4uv797Zu/n2G+se/1Z5AD/e5eEnnlytZ5qm0xcunb5wad/N7nx/5bfPPl58/etbrx+8n0eefe7l735Y/vHmO2/e3ftr5mPdfr08C2NLCYjIg3gNREU2EBEBEREQEQERERARAREREBEBEREQEQERERARAREREBEBEREQEQERERARAREREBEBEREQEQERERARARH5Bzi5+/wvZYeYAAAAAElFTkSuQmCC";
+const TECH_PWA_ICON_512 = "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";
+
+app.get('/tech-workspace/manifest.webmanifest', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.send(JSON.stringify({
+    name: '24H Technician Workspace',
+    short_name: '24H Tech',
+    description: 'Technician jobs, schedule, invoices and work record.',
+    start_url: '/tech-workspace',
+    scope: '/tech-workspace/',
+    display: 'standalone',
+    background_color: '#f3f5f9',
+    theme_color: '#c9342b',
+    orientation: 'portrait-primary',
+    icons: [
+      { src: '/tech-workspace/pwa-icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+      { src: '/tech-workspace/pwa-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+    ]
+  }));
+});
+
+app.get('/tech-workspace/pwa-icon-192.png', (req, res) => {
+  res.setHeader('Content-Type', 'image/png');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(Buffer.from(TECH_PWA_ICON_192, 'base64'));
+});
+
+app.get('/tech-workspace/pwa-icon-512.png', (req, res) => {
+  res.setHeader('Content-Type', 'image/png');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(Buffer.from(TECH_PWA_ICON_512, 'base64'));
+});
+
+app.get('/tech-workspace/service-worker.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Service-Worker-Allowed', '/tech-workspace/');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(`
+    const CACHE = 'tech-workspace-v1';
+    const APP_SHELL = [
+      '/tech-workspace',
+      '/tech-workspace/manifest.webmanifest',
+      '/tech-workspace/pwa-icon-192.png',
+      '/tech-workspace/pwa-icon-512.png'
+    ];
+
+    self.addEventListener('install', event => {
+      event.waitUntil(
+        caches.open(CACHE)
+          .then(cache => cache.addAll(APP_SHELL))
+          .catch(() => null)
+      );
+      self.skipWaiting();
+    });
+
+    self.addEventListener('activate', event => {
+      event.waitUntil(
+        caches.keys().then(keys =>
+          Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))
+        )
+      );
+      self.clients.claim();
+    });
+
+    self.addEventListener('fetch', event => {
+      const request = event.request;
+      if (request.method !== 'GET') return;
+
+      const url = new URL(request.url);
+      if (url.origin !== self.location.origin || !url.pathname.startsWith('/tech-workspace')) return;
+
+      // Technician data is live and sensitive: always prefer the network.
+      // Cached shell is only a fallback if the device temporarily loses connection.
+      event.respondWith(
+        fetch(request)
+          .then(response => {
+            if (response && response.ok && request.mode === 'navigate') {
+              const copy = response.clone();
+              caches.open(CACHE).then(cache => cache.put(request, copy)).catch(() => null);
+            }
+            return response;
+          })
+          .catch(() => caches.match(request).then(hit => hit || caches.match('/tech-workspace')))
+      );
+    });
+  `);
+});
+
 function technicianPortalShell(title, bodyHtml) {
   return `
     <!DOCTYPE html>
     <html>
     <head>
       <title>${escapeHtml(title)}</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+      <meta name="theme-color" content="#c9342b">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="apple-mobile-web-app-status-bar-style" content="default">
+      <meta name="apple-mobile-web-app-title" content="24H Tech">
+      <link rel="manifest" href="/tech-workspace/manifest.webmanifest">
+      <link rel="apple-touch-icon" href="/tech-workspace/pwa-icon-192.png">
+      <link rel="icon" type="image/png" sizes="192x192" href="/tech-workspace/pwa-icon-192.png">
       <style>${technicianWorkspaceStyles()}</style>
     </head>
     <body>
+      <button id="installTechPwaButton" type="button" onclick="installTechnicianPwa()" style="display:none;position:fixed;right:14px;bottom:14px;z-index:50;border:0;border-radius:999px;padding:12px 16px;background:#c9342b;color:#fff;font-weight:900;box-shadow:0 10px 30px rgba(15,23,42,.22);">Install 24H Tech</button>
       ${bodyHtml}
       <script>
+        let technicianInstallPrompt = null;
+
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function () {
+            navigator.serviceWorker.register('/tech-workspace/service-worker.js', { scope: '/tech-workspace/' })
+              .catch(function () {});
+          });
+        }
+
+        window.addEventListener('beforeinstallprompt', function (event) {
+          event.preventDefault();
+          technicianInstallPrompt = event;
+          const button = document.getElementById('installTechPwaButton');
+          if (button) button.style.display = 'inline-flex';
+        });
+
+        window.addEventListener('appinstalled', function () {
+          technicianInstallPrompt = null;
+          const button = document.getElementById('installTechPwaButton');
+          if (button) button.style.display = 'none';
+        });
+
+        async function installTechnicianPwa() {
+          if (!technicianInstallPrompt) return;
+          technicianInstallPrompt.prompt();
+          try { await technicianInstallPrompt.userChoice; } catch (_) {}
+          technicianInstallPrompt = null;
+          const button = document.getElementById('installTechPwaButton');
+          if (button) button.style.display = 'none';
+        }
+
         (function technicianBriefingWatcher(){
           const match = window.location.pathname.match(/^\/tech-workspace\/([^\/]+)/);
           if (!match) return;
