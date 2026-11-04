@@ -1,4 +1,4 @@
-// YDP Unified master + technician workspace PWA (v164)
+// YDP Unified master + clearer technician partial-payment briefing (v165)
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -16437,7 +16437,7 @@ app.get('/tech-workspace/:token', async (req, res) => {
       `<div class="brief-line red"><strong>${jobs.length} active job${jobs.length === 1 ? '' : 's'}</strong> assigned to you.</div>`,
       openDisputes.length ? `<div class="brief-line red"><strong>${openDisputes.length} open dispute${openDisputes.length === 1 ? '' : 's'}</strong> linked to your name.</div>` : "",
       `<div class="brief-line">Remember to press <strong>On site</strong> when you arrive.</div>`,
-      `<div class="brief-line green">Close jobs with final value, payment method and materials used.</div>`
+      `<div class="brief-line green">When closing a job, enter <strong>only the payment actually taken</strong>. If any balance is still unpaid, leave it as <strong>Billing</strong> for the office to follow up.</div>`
     ].join('');
 
     const jobCards = jobs.map(job => {
